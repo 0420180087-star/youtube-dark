@@ -25,10 +25,8 @@ export const Settings: React.FC = () => {
     useEffect(() => {
         // Check for environment keys
         // Direct access allows Vite's 'define' to replace these strings during build
-        // @ts-ignore
-        const k1 = process.env.GEMINI_API_KEY;
-        // @ts-ignore
-        const k2 = process.env.API_KEY;
+        const k1 = import.meta.env.VITE_GEMINI_API_KEY;
+        const k2 = import.meta.env.VITE_API_KEY;
         const envKey = (k1 && k1.length > 20) || (k2 && k2.length > 20);
         setHasEnvKey(!!envKey);
 
