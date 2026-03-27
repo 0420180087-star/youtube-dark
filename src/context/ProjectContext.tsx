@@ -162,7 +162,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
           const currentTimeValue = currentHour * 60 + currentMinutes;
 
           // Find a project that needs a video
-          const eligibleProject = projects.find(p => {
+          const eligibleProject = projectsRef.current.find(p => {
               if (!p.scheduleSettings?.autoGenerate) return false;
               if (!p.isYoutubeConnected) return false; // Must be connected
 
