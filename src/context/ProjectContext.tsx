@@ -221,6 +221,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       isRunningAutomation.current = true;
       setAutoPilotStatus(`Starting Auto-Pilot for: ${project.title}`);
+      addLogEntry({ projectId: project.id, projectTitle: project.title, status: 'running', message: 'Auto-pilot pipeline started' });
 
       try {
           // 1. Generate Idea
