@@ -467,11 +467,12 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   return (
     <ProjectContext.Provider value={{ 
-      projects, isLoading, autoPilotStatus,
+      projects, isLoading, autoPilotStatus, autoPilotLog,
       addProject, updateProject, getProject, deleteProject, 
       saveGeneratedIdeas, updateIdeaStatus, markIdeaAsUsed, removeIdeaFromHistory,
       addLibraryItem, deleteLibraryItem,
-      addVideo, updateVideo, deleteVideo, getVideo
+      addVideo, updateVideo, deleteVideo, getVideo,
+      triggerAutoPilotNow, getNextAutoRunInfo
     }}>
       {children}
     </ProjectContext.Provider>
