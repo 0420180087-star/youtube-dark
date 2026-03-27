@@ -72,9 +72,11 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [projects, setProjects] = useState<Project[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [autoPilotStatus, setAutoPilotStatus] = useState<string>('Idle');
+  const [autoPilotLog, setAutoPilotLog] = useState<AutoPilotLogEntry[]>([]);
   
   const automationInterval = useRef<number | null>(null);
   const isRunningAutomation = useRef(false);
+  const projectsRef = useRef(projects);
 
   const storageKey = user?.email ? `darkstream_projects_${user.email}` : 'darkstream_projects_guest';
 
