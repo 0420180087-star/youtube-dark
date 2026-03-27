@@ -348,10 +348,12 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
           updateVideo(project.id, video.id, { status: ProjectStatus.PUBLISHED, youtubeUrl: `https://youtu.be/${ytbId}` });
           setAutoPilotStatus("Auto-Pilot Complete!");
+          addLogEntry({ projectId: project.id, projectTitle: project.title, videoTitle: video.title, status: 'success', message: `Video published: ${video.title}` });
 
       } catch (e: any) {
           console.error("Auto-Pilot Failed", e);
           setAutoPilotStatus(`Auto-Pilot Error: ${e.message}`);
+          addLogEntry({ projectId: project.id, projectTitle: project.title, status: 'error', message: e.message });
       } finally {
           isRunningAutomation.current = false;
           setTimeout(() => setAutoPilotStatus("Idle"), 5000);
