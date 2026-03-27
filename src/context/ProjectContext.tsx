@@ -48,6 +48,19 @@ interface ProjectContextType {
 
   // Automation Status
   autoPilotStatus: string;
+  autoPilotLog: AutoPilotLogEntry[];
+  triggerAutoPilotNow: (projectId: string) => void;
+  getNextAutoRunInfo: (projectId: string) => { nextRunDate: Date | null; isEligible: boolean };
+}
+
+export interface AutoPilotLogEntry {
+  id: string;
+  projectId: string;
+  projectTitle: string;
+  videoTitle?: string;
+  status: 'running' | 'success' | 'error' | 'retrying';
+  message: string;
+  timestamp: string;
 }
 
 const ProjectContext = createContext<ProjectContextType | undefined>(undefined);
@@ -59,9 +72,11 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [projects, setProjects] = useState<Project[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [autoPilotStatus, setAutoPilotStatus] = useState<string>('Idle');
+  const [autoPilotLog, setAutoPilotLog] = useState<AutoPilotLogEntry[]>([]);
   
   const automationInterval = useRef<number | null>(null);
   const isRunningAutomation = useRef(false);
+  const projectsRef = useRef(projects);
 
   const storageKey = user?.email ? `darkstream_projects_${user.email}` : 'darkstream_projects_guest';
 
@@ -79,12 +94,58 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     loadProjects();
   }, [storageKey]);
 
+  // Keep ref in sync
+  useEffect(() => { projectsRef.current = projects; }, [projects]);
+
   // Save projects
   useEffect(() => {
     if (!isLoading) {
       set(storageKey, projects).catch(e => console.error("Failed to save projects", e));
     }
   }, [projects, isLoading, storageKey]);
+
+  const addLogEntry = (entry: Omit<AutoPilotLogEntry, 'id' | 'timestamp'>) => {
+    setAutoPilotLog(prev => [{
+      ...entry, id: crypto.randomUUID(), timestamp: new Date().toISOString()
+    }, ...prev].slice(0, 50)); // keep last 50
+  };
+
+  const getNextAutoRunInfo = (projectId: string): { nextRunDate: Date | null; isEligible: boolean } => {
+    const project = projects.find(p => p.id === projectId);
+    if (!project?.scheduleSettings?.autoGenerate) return { nextRunDate: null, isEligible: false };
+    
+    const freq = project.scheduleSettings.frequencyDays || 1;
+    const sortedVideos = [...project.videos].sort((a, b) => 
+      new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+    const lastVideo = sortedVideos[0];
+    
+    if (!lastVideo) {
+      // Next run is today at start of time window
+      const [h, m] = project.scheduleSettings.timeWindowStart.split(':').map(Number);
+      const next = new Date(); next.setHours(h, m, 0, 0);
+      if (next < new Date()) next.setDate(next.getDate() + 1);
+      return { nextRunDate: next, isEligible: true };
+    }
+    
+    const lastDate = new Date(lastVideo.createdAt);
+    const nextDate = new Date(lastDate);
+    nextDate.setDate(nextDate.getDate() + freq);
+    const [h, m] = project.scheduleSettings.timeWindowStart.split(':').map(Number);
+    nextDate.setHours(h, m, 0, 0);
+    
+    return { nextRunDate: nextDate, isEligible: nextDate <= new Date() };
+  };
+
+  const triggerAutoPilotNow = (projectId: string) => {
+    const project = projects.find(p => p.id === projectId);
+    if (!project) return;
+    if (isRunningAutomation.current) {
+      setAutoPilotStatus("Already running...");
+      return;
+    }
+    runFullAutomationPipeline(project);
+  };
 
 
   // --- AUTO-PILOT ENGINE ---
@@ -101,7 +162,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
           const currentTimeValue = currentHour * 60 + currentMinutes;
 
           // Find a project that needs a video
-          const eligibleProject = projects.find(p => {
+          const eligibleProject = projectsRef.current.find(p => {
               if (!p.scheduleSettings?.autoGenerate) return false;
               if (!p.isYoutubeConnected) return false; // Must be connected
 
@@ -160,6 +221,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       isRunningAutomation.current = true;
       setAutoPilotStatus(`Starting Auto-Pilot for: ${project.title}`);
+      addLogEntry({ projectId: project.id, projectTitle: project.title, status: 'running', message: 'Auto-pilot pipeline started' });
 
       try {
           // 1. Generate Idea
@@ -287,10 +349,12 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
           updateVideo(project.id, video.id, { status: ProjectStatus.PUBLISHED, youtubeUrl: `https://youtu.be/${ytbId}` });
           setAutoPilotStatus("Auto-Pilot Complete!");
+          addLogEntry({ projectId: project.id, projectTitle: project.title, videoTitle: video.title, status: 'success', message: `Video published: ${video.title}` });
 
       } catch (e: any) {
           console.error("Auto-Pilot Failed", e);
           setAutoPilotStatus(`Auto-Pilot Error: ${e.message}`);
+          addLogEntry({ projectId: project.id, projectTitle: project.title, status: 'error', message: e.message });
       } finally {
           isRunningAutomation.current = false;
           setTimeout(() => setAutoPilotStatus("Idle"), 5000);
@@ -406,11 +470,12 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   return (
     <ProjectContext.Provider value={{ 
-      projects, isLoading, autoPilotStatus,
+      projects, isLoading, autoPilotStatus, autoPilotLog,
       addProject, updateProject, getProject, deleteProject, 
       saveGeneratedIdeas, updateIdeaStatus, markIdeaAsUsed, removeIdeaFromHistory,
       addLibraryItem, deleteLibraryItem,
-      addVideo, updateVideo, deleteVideo, getVideo
+      addVideo, updateVideo, deleteVideo, getVideo,
+      triggerAutoPilotNow, getNextAutoRunInfo
     }}>
       {children}
     </ProjectContext.Provider>
