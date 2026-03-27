@@ -94,12 +94,58 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     loadProjects();
   }, [storageKey]);
 
+  // Keep ref in sync
+  useEffect(() => { projectsRef.current = projects; }, [projects]);
+
   // Save projects
   useEffect(() => {
     if (!isLoading) {
       set(storageKey, projects).catch(e => console.error("Failed to save projects", e));
     }
   }, [projects, isLoading, storageKey]);
+
+  const addLogEntry = (entry: Omit<AutoPilotLogEntry, 'id' | 'timestamp'>) => {
+    setAutoPilotLog(prev => [{
+      ...entry, id: crypto.randomUUID(), timestamp: new Date().toISOString()
+    }, ...prev].slice(0, 50)); // keep last 50
+  };
+
+  const getNextAutoRunInfo = (projectId: string): { nextRunDate: Date | null; isEligible: boolean } => {
+    const project = projects.find(p => p.id === projectId);
+    if (!project?.scheduleSettings?.autoGenerate) return { nextRunDate: null, isEligible: false };
+    
+    const freq = project.scheduleSettings.frequencyDays || 1;
+    const sortedVideos = [...project.videos].sort((a, b) => 
+      new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+    const lastVideo = sortedVideos[0];
+    
+    if (!lastVideo) {
+      // Next run is today at start of time window
+      const [h, m] = project.scheduleSettings.timeWindowStart.split(':').map(Number);
+      const next = new Date(); next.setHours(h, m, 0, 0);
+      if (next < new Date()) next.setDate(next.getDate() + 1);
+      return { nextRunDate: next, isEligible: true };
+    }
+    
+    const lastDate = new Date(lastVideo.createdAt);
+    const nextDate = new Date(lastDate);
+    nextDate.setDate(nextDate.getDate() + freq);
+    const [h, m] = project.scheduleSettings.timeWindowStart.split(':').map(Number);
+    nextDate.setHours(h, m, 0, 0);
+    
+    return { nextRunDate: nextDate, isEligible: nextDate <= new Date() };
+  };
+
+  const triggerAutoPilotNow = (projectId: string) => {
+    const project = projects.find(p => p.id === projectId);
+    if (!project) return;
+    if (isRunningAutomation.current) {
+      setAutoPilotStatus("Already running...");
+      return;
+    }
+    runFullAutomationPipeline(project);
+  };
 
 
   // --- AUTO-PILOT ENGINE ---
