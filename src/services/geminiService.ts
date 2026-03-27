@@ -158,12 +158,42 @@ const getAllAvailableKeys = async (): Promise<string[]> => {
 
 // --- KEY MANAGEMENT STATE ---
 let lastUsedKeyIndex = parseInt(localStorage.getItem('ds_last_key_index') || '0');
-const exhaustedKeys = new Map<string, { expiration: number; reason: 'quota' | 'auth' | 'error'; retryAfterMs?: number }>();
+
+interface ExhaustedKeyInfo {
+    expiration: number;
+    reason: 'quota_rpm' | 'quota_rpd' | 'auth' | 'error';
+    retryAfterMs: number;
+}
+
+const exhaustedKeys = new Map<string, ExhaustedKeyInfo>();
 
 /**
- * FIX #3: Enhanced key status with remaining cooldown time.
+ * Classify quota error type: RPM (per-minute, short cooldown) vs RPD (per-day, long cooldown)
  */
-export const getKeyStatus = (key: string): { status: 'ready' | 'exhausted'; reason?: 'quota' | 'auth' | 'error'; remainingMs?: number } => {
+const classifyQuotaType = (err: any): 'quota_rpm' | 'quota_rpd' => {
+    const msg = (err?.message || err?.toString() || '').toLowerCase();
+    const reason = (err?.error?.details?.[0]?.reason || '').toLowerCase();
+    
+    if (msg.includes('per-day') || msg.includes('rpd') || msg.includes('daily') || reason.includes('daily')) {
+        return 'quota_rpd';
+    }
+    return 'quota_rpm';
+};
+
+/**
+ * Get cooldown duration based on quota type
+ */
+const getCooldownMs = (err: any, quotaType: 'quota_rpm' | 'quota_rpd'): number => {
+    // First check if the API tells us how long to wait
+    const apiRetry = getRetryAfterMs(err, 0);
+    if (apiRetry > 0) return apiRetry;
+    
+    // Defaults based on type
+    if (quotaType === 'quota_rpd') return 60 * 60 * 1000; // 1 hour for daily limits
+    return 65 * 1000; // 65 seconds for per-minute limits
+};
+
+export const getKeyStatus = (key: string): { status: 'ready' | 'exhausted'; reason?: string; remainingMs?: number } => {
     const trimmedKey = (key || '').trim();
     const info = exhaustedKeys.get(trimmedKey);
     if (!info) return { status: 'ready' };
@@ -177,12 +207,9 @@ export const getKeyStatus = (key: string): { status: 'ready' | 'exhausted'; reas
 
 export const clearExhaustedKeys = () => {
     exhaustedKeys.clear();
-    console.log("[DarkStream AI] Status das chaves resetado manualmente.");
+    console.log("[DarkStream AI] ✅ Status de todas as chaves resetado.");
 };
 
-/**
- * FIX #4: Get a summary of all key statuses for UI display.
- */
 export const getKeysStatusSummary = async (): Promise<{ total: number; ready: number; exhausted: number; details: Array<{ masked: string; status: string; reason?: string; remainingMs?: number }> }> => {
     const allKeys = await getAllAvailableKeys();
     const details = allKeys.map(k => {
@@ -218,7 +245,10 @@ const processQueue = async () => {
         } catch (err) {
             reject(err);
         }
-        await delay(500);
+        // Dynamic delay: less keys = more spacing to avoid hitting limits
+        const keyCount = (await getAllAvailableKeys()).length || 1;
+        const baseDelay = Math.max(300, 1500 / keyCount);
+        await delay(baseDelay);
     }
     
     isProcessingQueue = false;
@@ -234,126 +264,155 @@ const executeGeminiRequest = async <T>(
 };
 
 /**
- * FIX #5: Improved key rotation with better error classification and retry-after support.
+ * IMPROVED KEY ROTATION ENGINE
+ * 
+ * Strategy:
+ * 1. Round-robin across all available keys
+ * 2. On quota error: classify as RPM or RPD, set appropriate cooldown
+ * 3. Skip exhausted keys (unless all are exhausted)
+ * 4. If ALL keys exhausted: auto-wait for the shortest cooldown, then retry
+ * 5. Up to 2 full rotation cycles before giving up
  */
 const executeGeminiRequestInternal = async <T>(
-    operation: (ai: GoogleGenAI) => Promise<T>
+    operation: (ai: GoogleGenAI) => Promise<T>,
+    _rotationAttempt: number = 0
 ): Promise<T> => {
+    const MAX_ROTATION_CYCLES = 2;
+    
     const allKeys = await getAllAvailableKeys();
     
     if (allKeys.length === 0) {
         throw new Error("Nenhuma chave API encontrada. Vá em Configurações e adicione suas chaves do Google AI Studio.");
     }
 
-    const startIndex = lastUsedKeyIndex % allKeys.length;
-    lastUsedKeyIndex = (lastUsedKeyIndex + 1) % 1000000;
-    localStorage.setItem('ds_last_key_index', lastUsedKeyIndex.toString());
+    // Clean up expired cooldowns
+    for (const [key, info] of exhaustedKeys.entries()) {
+        if (info.expiration <= Date.now()) exhaustedKeys.delete(key);
+    }
 
-    let lastError: any = null;
-    let allKeysExhausted = true;
+    // Separate ready and exhausted keys
+    const readyKeys = allKeys.filter(k => getKeyStatus(k).status === 'ready');
+    
+    // If ALL keys are exhausted, wait for the shortest cooldown and retry
+    if (readyKeys.length === 0) {
+        if (_rotationAttempt >= MAX_ROTATION_CYCLES) {
+            const summary = allKeys.map(k => {
+                const s = getKeyStatus(k);
+                const masked = k.length > 8 ? `...${k.slice(-6)}` : '***';
+                return `${masked}: ${s.reason} (${Math.ceil((s.remainingMs || 0) / 1000)}s)`;
+            }).join(', ');
+            throw new Error(`[DarkStream AI] ⚠️ Todas as ${allKeys.length} chaves estão em cooldown. Status: ${summary}. Adicione mais chaves em Configurações.`);
+        }
 
-    for (let i = 0; i < allKeys.length; i++) {
-        const currentIndex = (startIndex + i) % allKeys.length;
-        const currentKey = allKeys[currentIndex];
-        
-        const status = getKeyStatus(currentKey);
-        
-        if (status.status === 'exhausted' && i < allKeys.length - 1) {
-            continue;
+        // Find shortest wait time
+        let minWait = Infinity;
+        for (const [, info] of exhaustedKeys.entries()) {
+            const remaining = info.expiration - Date.now();
+            if (remaining > 0 && remaining < minWait) minWait = remaining;
         }
         
-        allKeysExhausted = false;
+        // Only auto-wait for RPM limits (short waits). For RPD, throw immediately.
+        if (minWait > 5 * 60 * 1000) { // More than 5 minutes = likely daily limit
+            throw new Error(`[DarkStream AI] ⚠️ Todas as ${allKeys.length} chaves atingiram o limite diário. Adicione mais chaves ou aguarde o reset.`);
+        }
+
+        const waitSec = Math.ceil(minWait / 1000);
+        console.log(`[DarkStream AI] ⏳ Todas as ${allKeys.length} chaves em cooldown. Aguardando ${waitSec}s para a próxima disponível...`);
+        await delay(minWait + 1000); // Wait + 1s buffer
+        
+        return executeGeminiRequestInternal(operation, _rotationAttempt + 1);
+    }
+
+    // Round-robin starting from last used index
+    const startIndex = lastUsedKeyIndex % readyKeys.length;
+    
+    let lastError: any = null;
+
+    for (let i = 0; i < readyKeys.length; i++) {
+        const currentIndex = (startIndex + i) % readyKeys.length;
+        const currentKey = readyKeys[currentIndex];
+        
+        // Update round-robin index
+        lastUsedKeyIndex = (allKeys.indexOf(currentKey) + 1) % allKeys.length;
+        localStorage.setItem('ds_last_key_index', lastUsedKeyIndex.toString());
 
         const masked = currentKey.length > 8 ? `...${currentKey.slice(-6)}` : '***';
-        console.log(`[DarkStream AI] 🔄 [Tentativa ${i + 1}/${allKeys.length}] Usando Chave: ${masked} (Index: ${currentIndex})`);
+        console.log(`[DarkStream AI] 🔄 Chave ${masked} [${i + 1}/${readyKeys.length} disponíveis, ${allKeys.length} total]`);
 
         try {
             const ai = new GoogleGenAI({ apiKey: currentKey });
             
+            // Try with 1 inline retry for transient rate limits
             let attempt = 0;
-            const maxAttempts = 2;
-            let result: T;
-            
             while (true) {
                 try {
-                    result = await operation(ai);
-                    break;
+                    const result = await operation(ai);
+                    console.log(`[DarkStream AI] ✅ Sucesso com chave ${masked}`);
+                    return result;
                 } catch (innerErr: any) {
                     attempt++;
-                    const isQuota = isQuotaError(innerErr);
-                    
-                    if (attempt < maxAttempts && isQuota) {
-                        const waitTime = getRetryAfterMs(innerErr, 2000 * attempt);
-                        console.log(`[DarkStream AI] ⏳ Rate limit atingido na chave ${masked}. Aguardando ${waitTime/1000}s para re-tentativa #${attempt}...`);
+                    if (attempt < 2 && isQuotaError(innerErr)) {
+                        const waitTime = getRetryAfterMs(innerErr, 3000);
+                        console.log(`[DarkStream AI] ⏳ Rate limit na chave ${masked}. Retry rápido em ${waitTime/1000}s...`);
                         await delay(waitTime);
                         continue;
                     }
                     throw innerErr;
                 }
             }
-            
-            console.log(`[DarkStream AI] ✅ Sucesso com Chave ${masked}`);
-            return result;
 
         } catch (err: any) {
             lastError = err;
-            const isQuota = isQuotaError(err);
             const errMsg = (err.message || '').toLowerCase();
             const errStatus = err.status || err.response?.status || 0;
 
-            const isAuthError = 
-                (errStatus === 400 || errStatus === 401 || errStatus === 403 || errStatus === 404) &&
-                (errMsg.includes('key') || errMsg.includes('invalid') || errMsg.includes('permission') || errMsg.includes('credential') || errMsg.includes('not found') || errMsg.includes('not available'));
-
-            if (isQuota || isAuthError) {
-                const reason = isQuota ? "quota" : "auth";
-                const cooldown = isQuota ? getRetryAfterMs(err, 60000) : 60000;
+            if (isQuotaError(err)) {
+                const quotaType = classifyQuotaType(err);
+                const cooldown = getCooldownMs(err, quotaType);
                 
                 exhaustedKeys.set(currentKey, { 
                     expiration: Date.now() + cooldown, 
-                    reason,
+                    reason: quotaType,
                     retryAfterMs: cooldown
                 });
-
-                console.warn(`[DarkStream AI] ⚠️ Chave ${masked} marcada como ${reason} (cooldown: ${Math.round(cooldown/1000)}s)`);
-
-                if (i < allKeys.length - 1) {
-                    await delay(1000); 
-                    continue; 
-                }
-            } else {
-                exhaustedKeys.set(currentKey, { 
-                    expiration: Date.now() + 60 * 1000,
-                    reason: 'error' 
-                });
-
-                if (i < allKeys.length - 1) continue;
-                throw err;
+                
+                const cooldownStr = cooldown >= 60000 ? `${Math.round(cooldown/60000)}min` : `${Math.round(cooldown/1000)}s`;
+                console.warn(`[DarkStream AI] ⚠️ Chave ${masked} → ${quotaType} (cooldown: ${cooldownStr}). Rotacionando...`);
+                continue;
             }
+
+            const isAuthError = 
+                (errStatus === 400 || errStatus === 401 || errStatus === 403) &&
+                (errMsg.includes('key') || errMsg.includes('invalid') || errMsg.includes('permission') || errMsg.includes('credential'));
+
+            if (isAuthError) {
+                exhaustedKeys.set(currentKey, { 
+                    expiration: Date.now() + 10 * 60 * 1000, // 10 min cooldown for auth errors
+                    reason: 'auth',
+                    retryAfterMs: 10 * 60 * 1000
+                });
+                console.warn(`[DarkStream AI] 🔑 Chave ${masked} → erro de autenticação. Rotacionando...`);
+                continue;
+            }
+
+            // Unknown error - mark temporarily and continue
+            exhaustedKeys.set(currentKey, { 
+                expiration: Date.now() + 30 * 1000,
+                reason: 'error',
+                retryAfterMs: 30000
+            });
+            console.warn(`[DarkStream AI] ❌ Chave ${masked} → erro: ${err.message}. Rotacionando...`);
+            continue;
         }
     }
 
-    // FIX #6: Better error messages when all keys fail
-    const isLastQuota = isQuotaError(lastError);
-    
-    if (allKeysExhausted || isLastQuota) {
-        // Find the shortest remaining cooldown
-        let minCooldown = Infinity;
-        exhaustedKeys.forEach((info) => {
-            const remaining = info.expiration - Date.now();
-            if (remaining > 0 && remaining < minCooldown) minCooldown = remaining;
-        });
-        
-        const waitTimeStr = minCooldown < Infinity ? `Tente novamente em ${Math.ceil(minCooldown / 1000)} segundos.` : 'Aguarde 1 minuto e tente novamente.';
-        
-        const helpMsg = allKeys.length > 1 
-            ? `⚠️ Limite de cota atingido em TODAS as ${allKeys.length} chaves. ${waitTimeStr} Dica: Adicione mais chaves em Configurações para aumentar sua capacidade.`
-            : `⚠️ Limite de cota atingido. A API do Google possui limites estritos (ex: 15 imagens/minuto na camada gratuita). ${waitTimeStr}`;
-        
-        throw new Error(`[DarkStream AI] ${helpMsg}`);
+    // All ready keys failed in this cycle - recurse to trigger auto-wait logic
+    if (_rotationAttempt < MAX_ROTATION_CYCLES) {
+        console.log(`[DarkStream AI] 🔄 Ciclo de rotação ${_rotationAttempt + 1} completo. Iniciando novo ciclo...`);
+        return executeGeminiRequestInternal(operation, _rotationAttempt + 1);
     }
 
-    throw new Error(`[DarkStream AI] Erro na comunicação: ${lastError?.message || 'Falha ao processar requisição'}`);
+    throw new Error(`[DarkStream AI] ⚠️ Todas as chaves falharam após ${MAX_ROTATION_CYCLES} ciclos. Último erro: ${lastError?.message || 'Desconhecido'}`);
 };
 
 // Robust JSON repair function
