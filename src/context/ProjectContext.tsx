@@ -48,6 +48,19 @@ interface ProjectContextType {
 
   // Automation Status
   autoPilotStatus: string;
+  autoPilotLog: AutoPilotLogEntry[];
+  triggerAutoPilotNow: (projectId: string) => void;
+  getNextAutoRunInfo: (projectId: string) => { nextRunDate: Date | null; isEligible: boolean };
+}
+
+export interface AutoPilotLogEntry {
+  id: string;
+  projectId: string;
+  projectTitle: string;
+  videoTitle?: string;
+  status: 'running' | 'success' | 'error' | 'retrying';
+  message: string;
+  timestamp: string;
 }
 
 const ProjectContext = createContext<ProjectContextType | undefined>(undefined);
