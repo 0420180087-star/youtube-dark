@@ -1079,7 +1079,7 @@ export const ProjectEditor: React.FC = () => {
               const pexelsChance = isDocumentary ? 0.7 : 0.4;
 
               if (Math.random() < pexelsChance) {
-                  const keywords = await generatePexelsKeywords(prompt);
+                  const keywords = await generatePexelsKeywords(prompt, video!.title, project?.channelTheme);
                   const videos = await searchStockVideos(keywords, scriptTone, video!.format || 'Landscape 16:9');
                   if (videos.length > 0) {
                       const randomIndex = Math.floor(Math.random() * Math.min(3, videos.length));

@@ -299,7 +299,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
                   if (Math.random() < pexelsChance) {
                       try {
-                          const keywords = await generatePexelsKeywords(prompt);
+                          const keywords = await generatePexelsKeywords(prompt, video.title, project.channelTheme);
                           const videos = await searchStockVideos(keywords, project.defaultTone, project.defaultFormat);
                           if (videos.length > 0) {
                               const bestVideo = videos[0];
