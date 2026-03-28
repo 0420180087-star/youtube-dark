@@ -983,34 +983,48 @@ export const searchStockVideos = async (queries: string | string[], tone: string
 
     let keywordList = Array.isArray(queries) ? queries : [queries];
     const orientation = format.toLowerCase().includes('portrait') ? 'portrait' : 'landscape';
+    const minWidth = orientation === 'portrait' ? 720 : 1280;
     const allVideos: StockVideo[] = [];
     const seenIds = new Set<number>();
-    const limitedKeywords = keywordList.slice(0, 5);
+    const limitedKeywords = keywordList.slice(0, 6);
 
     for (const kw of limitedKeywords) {
         try {
-            const response = await fetch(`https://api.pexels.com/videos/search?query=${encodeURIComponent(kw)}&per_page=5&orientation=${orientation}&min_duration=5`, {
-                headers: { Authorization: apiKey }
-            });
+            // Search with more results and better filtering
+            const response = await fetch(
+                `https://api.pexels.com/videos/search?query=${encodeURIComponent(kw)}&per_page=10&orientation=${orientation}&min_duration=5&max_duration=30&size=medium`, 
+                { headers: { Authorization: apiKey } }
+            );
             if (response.ok) {
                 const data = await response.json();
                 if (data.videos) {
                     for (const video of data.videos) {
-                        if (!seenIds.has(video.id)) {
-                            seenIds.add(video.id);
-                            const sortedFiles = [...video.video_files].sort((a: any, b: any) => (b.width || 0) - (a.width || 0));
-                            const file = sortedFiles[0];
-                            if (file) allVideos.push({ videoUrl: file.link, thumbnailUrl: video.image });
+                        if (seenIds.has(video.id)) continue;
+                        seenIds.add(video.id);
+                        
+                        // Pick the best quality file that's not excessively large
+                        const validFiles = (video.video_files || [])
+                            .filter((f: any) => f.width >= minWidth && f.quality === 'hd')
+                            .sort((a: any, b: any) => (a.width || 0) - (b.width || 0)); // prefer smaller HD
+                        
+                        const file = validFiles[0] || video.video_files?.[0];
+                        if (file) {
+                            allVideos.push({ videoUrl: file.link, thumbnailUrl: video.image });
                         }
                     }
                 }
             }
-            await delay(200);
+            await delay(250);
         } catch (err) {
-            console.error(`Error searching Pexels for "${kw}":`, err);
+            console.error(`Pexels search failed for "${kw}":`, err);
         }
+        
+        // If we already have enough variety, stop early
+        if (allVideos.length >= 15) break;
     }
-    return allVideos;
+    
+    // Shuffle to add variety when picking from results
+    return allVideos.sort(() => Math.random() - 0.5);
 };
 
 // --- THUMBNAIL ---
