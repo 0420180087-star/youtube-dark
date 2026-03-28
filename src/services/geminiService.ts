@@ -1073,50 +1073,40 @@ export const generateSceneImage = async (prompt: string, tone: string = 'Cinemat
     let lastImgErr: any = null;
 
     for (const modelName of modelsToTry) {
-        let attempt = 0;
-        const maxAttempts = 3;
-        
-        while (attempt < maxAttempts) {
-            try {
-                console.log(`[DarkStream AI] 🎨 Gerando imagem: ${modelName} (Tentativa ${attempt + 1})`);
-                const response = await ai.models.generateContent({
-                    model: modelName,
-                    contents: { parts: [{ text: promptText }] },
-                    config: { 
-                        responseModalities: [Modality.IMAGE, Modality.TEXT],
-                        safetySettings: [
-                            { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-                            { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-                            { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-                            { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH }
-                        ]
-                    }
-                });
-                return response;
-            } catch (err: any) {
-                lastImgErr = err;
-                
-                if (isQuotaError(err)) {
-                    attempt++;
-                    if (attempt < maxAttempts) {
-                        const waitTime = getRetryAfterMs(err, 3000 * attempt);
-                        console.warn(`[DarkStream AI] ⏳ Rate limit: ${modelName}. Aguardando ${waitTime/1000}s...`);
-                        await delay(waitTime);
-                        continue;
-                    }
-                    console.warn(`[DarkStream AI] ⚠️ Cota esgotada: ${modelName} após ${maxAttempts} tentativas.`);
-                    break;
+        try {
+            console.log(`[DarkStream AI] 🎨 Gerando imagem: ${modelName}`);
+            const response = await ai.models.generateContent({
+                model: modelName,
+                contents: { parts: [{ text: promptText }] },
+                config: { 
+                    responseModalities: [Modality.IMAGE, Modality.TEXT],
+                    safetySettings: [
+                        { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                        { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                        { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                        { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH }
+                    ]
                 }
-                
-                const msg = (err.message || '').toLowerCase();
-                if (msg.includes('not found') || msg.includes('404')) {
-                    console.warn(`[DarkStream AI] Modelo ${modelName} indisponível. Tentando fallback...`);
-                    break;
-                }
-                
-                console.warn(`[DarkStream AI] Erro: ${modelName}: ${err.message}. Tentando fallback...`);
-                break;
+            });
+            return response;
+        } catch (err: any) {
+            lastImgErr = err;
+            
+            // CRITICAL FIX: Do NOT retry quota errors here - let them bubble up
+            // to executeGeminiRequestInternal for proper key rotation
+            if (isQuotaError(err)) {
+                console.warn(`[DarkStream AI] ⚠️ Quota atingida em ${modelName}. Delegando rotação de chave...`);
+                throw err;
             }
+            
+            const msg = (err.message || '').toLowerCase();
+            if (msg.includes('not found') || msg.includes('404')) {
+                console.warn(`[DarkStream AI] Modelo ${modelName} indisponível. Tentando fallback...`);
+                continue;
+            }
+            
+            console.warn(`[DarkStream AI] Erro: ${modelName}: ${err.message}. Tentando fallback...`);
+            continue;
         }
     }
     throw lastImgErr;
