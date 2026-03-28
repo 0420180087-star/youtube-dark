@@ -174,9 +174,16 @@ const classifyQuotaType = (err: any): 'quota_rpm' | 'quota_rpd' => {
     const msg = (err?.message || err?.toString() || '').toLowerCase();
     const reason = (err?.error?.details?.[0]?.reason || '').toLowerCase();
     
-    if (msg.includes('per-day') || msg.includes('rpd') || msg.includes('daily') || reason.includes('daily')) {
+    // Only classify as RPD if the error EXPLICITLY mentions daily/per-day limits
+    const isDailyExplicit = 
+        msg.includes('per-day') || msg.includes('per_day') || 
+        msg.includes('rpd') || 
+        reason.includes('daily') || reason.includes('per_day');
+    
+    if (isDailyExplicit) {
         return 'quota_rpd';
     }
+    // Default to RPM (short cooldown) - much safer to avoid false daily limit errors
     return 'quota_rpm';
 };
 
