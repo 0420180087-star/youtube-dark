@@ -502,7 +502,7 @@ export const ProjectEditor: React.FC = () => {
                   const pexelsChance = (project?.visualSourceMix?.pexelsPercentage || 50) / 100;
 
                   if (Math.random() < pexelsChance) {
-                      const keywords = await generatePexelsKeywords(prompt);
+                      const keywords = await generatePexelsKeywords(prompt, video!.title, project?.channelTheme);
                       const videos = await searchStockVideos(keywords, scriptTone, video!.format || 'Landscape 16:9');
                       if (videos.length > 0) {
                           // Pick a random video from the top 3 to avoid duplicates in the same project
