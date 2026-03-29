@@ -1048,11 +1048,10 @@ export const generateThumbnailHook = async (title: string, tone: string = 'Viral
  * The error is now always properly classified so the UI can show the right message.
  */
 export const generateThumbnail = async (topic: string, tone: string = 'Cinematic', style: string = 'dynamic'): Promise<string> => {
-    const prompt = `Viral, high-CTR thumbnail for: "${topic}". Tone: ${tone}. 
-    COMPOSITION: Leave left 45% clean for text. Subject on right 55%.
-    LIGHTING: Professional cinematic. NO TEXT IN IMAGE. Photorealistic, 8k.`;
+    // Simple, safe prompt to avoid content safety filters
+    const prompt = `A simple, clean background image with soft gradient colors. Abstract and minimal. No text, no people, no faces. Just a calm, professional colored background suitable for a video thumbnail. Colors should feel ${tone.toLowerCase().includes('dark') ? 'dark blue and purple' : 'warm and inviting'}.`;
     
-    return await generateSceneImage(prompt, tone);
+    return await generateSceneImage(prompt, 'Cinematic');
 };
 
 /**
