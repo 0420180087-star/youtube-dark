@@ -1044,14 +1044,73 @@ export const generateThumbnailHook = async (title: string, tone: string = 'Viral
 };
 
 /**
- * FIX #7: Improved thumbnail generation with explicit quota error detection and propagation.
- * The error is now always properly classified so the UI can show the right message.
+ * Generates a YouTube thumbnail background image.
+ * Uses a canvas fallback if the AI generation fails for any reason,
+ * ensuring the pipeline is never blocked by thumbnail issues.
  */
 export const generateThumbnail = async (topic: string, tone: string = 'Cinematic', style: string = 'dynamic'): Promise<string> => {
-    // Simple, safe prompt to avoid content safety filters
-    const prompt = `A simple, clean background image with soft gradient colors. Abstract and minimal. No text, no people, no faces. Just a calm, professional colored background suitable for a video thumbnail. Colors should feel ${tone.toLowerCase().includes('dark') ? 'dark blue and purple' : 'warm and inviting'}.`;
+    // Try AI generation first
+    try {
+        const isDark = tone.toLowerCase().includes('dark') || tone.toLowerCase().includes('horror') || tone.toLowerCase().includes('suspens');
+        const colorTheme = isDark ? 'deep dark blue, black, and purple tones' : 'warm orange, gold, and red tones';
+        
+        const prompt = `Abstract gradient background, smooth color transition, ${colorTheme}. Blurred bokeh lights. Cinematic feel. No text, no people, no faces, no objects. Just colors and light. 4K wallpaper style.`;
+        
+        return await generateSceneImage(prompt, tone);
+    } catch (err: any) {
+        console.warn("[DarkStream AI] ⚠️ Thumbnail AI generation failed, using canvas fallback:", err.message);
+        
+        // Canvas fallback - generates a gradient thumbnail locally without any API call
+        return generateCanvasThumbnail(topic, tone);
+    }
+};
+
+/**
+ * Local canvas-based thumbnail generator. No API calls needed.
+ * Creates a professional gradient background that works as a thumbnail base.
+ */
+const generateCanvasThumbnail = (topic: string, tone: string): string => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1280;
+    canvas.height = 720;
+    const ctx = canvas.getContext('2d')!;
     
-    return await generateSceneImage(prompt, 'Cinematic');
+    // Color palettes by tone
+    const isDark = tone.toLowerCase().includes('dark') || tone.toLowerCase().includes('horror') || tone.toLowerCase().includes('suspens');
+    const colors = isDark
+        ? { start: '#0a0a2e', mid: '#1a0a3e', end: '#050520', accent: '#6a00ff' }
+        : { start: '#1a1a2e', mid: '#16213e', end: '#0f3460', accent: '#e94560' };
+    
+    // Background gradient
+    const grad = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+    grad.addColorStop(0, colors.start);
+    grad.addColorStop(0.5, colors.mid);
+    grad.addColorStop(1, colors.end);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Subtle radial glow
+    const radial = ctx.createRadialGradient(canvas.width * 0.5, canvas.height * 0.4, 50, canvas.width * 0.5, canvas.height * 0.4, 400);
+    radial.addColorStop(0, colors.accent + '30');
+    radial.addColorStop(1, 'transparent');
+    ctx.fillStyle = radial;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Bokeh circles
+    for (let i = 0; i < 12; i++) {
+        const x = Math.random() * canvas.width;
+        const y = Math.random() * canvas.height;
+        const r = 20 + Math.random() * 60;
+        const circle = ctx.createRadialGradient(x, y, 0, x, y, r);
+        circle.addColorStop(0, colors.accent + '15');
+        circle.addColorStop(1, 'transparent');
+        ctx.fillStyle = circle;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    
+    return canvas.toDataURL('image/jpeg', 0.9);
 };
 
 /**
