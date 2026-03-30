@@ -1120,18 +1120,22 @@ export const ProjectEditor: React.FC = () => {
 
   const handleGenerateThumbnail = async () => {
       if (!video?.script?.segments?.length) {
-          alert("Please generate the script first to provide context for the thumbnail.");
+          alert("Gere o roteiro primeiro para dar contexto à thumbnail.");
           return;
       }
       setIsGeneratingThumbnail(true);
       setThumbnailError(null);
       try {
-          // 1. Generate base image and hook text sequentially to be safer with quotas
-          const baseImageUrl = await generateThumbnail(video!.title, scriptTone, project?.visualPacing?.style || 'dynamic');
-          const hookText = await generateThumbnailHook(video!.title, scriptTone, project!.language);
+          const scriptSummary = video!.script!.segments.slice(0, 3).map(s => s.narratorText).join(" ").slice(0, 500);
+          
+          // 1. Generate topic-related dramatic background
+          const baseImageUrl = await generateThumbnail(video!.title, scriptTone, scriptSummary);
+          
+          // 2. Generate clickbait hook text with style recommendation
+          const hookData = await generateThumbnailHook(video!.title, scriptTone, project!.language || 'Portuguese', scriptSummary);
           
           if (!baseImageUrl) throw new Error("Falha ao gerar a imagem base da thumbnail.");
-          if (!hookText) throw new Error("Falha ao gerar o texto de gancho da thumbnail.");
+
           const canvas = document.createElement('canvas');
           const ctx = canvas.getContext('2d');
           if (!ctx) throw new Error("Canvas context failed");
@@ -1145,95 +1149,178 @@ export const ProjectEditor: React.FC = () => {
               img.onerror = reject;
           });
 
-          // Set canvas size (YouTube standard 1280x720)
           canvas.width = 1280;
           canvas.height = 720;
 
-          // Draw base image (cover)
+          // Draw base image (cover fit)
           const scale = Math.max(canvas.width / img.width, canvas.height / img.height);
           const x = (canvas.width - img.width * scale) / 2;
           const y = (canvas.height - img.height * scale) / 2;
           ctx.drawImage(img, x, y, img.width * scale, img.height * scale);
 
-          // Add subtle vignette for depth
-          const vignette = ctx.createRadialGradient(canvas.width/2, canvas.height/2, 0, canvas.width/2, canvas.height/2, canvas.width);
+          // Dramatic vignette
+          const vignette = ctx.createRadialGradient(canvas.width/2, canvas.height/2, 100, canvas.width/2, canvas.height/2, canvas.width * 0.65);
           vignette.addColorStop(0, 'rgba(0,0,0,0)');
-          vignette.addColorStop(1, 'rgba(0,0,0,0.6)');
+          vignette.addColorStop(1, 'rgba(0,0,0,0.7)');
           ctx.fillStyle = vignette;
           ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-          // --- TYPOGRAPHY ENGINE (Viral Style) ---
-          const drawTextWithBox = (text: string, x: number, y: number, fontSize: number, rotate: number, color: string = 'white', bgColor: string = '#ef4444', isAccent: boolean = false) => {
+          // Bottom gradient for text readability
+          const bottomGrad = ctx.createLinearGradient(0, canvas.height * 0.5, 0, canvas.height);
+          bottomGrad.addColorStop(0, 'rgba(0,0,0,0)');
+          bottomGrad.addColorStop(1, 'rgba(0,0,0,0.65)');
+          ctx.fillStyle = bottomGrad;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+          if (hookData.style === 1) {
+              // === TYPE 1: Bold Colored Box Style (MrBeast/Viral) ===
+              const drawBoxText = (text: string, bx: number, by: number, fontSize: number, rotation: number, textColor: string, bgColor: string) => {
+                  ctx.save();
+                  ctx.translate(bx, by);
+                  ctx.rotate(rotation * Math.PI / 180);
+                  
+                  ctx.font = `900 ${fontSize}px "Impact", "Arial Black", sans-serif`;
+                  const metrics = ctx.measureText(text);
+                  const padX = fontSize * 0.3;
+                  const padY = fontSize * 0.15;
+                  const w = metrics.width + padX * 2;
+                  const h = fontSize * 1.2;
+
+                  // Box shadow
+                  ctx.shadowColor = 'rgba(0,0,0,0.95)';
+                  ctx.shadowBlur = 30;
+                  ctx.shadowOffsetX = 8;
+                  ctx.shadowOffsetY = 8;
+                  
+                  // Colored box
+                  ctx.fillStyle = bgColor;
+                  const boxX = -padX;
+                  const boxY = -fontSize * 0.85;
+                  ctx.beginPath();
+                  const r = 8;
+                  ctx.roundRect(boxX, boxY, w, h + padY * 2, r);
+                  ctx.fill();
+
+                  // Reset shadow
+                  ctx.shadowColor = 'transparent';
+                  ctx.shadowBlur = 0;
+                  ctx.shadowOffsetX = 0;
+                  ctx.shadowOffsetY = 0;
+
+                  // Text stroke
+                  ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+                  ctx.lineWidth = fontSize * 0.06;
+                  ctx.lineJoin = 'round';
+                  ctx.strokeText(text, 0, 0);
+                  
+                  // Text fill
+                  ctx.fillStyle = textColor;
+                  ctx.fillText(text, 0, 0);
+                  
+                  ctx.restore();
+                  return h + padY;
+              };
+
+              const mainWords = hookData.mainText.split(' ');
+              const rotation = -2.5 + Math.random() * 1;
+              let currentY = 230;
+              const startX = 70;
+              const boxColors = ['#ef4444', '#fbbf24', '#ef4444', '#22c55e'];
+              const textColors = ['#FFFFFF', '#000000', '#FFFFFF', '#FFFFFF'];
+
+              mainWords.forEach((word, i) => {
+                  const colorIdx = i % boxColors.length;
+                  const fontSize = i === 0 ? 130 : 110;
+                  const h = drawBoxText(word, startX, currentY, fontSize, rotation, textColors[colorIdx], boxColors[colorIdx]);
+                  currentY += h * 0.85;
+              });
+
+              // Accent text (smaller, different color)
+              if (hookData.accentText) {
+                  drawBoxText(hookData.accentText, startX + 20, currentY + 10, 80, rotation, '#000000', '#fbbf24');
+              }
+
+          } else {
+              // === TYPE 2: Cinematic Glow Text (Clean, Mysterious) ===
+              const drawGlowText = (text: string, gx: number, gy: number, fontSize: number, color: string, glowColor: string) => {
+                  ctx.save();
+                  ctx.font = `900 ${fontSize}px "Impact", "Arial Black", sans-serif`;
+                  ctx.textAlign = 'center';
+                  
+                  // Outer glow (multiple passes)
+                  ctx.shadowColor = glowColor;
+                  ctx.shadowBlur = 60;
+                  ctx.fillStyle = glowColor + '40';
+                  ctx.fillText(text, gx, gy);
+                  ctx.fillText(text, gx, gy);
+                  
+                  // Inner glow
+                  ctx.shadowBlur = 20;
+                  ctx.shadowColor = color;
+                  
+                  // Stroke
+                  ctx.strokeStyle = color;
+                  ctx.lineWidth = fontSize * 0.04;
+                  ctx.lineJoin = 'round';
+                  ctx.strokeText(text, gx, gy);
+                  
+                  // Fill
+                  ctx.fillStyle = color;
+                  ctx.fillText(text, gx, gy);
+                  
+                  ctx.restore();
+              };
+
+              const centerX = canvas.width / 2;
+              
+              // Main text
+              drawGlowText(hookData.mainText, centerX, 340, 120, '#FFFFFF', '#00aaff');
+              
+              // Accent text
+              if (hookData.accentText) {
+                  drawGlowText(hookData.accentText, centerX, 460, 90, '#ffcc00', '#ff4400');
+              }
+              
+              // Subtle line separator
               ctx.save();
-              ctx.translate(x, y);
-              ctx.rotate(rotate * Math.PI / 180);
-              
-              // Use a very bold font
-              ctx.font = `900 ${fontSize}px "Inter", "Arial Black", sans-serif`;
-              const metrics = ctx.measureText(text);
-              const paddingX = fontSize * 0.25;
-              const paddingY = fontSize * 0.1;
-              const w = metrics.width + paddingX * 2;
-              const h = fontSize * 1.15;
-
-              // Draw Box with Shadow/Glow
-              ctx.shadowColor = 'rgba(0,0,0,0.9)';
-              ctx.shadowBlur = 40;
-              ctx.shadowOffsetX = 15;
-              ctx.shadowOffsetY = 15;
-              
-              ctx.fillStyle = bgColor;
-              ctx.fillRect(-paddingX, -fontSize * 0.9, w, h);
-
-              // Reset shadow for text
-              ctx.shadowColor = 'transparent';
-              ctx.shadowBlur = 0;
-              ctx.shadowOffsetX = 0;
-              ctx.shadowOffsetY = 0;
-
-              // Draw Text with Stroke for extra pop
-              ctx.strokeStyle = 'black';
-              ctx.lineWidth = fontSize * 0.12;
-              ctx.lineJoin = 'round';
-              ctx.strokeText(text, 0, 0);
-              
-              ctx.fillStyle = color;
-              ctx.fillText(text, 0, 0);
-              
+              const lineGrad = ctx.createLinearGradient(centerX - 200, 0, centerX + 200, 0);
+              lineGrad.addColorStop(0, 'transparent');
+              lineGrad.addColorStop(0.5, 'rgba(255,255,255,0.3)');
+              lineGrad.addColorStop(1, 'transparent');
+              ctx.strokeStyle = lineGrad;
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.moveTo(centerX - 200, 380);
+              ctx.lineTo(centerX + 200, 380);
+              ctx.stroke();
               ctx.restore();
-              return h;
-          };
+          }
 
-          const words = hookText.toUpperCase().split(' ');
-          const rotation = -3; 
-          let currentY = 250;
-          const startX = 80;
+          // Red accent dot/circle (visual anchor — proven to increase CTR)
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(canvas.width - 90, 90, 35, 0, Math.PI * 2);
+          ctx.fillStyle = '#ef4444';
+          ctx.shadowColor = '#ef4444';
+          ctx.shadowBlur = 25;
+          ctx.fill();
+          ctx.shadowBlur = 0;
+          // Exclamation or question mark inside
+          ctx.font = '900 40px "Impact", sans-serif';
+          ctx.fillStyle = '#FFFFFF';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(hookData.mainText.includes('?') ? '?' : '!', canvas.width - 90, 90);
+          ctx.restore();
 
-          // Draw words with alternating styles (Red/Yellow)
-          words.forEach((word, i) => {
-              const isLast = i === words.length - 1;
-              const isYellow = isLast || word.length > 6;
-              const fontSize = isYellow ? 150 : 120;
-              const bgColor = isYellow ? '#fbbf24' : '#ef4444'; // Yellow vs Red
-              const textColor = isYellow ? '#000000' : '#FFFFFF'; // Black on Yellow, White on Red
-              
-              const height = drawTextWithBox(word, startX, currentY, fontSize, rotation, textColor, bgColor, isYellow);
-              currentY += height * 0.9;
-          });
-
-          const finalUrl = canvas.toDataURL('image/jpeg', 0.9);
+          const finalUrl = canvas.toDataURL('image/jpeg', 0.92);
           updateVideo(project!.id, video!.id, { thumbnailUrl: finalUrl });
-          alert("Thumbnail gerada com sucesso!");
+          alert("✅ Thumbnail clickbait gerada com sucesso!");
       } catch (e: any) {
           console.error("Thumbnail generation error", e);
           const msg = e.message || "Erro desconhecido";
-          const isQuota = msg.includes("Cota esgotada") || msg.includes("RESOURCE_EXHAUSTED") || msg.includes("429") || msg.includes("limite de requisições");
-          
-          if (isQuota) {
-              setThumbnailError("Limite de cota atingido para geração de imagens.");
-          } else {
-              setThumbnailError(msg);
-          }
+          const isQuota = msg.includes("Cota esgotada") || msg.includes("RESOURCE_EXHAUSTED") || msg.includes("429");
+          setThumbnailError(isQuota ? "Limite de cota atingido para geração de imagens." : msg);
       } finally {
           setIsGeneratingThumbnail(false);
       }
