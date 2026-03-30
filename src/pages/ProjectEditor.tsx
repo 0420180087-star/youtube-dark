@@ -784,17 +784,28 @@ export const ProjectEditor: React.FC = () => {
           alert("Por favor, conecte seu canal do YouTube nas Configurações primeiro.");
           return;
       }
+
+      if (!video || !project) {
+          alert("Vídeo ou projeto não encontrado.");
+          return;
+      }
       
       let fileToUpload = videoFile;
       if (!fileToUpload && generatedVideoBlob) {
-          fileToUpload = new File([generatedVideoBlob], `${video?.title || 'video'}.webm`, { type: 'video/webm' });
+          fileToUpload = new File([generatedVideoBlob], `${video.title || 'video'}.webm`, { type: 'video/webm' });
       }
 
       // If no file, trigger render automatically
       if (!fileToUpload) {
-          const blob = await handleRenderAndDownload(false);
-          if (blob) {
-              fileToUpload = new File([blob], `${video?.title || 'video'}.webm`, { type: 'video/webm' });
+          setRenderStatus('Renderizando vídeo automaticamente…');
+          try {
+              const blob = await handleRenderAndDownload(false);
+              if (blob) {
+                  fileToUpload = new File([blob], `${video.title || 'video'}.webm`, { type: 'video/webm' });
+              }
+          } catch (renderErr: any) {
+              alert(`Erro ao renderizar vídeo: ${renderErr.message}`);
+              return;
           }
       }
 
@@ -802,59 +813,75 @@ export const ProjectEditor: React.FC = () => {
           alert("Não foi possível gerar o vídeo para upload. Verifique se o roteiro e áudio estão prontos.");
           return;
       }
+
+      if (fileToUpload.size === 0) {
+          alert("O arquivo de vídeo está vazio. Tente renderizar novamente.");
+          return;
+      }
       
       setIsUploading(true);
       setUploadProgress(0);
+      setUploadError(null);
+      setRenderStatus('Preparando upload…');
 
       try {
-          setUploadError(null);
           // Ensure metadata exists
-          let currentMetadata = video!.videoMetadata;
+          let currentMetadata = video.videoMetadata;
           if (!currentMetadata) {
-              setRenderStatus('Gerando metadados...');
-              const summary = video!.script?.segments.slice(0, 3).map(s => s.narratorText).join(" ") || "";
-              currentMetadata = await generateVideoMetadata(video!.title, summary, scriptTone, project!.language, video!.script?.segments || []);
-              updateVideo(project!.id, video!.id, { videoMetadata: currentMetadata });
+              setRenderStatus('Gerando metadados…');
+              const summary = video.script?.segments.slice(0, 3).map(s => s.narratorText).join(" ") || "";
+              currentMetadata = await generateVideoMetadata(video.title, summary, scriptTone, project.language, video.script?.segments || []);
+              updateVideo(project.id, video.id, { videoMetadata: currentMetadata });
           }
 
-          // Validation
+          // Validation & cleanup
           if (currentMetadata.youtubeTitle.length > 100) {
-              throw new Error("O título do vídeo não pode exceder 100 caracteres.");
+              currentMetadata = { ...currentMetadata, youtubeTitle: currentMetadata.youtubeTitle.substring(0, 100) };
           }
           if (currentMetadata.youtubeDescription.length > 5000) {
-              throw new Error("A descrição do vídeo não pode exceder 5000 caracteres.");
+              currentMetadata = { ...currentMetadata, youtubeDescription: currentMetadata.youtubeDescription.substring(0, 5000) };
           }
 
           // Force isShorts if format is Portrait
-          if (video?.format === 'Portrait 9:16 (Shorts)' && !currentMetadata.isShorts) {
+          if (video.format === 'Portrait 9:16 (Shorts)' && !currentMetadata.isShorts) {
               currentMetadata = { ...currentMetadata, isShorts: true };
           }
+
+          setRenderStatus('Enviando para o YouTube…');
 
           const videoId = await uploadVideoToYouTube(
               accessToken,
               fileToUpload,
               currentMetadata,
-              video!.thumbnailUrl,
+              video.thumbnailUrl,
               scheduledDate || undefined,
-              (progress) => setUploadProgress(progress)
+              (progress) => {
+                  setUploadProgress(progress);
+                  if (progress < 5) setRenderStatus('Iniciando upload…');
+                  else if (progress < 90) setRenderStatus(`Enviando… ${progress}%`);
+                  else if (progress < 100) setRenderStatus('Finalizando…');
+                  else setRenderStatus('Upload completo!');
+              }
           );
           
           const youtubeUrl = `https://youtu.be/${videoId}`;
-          updateVideo(project!.id, video!.id, { 
+          updateVideo(project.id, video.id, { 
               status: scheduledDate ? ProjectStatus.SCHEDULED : ProjectStatus.PUBLISHED,
               youtubeUrl: youtubeUrl
           });
           
           setShowSuccessModal({ videoId, url: youtubeUrl });
+          setRenderStatus('Publicado com sucesso!');
       } catch (e: any) {
-          console.error("Upload failed", e);
-          const msg = e.message || "";
-          if (msg.includes('401') || msg.includes('Token Expired')) {
-              setUploadError("Sua sessão do YouTube expirou. Por favor, reconecte seu canal.");
-          } else if (msg.includes('CORS')) {
+          console.error("[YouTube Upload] Error:", e);
+          const msg = e.message || "Erro desconhecido durante o upload.";
+          
+          if (msg.includes('401') || msg.includes('Token expirou') || msg.includes('Token expirado')) {
+              setUploadError("Sua sessão do YouTube expirou. Vá em Configurações → desconecte e reconecte seu canal.");
+          } else if (msg.includes('CORS') || msg.includes('conexão') || msg.includes('Failed to fetch')) {
               setShowCorsHelp(true);
           } else {
-              setUploadError(msg || "Erro desconhecido durante o upload.");
+              setUploadError(msg);
           }
       } finally {
           setIsUploading(false);
