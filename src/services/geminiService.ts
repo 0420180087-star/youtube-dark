@@ -902,40 +902,131 @@ export const searchStockVideos = async (queries: string | string[], tone: string
     return allVideos.sort(() => Math.random() - 0.5);
 };
 
-// --- THUMBNAIL ---
-export const generateThumbnailHook = async (title: string, tone: string = 'Viral', language: string = 'English'): Promise<string> => {
+// --- THUMBNAIL (Clickbait Engine) ---
+
+/**
+ * Clickbait thumbnail type:
+ * - Type 1: Bold colored text boxes (MrBeast/viral style) — red/yellow boxes, tilted, high contrast
+ * - Type 2: Cinematic glow text — clean, dramatic lighting, glowing outline text
+ */
+export type ThumbnailStyle = 1 | 2;
+
+/**
+ * Generates a clickbait hook phrase optimized for CTR.
+ * Uses proven YouTube psychology: curiosity gap, shock, numbers, urgency, incomplete info.
+ */
+export const generateThumbnailHook = async (
+    title: string, 
+    tone: string = 'Viral', 
+    language: string = 'English',
+    scriptSummary: string = ''
+): Promise<{ mainText: string; accentText: string; style: ThumbnailStyle }> => {
     return executeGeminiRequest(async (ai) => {
-        const prompt = `Create a 2-3 word YouTube thumbnail hook for: "${title}". Language: ${language}. Tone: ${tone}. Output ONLY the text.`;
-        const response = await ai.models.generateContent({ model: "gemini-2.5-flash", contents: prompt, config: { temperature: 0.9 } });
-        return (response.text || "").trim().replace(/["']/g, '').toUpperCase();
-    }).catch(() => title.split(' ').slice(0, 2).join(' ').toUpperCase());
+        const prompt = `You are a YouTube thumbnail text specialist. Your job is to create the MOST CLICKABLE thumbnail text possible.
+
+VIDEO TITLE: "${title}"
+VIDEO SUMMARY: "${scriptSummary}"
+LANGUAGE: ${language}
+TONE: ${tone}
+
+CLICKBAIT PSYCHOLOGY RULES (apply ALL):
+- CURIOSITY GAP: Leave something unanswered so viewers MUST click ("THEY FOUND...", "THIS CHANGES...")
+- SHOCK/EMOTION: Use power words that trigger emotion ("INSANE", "TERRIFYING", "IMPOSSIBLE", "EXPOSED")
+- NUMBERS: If relevant, use specific numbers ("99.9%", "24H", "$1M")
+- URGENCY: Create FOMO ("BEFORE IT'S DELETED", "NOBODY KNOWS")
+- INCOMPLETE INFO: Never give the full answer in the thumbnail
+- CONTRAST: Use opposing concepts ("GENIUS vs IDIOT", "RICH vs BROKE")
+- QUESTION: Sometimes a provocative question works ("WHY...?", "HOW...?")
+
+RULES:
+- Output EXACTLY 2 lines. Line 1 = MAIN TEXT (2-4 words, biggest impact). Line 2 = ACCENT TEXT (1-3 words, supporting hook).
+- Both lines in ${language}.
+- NO quotes, NO punctuation except ? or !
+- ALL CAPS
+- The text must be DIRECTLY related to the video topic, not generic.
+- Think: "What would make ME stop scrolling and click?"
+
+ALSO output on line 3: either "1" or "2" to pick the thumbnail style:
+- Style 1: Bold colored boxes (for energetic/shocking topics)
+- Style 2: Cinematic glow (for mysterious/dark/serious topics)
+
+Example output:
+ELES DESCOBRIRAM
+O SEGREDO
+1`;
+        const response = await ai.models.generateContent({ model: "gemini-2.5-flash", contents: prompt, config: { temperature: 1.0 } });
+        const lines = (response.text || "").trim().split('\n').filter(l => l.trim());
+        
+        const mainText = (lines[0] || title.split(' ').slice(0, 3).join(' ')).replace(/["']/g, '').toUpperCase().trim();
+        const accentText = (lines[1] || '').replace(/["']/g, '').toUpperCase().trim();
+        const styleNum = parseInt(lines[2]?.trim() || '1');
+        const style: ThumbnailStyle = (styleNum === 2 ? 2 : 1);
+        
+        return { mainText, accentText, style };
+    }).catch(() => ({
+        mainText: title.split(' ').slice(0, 3).join(' ').toUpperCase(),
+        accentText: '???',
+        style: 1 as ThumbnailStyle
+    }));
 };
 
 /**
- * Generates a YouTube thumbnail background image.
- * Uses a canvas fallback if the AI generation fails for any reason,
- * ensuring the pipeline is never blocked by thumbnail issues.
+ * Generates a dramatic, topic-related background image for thumbnails.
+ * NOT abstract gradients — actual dramatic scenes related to the video content.
+ * Falls back to a high-quality canvas if AI fails.
  */
-export const generateThumbnail = async (topic: string, tone: string = 'Cinematic', style: string = 'dynamic'): Promise<string> => {
-    // Try AI generation first
+export const generateThumbnail = async (
+    topic: string, 
+    tone: string = 'Cinematic', 
+    scriptSummary: string = ''
+): Promise<string> => {
     try {
-        const isDark = tone.toLowerCase().includes('dark') || tone.toLowerCase().includes('horror') || tone.toLowerCase().includes('suspens');
-        const colorTheme = isDark ? 'deep dark blue, black, and purple tones' : 'warm orange, gold, and red tones';
+        // Generate a TOPIC-RELATED dramatic scene, not a generic gradient
+        const scenePrompt = await executeGeminiRequest(async (ai) => {
+            const prompt = `You are a thumbnail visual director. Create an image generation prompt for a YouTube thumbnail background.
+
+VIDEO TOPIC: "${topic}"
+VIDEO SUMMARY: "${scriptSummary}"
+TONE: ${tone}
+
+THUMBNAIL IMAGE PSYCHOLOGY (what makes people click):
+- HIGH CONTRAST: Dark backgrounds with bright focal points
+- DRAMATIC LIGHTING: Rim light, volumetric light, god rays, neon glow
+- VISUAL TENSION: Something unexpected, dramatic, or surreal
+- DEPTH: Foreground/background separation with blur
+- EMOTION: The image should evoke curiosity, awe, or shock
+- RELEVANCE: Must be directly related to the topic, NOT generic
+
+RULES:
+- Output ONLY the image prompt, nothing else
+- NO text in the image, NO words, NO letters
+- NO human faces or recognizable people
+- Include dramatic lighting and cinematic composition
+- Use shallow depth of field (background blur)
+- Make it look like a $50M movie poster background
+- The image should make someone stop scrolling
+- Be SPECIFIC to the topic, use relevant visual elements
+
+Example for "Ancient Egypt Secrets": "Dramatic aerial view of a half-buried golden pyramid emerging from desert sand, volumetric god rays piercing storm clouds, sand particles in air, extreme cinematic lighting, shallow depth of field, 8K"`;
+            
+            const response = await ai.models.generateContent({ 
+                model: "gemini-2.5-flash", 
+                contents: prompt, 
+                config: { temperature: 0.9 } 
+            });
+            return (response.text || "").trim();
+        });
         
-        const prompt = `Abstract gradient background, smooth color transition, ${colorTheme}. Blurred bokeh lights. Cinematic feel. No text, no people, no faces, no objects. Just colors and light. 4K wallpaper style.`;
-        
-        return await generateSceneImage(prompt, tone);
+        return await generateSceneImage(scenePrompt || `Dramatic cinematic scene related to ${topic}, volumetric lighting, dark atmosphere, 8K`, tone);
     } catch (err: any) {
-        console.warn("[DarkStream AI] ⚠️ Thumbnail AI generation failed, using canvas fallback:", err.message);
-        
-        // Canvas fallback - generates a gradient thumbnail locally without any API call
+        console.warn("[DarkStream AI] ⚠️ Thumbnail AI failed, using canvas fallback:", err.message);
         return generateCanvasThumbnail(topic, tone);
     }
 };
 
 /**
- * Local canvas-based thumbnail generator. No API calls needed.
- * Creates a professional gradient background that works as a thumbnail base.
+ * Canvas fallback: generates a dramatic gradient thumbnail with visual elements.
+ * No API calls needed. Designed to still look professional.
  */
 const generateCanvasThumbnail = (topic: string, tone: string): string => {
     const canvas = document.createElement('canvas');
@@ -943,42 +1034,87 @@ const generateCanvasThumbnail = (topic: string, tone: string): string => {
     canvas.height = 720;
     const ctx = canvas.getContext('2d')!;
     
-    // Color palettes by tone
-    const isDark = tone.toLowerCase().includes('dark') || tone.toLowerCase().includes('horror') || tone.toLowerCase().includes('suspens');
-    const colors = isDark
-        ? { start: '#0a0a2e', mid: '#1a0a3e', end: '#050520', accent: '#6a00ff' }
-        : { start: '#1a1a2e', mid: '#16213e', end: '#0f3460', accent: '#e94560' };
+    const t = tone.toLowerCase();
+    const isDark = t.includes('dark') || t.includes('horror') || t.includes('suspens') || t.includes('mystery');
     
-    // Background gradient
+    // Dramatic color palettes
+    const palettes = isDark
+        ? [
+            { bg: '#050510', mid: '#0a0a30', glow1: '#6a00ff', glow2: '#ff0040', accent: '#00ffff' },
+            { bg: '#0a0000', mid: '#1a0005', glow1: '#ff0000', glow2: '#ff6600', accent: '#ffcc00' },
+            { bg: '#000a0a', mid: '#001a1a', glow1: '#00ff88', glow2: '#0088ff', accent: '#ff00ff' },
+          ]
+        : [
+            { bg: '#0f0f1a', mid: '#1a1a3e', glow1: '#ff4444', glow2: '#ffaa00', accent: '#ffffff' },
+            { bg: '#1a0a0a', mid: '#2a1515', glow1: '#ff6b35', glow2: '#ffd700', accent: '#ff4081' },
+            { bg: '#0a0a1a', mid: '#15152a', glow1: '#4444ff', glow2: '#00ccff', accent: '#ff4444' },
+          ];
+    
+    const colors = palettes[Math.floor(Math.random() * palettes.length)];
+    
+    // Background
     const grad = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
-    grad.addColorStop(0, colors.start);
-    grad.addColorStop(0.5, colors.mid);
-    grad.addColorStop(1, colors.end);
+    grad.addColorStop(0, colors.bg);
+    grad.addColorStop(0.4, colors.mid);
+    grad.addColorStop(1, colors.bg);
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     
-    // Subtle radial glow
-    const radial = ctx.createRadialGradient(canvas.width * 0.5, canvas.height * 0.4, 50, canvas.width * 0.5, canvas.height * 0.4, 400);
-    radial.addColorStop(0, colors.accent + '30');
+    // Dramatic central glow (focal point)
+    const cx = canvas.width * (0.4 + Math.random() * 0.2);
+    const cy = canvas.height * (0.3 + Math.random() * 0.2);
+    const radial = ctx.createRadialGradient(cx, cy, 0, cx, cy, 450);
+    radial.addColorStop(0, colors.glow1 + '50');
+    radial.addColorStop(0.3, colors.glow2 + '25');
     radial.addColorStop(1, 'transparent');
     ctx.fillStyle = radial;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     
-    // Bokeh circles
-    for (let i = 0; i < 12; i++) {
-        const x = Math.random() * canvas.width;
-        const y = Math.random() * canvas.height;
-        const r = 20 + Math.random() * 60;
-        const circle = ctx.createRadialGradient(x, y, 0, x, y, r);
-        circle.addColorStop(0, colors.accent + '15');
-        circle.addColorStop(1, 'transparent');
-        ctx.fillStyle = circle;
+    // Secondary glow (visual tension)
+    const radial2 = ctx.createRadialGradient(canvas.width * 0.8, canvas.height * 0.7, 0, canvas.width * 0.8, canvas.height * 0.7, 300);
+    radial2.addColorStop(0, colors.accent + '30');
+    radial2.addColorStop(1, 'transparent');
+    ctx.fillStyle = radial2;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Light rays (god rays effect)
+    ctx.save();
+    ctx.globalAlpha = 0.08;
+    for (let i = 0; i < 8; i++) {
+        const angle = (Math.PI * 2 * i) / 8 + Math.random() * 0.3;
+        const rayLen = 500 + Math.random() * 300;
         ctx.beginPath();
-        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + Math.cos(angle - 0.03) * rayLen, cy + Math.sin(angle - 0.03) * rayLen);
+        ctx.lineTo(cx + Math.cos(angle + 0.03) * rayLen, cy + Math.sin(angle + 0.03) * rayLen);
+        ctx.closePath();
+        ctx.fillStyle = colors.glow1;
+        ctx.fill();
+    }
+    ctx.restore();
+    
+    // Floating particles (depth effect)
+    for (let i = 0; i < 30; i++) {
+        const px = Math.random() * canvas.width;
+        const py = Math.random() * canvas.height;
+        const pr = 1 + Math.random() * 4;
+        const particle = ctx.createRadialGradient(px, py, 0, px, py, pr);
+        particle.addColorStop(0, colors.accent + '60');
+        particle.addColorStop(1, 'transparent');
+        ctx.fillStyle = particle;
+        ctx.beginPath();
+        ctx.arc(px, py, pr, 0, Math.PI * 2);
         ctx.fill();
     }
     
-    return canvas.toDataURL('image/jpeg', 0.9);
+    // Vignette (focus attention to center)
+    const vignette = ctx.createRadialGradient(canvas.width / 2, canvas.height / 2, 200, canvas.width / 2, canvas.height / 2, canvas.width * 0.7);
+    vignette.addColorStop(0, 'transparent');
+    vignette.addColorStop(1, 'rgba(0,0,0,0.85)');
+    ctx.fillStyle = vignette;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    return canvas.toDataURL('image/jpeg', 0.92);
 };
 
 /**
