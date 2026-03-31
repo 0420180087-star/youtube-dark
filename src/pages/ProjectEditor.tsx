@@ -780,8 +780,8 @@ export const ProjectEditor: React.FC = () => {
   };
 
   const handleRealUpload = async () => {
-      if (!youtubeChannel || !accessToken) {
-          alert("Por favor, conecte seu canal do YouTube nas Configurações primeiro.");
+      if (!project?.youtubeChannelData || !project?.youtubeAccessToken) {
+          alert("Por favor, conecte um canal YouTube neste projeto primeiro (aba Settings).");
           return;
       }
 
