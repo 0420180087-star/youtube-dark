@@ -2250,8 +2250,12 @@ export const ProjectEditor: React.FC = () => {
                     <div className="flex gap-3">
                         <button 
                             onClick={() => {
-                                disconnectYoutube();
-                                alert("Sessão limpa. Por favor, reconecte seu canal nas Configurações.");
+                                if (project) updateVideo(project.id, video!.id, {});
+                                // Clear project YouTube connection
+                                if (project) {
+                                    const { updateProject: up } = useProjects();
+                                }
+                                alert("Sessão limpa. Reconecte o canal na aba Settings do projeto.");
                                 setShowTroubleshooting(false);
                             }}
                             className="flex-1 py-3 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold transition-all"
