@@ -804,37 +804,37 @@ export const ProjectHub: React.FC = () => {
                     
                     <div className="p-4 rounded-xl border border-slate-800 bg-slate-950/50 flex flex-col md:flex-row md:items-center justify-between gap-6">
                         <div className="flex items-center gap-4">
-                            <div className={`w-12 h-12 rounded-full flex items-center justify-center overflow-hidden flex-shrink-0 ${youtubeChannel ? 'bg-black' : 'bg-slate-800'}`}>
-                                {youtubeChannel ? (
-                                    <img src={youtubeChannel.thumbnailUrl} alt={youtubeChannel.title} className="w-full h-full object-cover" />
+                            <div className={`w-12 h-12 rounded-full flex items-center justify-center overflow-hidden flex-shrink-0 ${project.youtubeChannelData ? 'bg-black' : 'bg-slate-800'}`}>
+                                {project.youtubeChannelData ? (
+                                    <img src={project.youtubeChannelData.thumbnailUrl} alt={project.youtubeChannelData.title} className="w-full h-full object-cover" />
                                 ) : (
                                     <Youtube className="w-6 h-6 text-slate-500" />
                                 )}
                             </div>
                             <div>
                                 <h3 className="font-bold text-white text-lg">YouTube Channel</h3>
-                                {youtubeChannel ? (
+                                {project.youtubeChannelData ? (
                                     <div className="flex flex-col">
                                         <div className="flex items-center gap-1 text-xs text-green-400 mt-1">
                                             <CheckCircle className="w-3 h-3" />
-                                            <span>Connected: {youtubeChannel.title}</span>
+                                            <span>Connected: {project.youtubeChannelData.title}</span>
                                         </div>
-                                        <span className="text-[10px] text-slate-500 mt-0.5">{youtubeChannel.subscriberCount} Subscribers</span>
+                                        <span className="text-[10px] text-slate-500 mt-0.5">{project.youtubeChannelData.subscriberCount} Subscribers</span>
                                     </div>
                                 ) : (
-                                    <p className="text-sm text-slate-400">Connect a specific channel for this project.</p>
+                                    <p className="text-sm text-slate-400">Conecte um canal exclusivo para este projeto.</p>
                                 )}
                             </div>
                         </div>
                         
                         <div>
-                            {youtubeChannel ? (
+                            {project.youtubeChannelData ? (
                                 <button 
                                     onClick={handleDisconnectChannel}
                                     className="flex items-center gap-2 px-4 py-2 bg-red-500/10 text-red-400 hover:bg-red-500/20 rounded-lg text-sm font-medium transition-colors border border-red-500/20 w-full justify-center md:w-auto"
                                 >
                                     <LogOut className="w-4 h-4" />
-                                    Disconnect
+                                    Desconectar
                                 </button>
                             ) : (
                                 <button 
@@ -843,7 +843,7 @@ export const ProjectHub: React.FC = () => {
                                     className="flex items-center gap-2 px-6 py-2.5 bg-white text-black hover:bg-slate-200 rounded-lg text-sm font-bold transition-colors shadow-lg shadow-white/5 disabled:opacity-50 w-full justify-center md:w-auto"
                                 >
                                     {isAuthLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Youtube className="w-4 h-4 text-red-600" />}
-                                    Connect Channel
+                                    Conectar Canal
                                 </button>
                             )}
                         </div>
