@@ -1982,7 +1982,7 @@ export const ProjectEditor: React.FC = () => {
                                   ) : (
                                       <button 
                                           onClick={handleRealUpload} 
-                                          disabled={!youtubeChannel || isUploading || isRenderingVideo} 
+                                          disabled={!project?.youtubeChannelData || isUploading || isRenderingVideo} 
                                           className={`w-full py-4 rounded-xl font-bold shadow-lg transition-all active:scale-95 flex flex-col items-center justify-center gap-1 ${scheduledDate ? 'bg-orange-600 hover:bg-orange-500 shadow-orange-900/20' : 'bg-red-600 hover:bg-red-500 shadow-red-900/20'} disabled:opacity-50`}
                                       >
                                           <div className="flex items-center gap-2">
