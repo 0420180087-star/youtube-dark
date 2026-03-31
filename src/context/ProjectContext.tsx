@@ -346,7 +346,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
           const file = new File([blob], "video.webm", { type: 'video/webm' });
           
           setAutoPilotStatus("Uploading to YouTube...");
-          const ytbId = await uploadVideoToYouTube(accessToken, file, metadata, thumbnailUrl); // No schedule date = publish immediately (or default private)
+          const ytbId = await uploadVideoToYouTube(project.youtubeAccessToken!, file, metadata, thumbnailUrl); // No schedule date = publish immediately (or default private)
 
           updateVideo(project.id, video.id, { status: ProjectStatus.PUBLISHED, youtubeUrl: `https://youtu.be/${ytbId}` });
           setAutoPilotStatus("Auto-Pilot Complete!");
