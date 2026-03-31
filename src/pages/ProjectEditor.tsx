@@ -165,7 +165,7 @@ const EmptyState: React.FC<{ icon: React.ElementType; title: string; description
 export const ProjectEditor: React.FC = () => {
   const { projectId, videoId } = useParams<{ projectId: string; videoId: string }>();
   const { getProject, getVideo, updateVideo } = useProjects();
-  const { youtubeChannel, accessToken, connectYoutube, googleClientId, disconnectYoutube } = useAuth();
+  const { googleClientId } = useAuth();
   
   const project = getProject(projectId || '');
   const video = getVideo(projectId || '', videoId || '');
