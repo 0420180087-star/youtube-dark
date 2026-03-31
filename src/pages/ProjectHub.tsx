@@ -294,13 +294,69 @@ export const ProjectHub: React.FC = () => {
   };
 
   const handleConnectChannel = async () => {
-      await connectYoutube();
-      updateProject(project.id, { isYoutubeConnected: true });
+      if (!user) {
+          alert("Faça login primeiro nas Configurações.");
+          return;
+      }
+      const activeClientId = googleClientId?.trim();
+      if (!activeClientId) {
+          alert("Configure o Google Client ID nas Configurações primeiro.");
+          return;
+      }
+      if (typeof (window as any).google === 'undefined') {
+          alert("Google Scripts não carregados. Recarregue a página.");
+          return;
+      }
+      const goog = (window as any).google;
+      const client = goog.accounts.oauth2.initTokenClient({
+          client_id: activeClientId,
+          scope: 'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly',
+          callback: async (tokenResponse: any) => {
+              if (tokenResponse && tokenResponse.access_token) {
+                  const token = tokenResponse.access_token;
+                  try {
+                      const res = await fetch('https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&mine=true', {
+                          headers: { Authorization: `Bearer ${token}` }
+                      });
+                      if (!res.ok) throw new Error("YouTube API Error");
+                      const data = await res.json();
+                      if (data.items?.length > 0) {
+                          const ch = data.items[0];
+                          const channelData = {
+                              id: ch.id,
+                              title: ch.snippet.title,
+                              thumbnailUrl: ch.snippet.thumbnails.default.url,
+                              subscriberCount: ch.statistics.subscriberCount
+                          };
+                          updateProject(project.id, { 
+                              isYoutubeConnected: true, 
+                              youtubeChannelData: channelData,
+                              youtubeAccessToken: token
+                          });
+                      } else {
+                          alert("Nenhum canal YouTube encontrado nesta conta Google.");
+                      }
+                  } catch (e) {
+                      console.error(e);
+                      alert("Falha ao buscar dados do canal.");
+                  }
+              }
+          },
+      });
+      client.requestAccessToken();
   };
   
   const handleDisconnectChannel = () => {
-      disconnectYoutube();
-      updateProject(project.id, { isYoutubeConnected: false });
+      // Revoke token if possible
+      const token = project.youtubeAccessToken;
+      if (token && typeof (window as any).google !== 'undefined') {
+          try { (window as any).google.accounts.oauth2.revoke(token, () => {}); } catch (e) {}
+      }
+      updateProject(project.id, { 
+          isYoutubeConnected: false, 
+          youtubeChannelData: undefined, 
+          youtubeAccessToken: undefined 
+      });
   };
 
   // LIBRARY HANDLERS
