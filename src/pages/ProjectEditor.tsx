@@ -1754,7 +1754,7 @@ export const ProjectEditor: React.FC = () => {
                                              { label: 'Cenas', done: !!video.visualScenes?.length },
                                              { label: 'Thumb', done: !!video.thumbnailUrl },
                                              { label: 'SEO', done: !!video.videoMetadata },
-                                             { label: 'Canal', done: !!youtubeChannel },
+                                             { label: 'Canal', done: !!project?.youtubeChannelData },
                                          ].map((item, i) => (
                                              <div key={i} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-[10px] font-bold uppercase tracking-wider transition-colors ${item.done ? 'bg-green-500/10 border-green-500/20 text-green-500' : 'bg-slate-900/40 border-white/5 text-slate-500'}`}>
                                                  {item.done ? <CheckCircle className="w-3 h-3" /> : <X className="w-3 h-3" />}
