@@ -86,9 +86,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     if (typeof google === 'undefined') {
-        alert("Google Scripts not loaded. Please refresh the page.");
-        setIsLoading(false);
-        return;
+        let loaded = false;
+        for (let i = 0; i < 10; i++) {
+            await new Promise(r => setTimeout(r, 500));
+            if (typeof google !== 'undefined') { loaded = true; break; }
+        }
+        if (!loaded) {
+            alert("Google Scripts not loaded. Verifique sua conexão e recarregue a página.");
+            setIsLoading(false);
+            return;
+        }
     }
 
     try {
