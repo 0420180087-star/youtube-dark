@@ -2319,8 +2319,8 @@ export const ProjectEditor: React.FC = () => {
                         <div className="pt-2">
                             <button 
                                 onClick={() => {
-                                    disconnectYoutube();
-                                    alert("Sessão limpa. Por favor, reconecte seu canal nas Configurações.");
+                                    if (project) updateProject(project.id, { isYoutubeConnected: false, youtubeChannelData: undefined, youtubeAccessToken: undefined });
+                                    alert("Sessão limpa. Reconecte o canal na aba Settings do projeto.");
                                     setShowCorsHelp(false);
                                 }}
                                 className="w-full py-2 bg-white/5 hover:bg-white/10 text-slate-300 border border-white/10 rounded-xl text-[10px] transition-all"
