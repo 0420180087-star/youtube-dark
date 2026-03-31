@@ -1763,17 +1763,16 @@ export const ProjectEditor: React.FC = () => {
                                          ))}
                                      </div>
                                      
-                                     {youtubeChannel ? (
+                                     {project?.youtubeChannelData ? (
                                          <div className="flex flex-col gap-3 mb-4">
                                              <div className="flex items-center gap-3 bg-black/40 p-3 rounded-lg border border-white/10">
-                                                 <img src={youtubeChannel.thumbnailUrl} className="w-8 h-8 rounded-full" />
+                                                 <img src={project.youtubeChannelData.thumbnailUrl} className="w-8 h-8 rounded-full" />
                                                  <div className="flex-1 min-w-0">
-                                                     <span className="text-white font-medium text-sm truncate block">{youtubeChannel.title}</span>
-                                                     <span className="text-xs text-slate-500 block">{youtubeChannel.subscriberCount} subs</span>
+                                                     <span className="text-white font-medium text-sm truncate block">{project.youtubeChannelData.title}</span>
+                                                     <span className="text-xs text-slate-500 block">{project.youtubeChannelData.subscriberCount} subs</span>
                                                  </div>
                                                  <div className="flex flex-col items-end gap-1">
                                                     <CheckCircle className="w-4 h-4 text-green-500" />
-                                                    <button onClick={connectYoutube} className="text-[9px] text-slate-500 hover:text-white underline">Atualizar Token</button>
                                                  </div>
                                              </div>
                                              <button 
@@ -1786,11 +1785,8 @@ export const ProjectEditor: React.FC = () => {
                                      ) : (
                                          <div className="flex flex-col gap-3 mb-4">
                                              <div className="text-sm text-yellow-500 bg-yellow-500/10 p-3 rounded-lg border border-yellow-500/20">
-                                                 Nenhum canal conectado. Vá em Configurações ou clique abaixo.
+                                                 Nenhum canal conectado. Vá nas Settings do projeto para conectar.
                                              </div>
-                                             <button onClick={connectYoutube} className="w-full py-2 bg-red-600/20 hover:bg-red-600/30 text-red-500 border border-red-500/30 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all">
-                                                 <Youtube className="w-4 h-4" /> Conectar Canal Agora
-                                             </button>
                                          </div>
                                      )}
                                  </div>
