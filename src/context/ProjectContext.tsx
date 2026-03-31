@@ -68,7 +68,7 @@ const ProjectContext = createContext<ProjectContextType | undefined>(undefined);
 const ANIMATION_EFFECTS: VisualEffect[] = ['zoom-in', 'zoom-out', 'pan-left', 'pan-right', 'zoom-in-fast'];
 
 export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { user, accessToken, youtubeChannel } = useAuth(); // Access user state and tokens
+  const { user } = useAuth(); // Access user state
   const [projects, setProjects] = useState<Project[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [autoPilotStatus, setAutoPilotStatus] = useState<string>('Idle');
