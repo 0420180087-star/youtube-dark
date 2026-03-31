@@ -2250,11 +2250,7 @@ export const ProjectEditor: React.FC = () => {
                     <div className="flex gap-3">
                         <button 
                             onClick={() => {
-                                if (project) updateVideo(project.id, video!.id, {});
-                                // Clear project YouTube connection
-                                if (project) {
-                                    const { updateProject: up } = useProjects();
-                                }
+                                if (project) updateProject(project.id, { isYoutubeConnected: false, youtubeChannelData: undefined, youtubeAccessToken: undefined });
                                 alert("Sessão limpa. Reconecte o canal na aba Settings do projeto.");
                                 setShowTroubleshooting(false);
                             }}
