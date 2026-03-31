@@ -159,6 +159,8 @@ export interface Project {
   videos: Video[];
   
   isYoutubeConnected?: boolean;
+  youtubeChannelData?: YouTubeChannel;
+  youtubeAccessToken?: string;
 }
 
 export interface GenerateScriptParams {
