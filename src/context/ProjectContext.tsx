@@ -68,7 +68,7 @@ const ProjectContext = createContext<ProjectContextType | undefined>(undefined);
 const ANIMATION_EFFECTS: VisualEffect[] = ['zoom-in', 'zoom-out', 'pan-left', 'pan-right', 'zoom-in-fast'];
 
 export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { user, accessToken, youtubeChannel } = useAuth(); // Access user state and tokens
+  const { user } = useAuth(); // Access user state
   const [projects, setProjects] = useState<Project[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [autoPilotStatus, setAutoPilotStatus] = useState<string>('Idle');
@@ -164,7 +164,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
           // Find a project that needs a video
           const eligibleProject = projectsRef.current.find(p => {
               if (!p.scheduleSettings?.autoGenerate) return false;
-              if (!p.isYoutubeConnected) return false; // Must be connected
+              if (!p.isYoutubeConnected || !p.youtubeAccessToken) return false; // Must have per-project token
 
               // Parse Window
               const [startH, startM] = p.scheduleSettings.timeWindowStart.split(':').map(Number);
@@ -214,8 +214,8 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const runFullAutomationPipeline = async (project: Project) => {
       if (isRunningAutomation.current) return;
-      if (!accessToken || !youtubeChannel) {
-          setAutoPilotStatus("Auto-Pilot Paused: YouTube Token Missing");
+      if (!project.youtubeAccessToken || !project.youtubeChannelData) {
+          setAutoPilotStatus("Auto-Pilot Paused: YouTube não conectado neste projeto");
           return;
       }
 
@@ -346,7 +346,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
           const file = new File([blob], "video.webm", { type: 'video/webm' });
           
           setAutoPilotStatus("Uploading to YouTube...");
-          const ytbId = await uploadVideoToYouTube(accessToken, file, metadata, thumbnailUrl); // No schedule date = publish immediately (or default private)
+          const ytbId = await uploadVideoToYouTube(project.youtubeAccessToken!, file, metadata, thumbnailUrl); // No schedule date = publish immediately (or default private)
 
           updateVideo(project.id, video.id, { status: ProjectStatus.PUBLISHED, youtubeUrl: `https://youtu.be/${ytbId}` });
           setAutoPilotStatus("Auto-Pilot Complete!");

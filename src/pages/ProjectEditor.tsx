@@ -164,8 +164,8 @@ const EmptyState: React.FC<{ icon: React.ElementType; title: string; description
 
 export const ProjectEditor: React.FC = () => {
   const { projectId, videoId } = useParams<{ projectId: string; videoId: string }>();
-  const { getProject, getVideo, updateVideo } = useProjects();
-  const { youtubeChannel, accessToken, connectYoutube, googleClientId, disconnectYoutube } = useAuth();
+  const { getProject, getVideo, updateVideo, updateProject } = useProjects();
+  const { googleClientId } = useAuth();
   
   const project = getProject(projectId || '');
   const video = getVideo(projectId || '', videoId || '');
@@ -780,8 +780,8 @@ export const ProjectEditor: React.FC = () => {
   };
 
   const handleRealUpload = async () => {
-      if (!youtubeChannel || !accessToken) {
-          alert("Por favor, conecte seu canal do YouTube nas Configurações primeiro.");
+      if (!project?.youtubeChannelData || !project?.youtubeAccessToken) {
+          alert("Por favor, conecte um canal YouTube neste projeto primeiro (aba Settings).");
           return;
       }
 
@@ -850,7 +850,7 @@ export const ProjectEditor: React.FC = () => {
           setRenderStatus('Enviando para o YouTube…');
 
           const videoId = await uploadVideoToYouTube(
-              accessToken,
+              project.youtubeAccessToken!,
               fileToUpload,
               currentMetadata,
               video.thumbnailUrl,
@@ -1754,7 +1754,7 @@ export const ProjectEditor: React.FC = () => {
                                              { label: 'Cenas', done: !!video.visualScenes?.length },
                                              { label: 'Thumb', done: !!video.thumbnailUrl },
                                              { label: 'SEO', done: !!video.videoMetadata },
-                                             { label: 'Canal', done: !!youtubeChannel },
+                                             { label: 'Canal', done: !!project?.youtubeChannelData },
                                          ].map((item, i) => (
                                              <div key={i} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-[10px] font-bold uppercase tracking-wider transition-colors ${item.done ? 'bg-green-500/10 border-green-500/20 text-green-500' : 'bg-slate-900/40 border-white/5 text-slate-500'}`}>
                                                  {item.done ? <CheckCircle className="w-3 h-3" /> : <X className="w-3 h-3" />}
@@ -1763,17 +1763,16 @@ export const ProjectEditor: React.FC = () => {
                                          ))}
                                      </div>
                                      
-                                     {youtubeChannel ? (
+                                     {project?.youtubeChannelData ? (
                                          <div className="flex flex-col gap-3 mb-4">
                                              <div className="flex items-center gap-3 bg-black/40 p-3 rounded-lg border border-white/10">
-                                                 <img src={youtubeChannel.thumbnailUrl} className="w-8 h-8 rounded-full" />
+                                                 <img src={project.youtubeChannelData.thumbnailUrl} className="w-8 h-8 rounded-full" />
                                                  <div className="flex-1 min-w-0">
-                                                     <span className="text-white font-medium text-sm truncate block">{youtubeChannel.title}</span>
-                                                     <span className="text-xs text-slate-500 block">{youtubeChannel.subscriberCount} subs</span>
+                                                     <span className="text-white font-medium text-sm truncate block">{project.youtubeChannelData.title}</span>
+                                                     <span className="text-xs text-slate-500 block">{project.youtubeChannelData.subscriberCount} subs</span>
                                                  </div>
                                                  <div className="flex flex-col items-end gap-1">
                                                     <CheckCircle className="w-4 h-4 text-green-500" />
-                                                    <button onClick={connectYoutube} className="text-[9px] text-slate-500 hover:text-white underline">Atualizar Token</button>
                                                  </div>
                                              </div>
                                              <button 
@@ -1786,11 +1785,8 @@ export const ProjectEditor: React.FC = () => {
                                      ) : (
                                          <div className="flex flex-col gap-3 mb-4">
                                              <div className="text-sm text-yellow-500 bg-yellow-500/10 p-3 rounded-lg border border-yellow-500/20">
-                                                 Nenhum canal conectado. Vá em Configurações ou clique abaixo.
+                                                 Nenhum canal conectado. Vá nas Settings do projeto para conectar.
                                              </div>
-                                             <button onClick={connectYoutube} className="w-full py-2 bg-red-600/20 hover:bg-red-600/30 text-red-500 border border-red-500/30 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all">
-                                                 <Youtube className="w-4 h-4" /> Conectar Canal Agora
-                                             </button>
                                          </div>
                                      )}
                                  </div>
@@ -1986,7 +1982,7 @@ export const ProjectEditor: React.FC = () => {
                                   ) : (
                                       <button 
                                           onClick={handleRealUpload} 
-                                          disabled={!youtubeChannel || isUploading || isRenderingVideo} 
+                                          disabled={!project?.youtubeChannelData || isUploading || isRenderingVideo} 
                                           className={`w-full py-4 rounded-xl font-bold shadow-lg transition-all active:scale-95 flex flex-col items-center justify-center gap-1 ${scheduledDate ? 'bg-orange-600 hover:bg-orange-500 shadow-orange-900/20' : 'bg-red-600 hover:bg-red-500 shadow-red-900/20'} disabled:opacity-50`}
                                       >
                                           <div className="flex items-center gap-2">
@@ -2254,8 +2250,8 @@ export const ProjectEditor: React.FC = () => {
                     <div className="flex gap-3">
                         <button 
                             onClick={() => {
-                                disconnectYoutube();
-                                alert("Sessão limpa. Por favor, reconecte seu canal nas Configurações.");
+                                if (project) updateProject(project.id, { isYoutubeConnected: false, youtubeChannelData: undefined, youtubeAccessToken: undefined });
+                                alert("Sessão limpa. Reconecte o canal na aba Settings do projeto.");
                                 setShowTroubleshooting(false);
                             }}
                             className="flex-1 py-3 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold transition-all"
@@ -2323,8 +2319,8 @@ export const ProjectEditor: React.FC = () => {
                         <div className="pt-2">
                             <button 
                                 onClick={() => {
-                                    disconnectYoutube();
-                                    alert("Sessão limpa. Por favor, reconecte seu canal nas Configurações.");
+                                    if (project) updateProject(project.id, { isYoutubeConnected: false, youtubeChannelData: undefined, youtubeAccessToken: undefined });
+                                    alert("Sessão limpa. Reconecte o canal na aba Settings do projeto.");
                                     setShowCorsHelp(false);
                                 }}
                                 className="w-full py-2 bg-white/5 hover:bg-white/10 text-slate-300 border border-white/10 rounded-xl text-[10px] transition-all"
