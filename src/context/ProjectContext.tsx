@@ -214,8 +214,8 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const runFullAutomationPipeline = async (project: Project) => {
       if (isRunningAutomation.current) return;
-      if (!accessToken || !youtubeChannel) {
-          setAutoPilotStatus("Auto-Pilot Paused: YouTube Token Missing");
+      if (!project.youtubeAccessToken || !project.youtubeChannelData) {
+          setAutoPilotStatus("Auto-Pilot Paused: YouTube não conectado neste projeto");
           return;
       }
 
