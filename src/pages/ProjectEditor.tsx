@@ -850,7 +850,7 @@ export const ProjectEditor: React.FC = () => {
           setRenderStatus('Enviando para o YouTube…');
 
           const videoId = await uploadVideoToYouTube(
-              accessToken,
+              project.youtubeAccessToken!,
               fileToUpload,
               currentMetadata,
               video.thumbnailUrl,
