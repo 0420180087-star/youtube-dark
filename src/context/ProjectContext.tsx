@@ -164,7 +164,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
           // Find a project that needs a video
           const eligibleProject = projectsRef.current.find(p => {
               if (!p.scheduleSettings?.autoGenerate) return false;
-              if (!p.isYoutubeConnected) return false; // Must be connected
+              if (!p.isYoutubeConnected || !p.youtubeAccessToken) return false; // Must have per-project token
 
               // Parse Window
               const [startH, startM] = p.scheduleSettings.timeWindowStart.split(':').map(Number);
