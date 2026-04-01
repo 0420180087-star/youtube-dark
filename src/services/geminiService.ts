@@ -530,7 +530,79 @@ export const generateSingleNarratorText = async (topic: string, sectionTitle: st
 
 const formatTimestamp = (seconds: number): string => { const mins = Math.floor(seconds / 60); const secs = Math.floor(seconds % 60); return `${mins}:${secs.toString().padStart(2, '0')}`; };
 
-export const generateVideoMetadata = async (topic: string, scriptSummary: string, tone: string = 'Viral', language: string = 'English', segments: ScriptSegment[] = []): Promise<VideoMetadata> => {
+export const generateVideoMetadata = async (
+  topic: string, 
+  scriptSummary: string, 
+  tone: string = 'Viral', 
+  language: string = 'English', 
+  segments: ScriptSegment[] = [],
+  script?: ScriptData,
+  niche?: string,
+): Promise<VideoMetadata> => {
+  // If we have full script data, use the new intelligent description builder
+  if (script && script.segments.length > 0) {
+    const { buildVideoDescription, buildTimestamps } = await import('./thumbnailDescriptionService');
+    const descResult = buildVideoDescription({
+      title: topic, script, narrativeTone: tone, niche: niche || '', language,
+    });
+    const timestamps = buildTimestamps(script.segments);
+    const fullDesc = descResult.fullDescription + '\n\n📋 CAPÍTULOS:\n' + timestamps;
+    
+    // Still use AI for the optimized title and tags
+    try {
+      return await executeGeminiRequest(async (ai) => {
+        const prompt = `Generate an SEO-optimized YouTube title and tags for: "${topic}".
+Context: ${scriptSummary.substring(0, 500)}
+Tone: ${tone}
+Language: ${language}
+
+RULES:
+- youtubeTitle: Clickbait-optimized, max 70 chars, in ${language}
+- tags: 15-20 relevant SEO tags in ${language}
+- The title must generate curiosity and urgency`;
+        
+        const response = await ai.models.generateContent({ 
+          model: "gemini-2.5-flash", 
+          contents: prompt, 
+          config: { 
+            responseMimeType: "application/json", 
+            responseSchema: { 
+              type: Type.OBJECT, 
+              properties: { 
+                youtubeTitle: { type: Type.STRING }, 
+                tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+                categoryId: { type: Type.STRING },
+                isShorts: { type: Type.BOOLEAN }
+              },
+              required: ["youtubeTitle", "tags"]
+            } 
+          } 
+        });
+        
+        const data = JSON.parse(response.text || "{}");
+        return {
+          youtubeTitle: data.youtubeTitle || topic,
+          youtubeDescription: fullDesc,
+          tags: data.tags || [],
+          categoryId: data.categoryId || "24",
+          visibility: "public" as const,
+          isShorts: data.isShorts || false,
+        };
+      });
+    } catch {
+      // If AI fails, still return the intelligent description
+      return {
+        youtubeTitle: topic,
+        youtubeDescription: fullDesc,
+        tags: [],
+        categoryId: "24",
+        visibility: "public",
+        isShorts: false,
+      };
+    }
+  }
+  
+  // Fallback: original AI-only approach
   return executeGeminiRequest(async (ai) => {
       let timestampsContext = ""; 
       if (segments.length > 0) { 
@@ -913,14 +985,35 @@ export type ThumbnailStyle = 1 | 2;
 
 /**
  * Generates a clickbait hook phrase optimized for CTR.
- * Uses proven YouTube psychology: curiosity gap, shock, numbers, urgency, incomplete info.
+ * Now uses the thumbnailDescriptionService for intelligent clickbait generation.
  */
 export const generateThumbnailHook = async (
     title: string, 
     tone: string = 'Viral', 
     language: string = 'English',
-    scriptSummary: string = ''
+    scriptSummary: string = '',
+    script?: ScriptData,
+    niche?: string,
 ): Promise<{ mainText: string; accentText: string; style: ThumbnailStyle }> => {
+    // If we have script data, use the new intelligent system
+    if (script) {
+        const { buildThumbnailPrompt } = await import('./thumbnailDescriptionService');
+        const result = buildThumbnailPrompt({
+            title, script, narrativeTone: tone, niche: niche || '',
+            language,
+        });
+        const words = result.clickbaitText.split(' ');
+        const mid = Math.ceil(words.length / 2);
+        const mainText = words.slice(0, mid).join(' ').toUpperCase();
+        const accentText = words.slice(mid).join(' ').toUpperCase();
+        const styleMap: Record<string, ThumbnailStyle> = {
+            'viral': 1, 'neon': 1, 'warm': 1,
+            'horror': 2, 'cinematic': 2, 'clean': 1,
+        };
+        return { mainText, accentText, style: styleMap[result.style] || 1 };
+    }
+    
+    // Fallback: use AI generation for backwards compatibility
     return executeGeminiRequest(async (ai) => {
         const prompt = `You are a YouTube thumbnail text specialist. Your job is to create the MOST CLICKABLE thumbnail text possible.
 
@@ -930,13 +1023,11 @@ LANGUAGE: ${language}
 TONE: ${tone}
 
 CLICKBAIT PSYCHOLOGY RULES (apply ALL):
-- CURIOSITY GAP: Leave something unanswered so viewers MUST click ("THEY FOUND...", "THIS CHANGES...")
-- SHOCK/EMOTION: Use power words that trigger emotion ("INSANE", "TERRIFYING", "IMPOSSIBLE", "EXPOSED")
-- NUMBERS: If relevant, use specific numbers ("99.9%", "24H", "$1M")
-- URGENCY: Create FOMO ("BEFORE IT'S DELETED", "NOBODY KNOWS")
+- CURIOSITY GAP: Leave something unanswered so viewers MUST click
+- SHOCK/EMOTION: Use power words that trigger emotion
+- NUMBERS: If relevant, use specific numbers
+- URGENCY: Create FOMO
 - INCOMPLETE INFO: Never give the full answer in the thumbnail
-- CONTRAST: Use opposing concepts ("GENIUS vs IDIOT", "RICH vs BROKE")
-- QUESTION: Sometimes a provocative question works ("WHY...?", "HOW...?")
 
 RULES:
 - Output EXACTLY 2 lines. Line 1 = MAIN TEXT (2-4 words, biggest impact). Line 2 = ACCENT TEXT (1-3 words, supporting hook).
@@ -944,7 +1035,6 @@ RULES:
 - NO quotes, NO punctuation except ? or !
 - ALL CAPS
 - The text must be DIRECTLY related to the video topic, not generic.
-- Think: "What would make ME stop scrolling and click?"
 
 ALSO output on line 3: either "1" or "2" to pick the thumbnail style:
 - Style 1: Bold colored boxes (for energetic/shocking topics)
@@ -972,52 +1062,55 @@ O SEGREDO
 
 /**
  * Generates a dramatic, topic-related background image for thumbnails.
- * NOT abstract gradients — actual dramatic scenes related to the video content.
- * Falls back to a high-quality canvas if AI fails.
+ * Now uses the thumbnailDescriptionService for intelligent prompt building.
  */
 export const generateThumbnail = async (
     topic: string, 
     tone: string = 'Cinematic', 
-    scriptSummary: string = ''
+    scriptSummary: string = '',
+    script?: ScriptData,
+    niche?: string,
 ): Promise<string> => {
     try {
-        // Generate a TOPIC-RELATED dramatic scene, not a generic gradient
-        const scenePrompt = await executeGeminiRequest(async (ai) => {
-            const prompt = `You are a thumbnail visual director. Create an image generation prompt for a YouTube thumbnail background.
-
+        let imagePrompt: string;
+        
+        // If we have script data, use the new intelligent system
+        if (script) {
+            const { buildThumbnailPrompt } = await import('./thumbnailDescriptionService');
+            const result = buildThumbnailPrompt({
+                title: topic, script, narrativeTone: tone, niche: niche || '',
+            });
+            imagePrompt = result.imagePrompt;
+            console.log(`[DarkStream AI] 🎨 Thumbnail prompt (intelligent): ${imagePrompt.substring(0, 100)}...`);
+        } else {
+            // Fallback: generate prompt via AI
+            imagePrompt = await executeGeminiRequest(async (ai) => {
+                const prompt = `You are a thumbnail visual director. Create an image generation prompt for a YouTube thumbnail.
 VIDEO TOPIC: "${topic}"
 VIDEO SUMMARY: "${scriptSummary}"
 TONE: ${tone}
 
-THUMBNAIL IMAGE PSYCHOLOGY (what makes people click):
-- HIGH CONTRAST: Dark backgrounds with bright focal points
-- DRAMATIC LIGHTING: Rim light, volumetric light, god rays, neon glow
-- VISUAL TENSION: Something unexpected, dramatic, or surreal
-- DEPTH: Foreground/background separation with blur
-- EMOTION: The image should evoke curiosity, awe, or shock
-- RELEVANCE: Must be directly related to the topic, NOT generic
-
 RULES:
 - Output ONLY the image prompt, nothing else
-- NO text in the image, NO words, NO letters
-- NO human faces or recognizable people
 - Include dramatic lighting and cinematic composition
-- Use shallow depth of field (background blur)
 - Make it look like a $50M movie poster background
-- The image should make someone stop scrolling
-- Be SPECIFIC to the topic, use relevant visual elements
+- Be SPECIFIC to the topic
 
-Example for "Ancient Egypt Secrets": "Dramatic aerial view of a half-buried golden pyramid emerging from desert sand, volumetric god rays piercing storm clouds, sand particles in air, extreme cinematic lighting, shallow depth of field, 8K"`;
-            
-            const response = await ai.models.generateContent({ 
-                model: "gemini-2.5-flash", 
-                contents: prompt, 
-                config: { temperature: 0.9 } 
+Example: "Dramatic aerial view of a half-buried golden pyramid, volumetric god rays, storm clouds, cinematic lighting, 8K"`;
+                
+                const response = await ai.models.generateContent({ 
+                    model: "gemini-2.5-flash", 
+                    contents: prompt, 
+                    config: { temperature: 0.9 } 
+                });
+                return (response.text || "").trim();
             });
-            return (response.text || "").trim();
-        });
+        }
         
-        return await generateSceneImage(scenePrompt || `Dramatic cinematic scene related to ${topic}, volumetric lighting, dark atmosphere, 8K`, tone);
+        return await generateSceneImage(
+            imagePrompt || `Dramatic cinematic scene related to ${topic}, volumetric lighting, dark atmosphere, 8K`, 
+            tone
+        );
     } catch (err: any) {
         console.warn("[DarkStream AI] ⚠️ Thumbnail AI failed, using canvas fallback:", err.message);
         return generateCanvasThumbnail(topic, tone);
