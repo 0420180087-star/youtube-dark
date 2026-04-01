@@ -990,52 +990,55 @@ O SEGREDO
 
 /**
  * Generates a dramatic, topic-related background image for thumbnails.
- * NOT abstract gradients — actual dramatic scenes related to the video content.
- * Falls back to a high-quality canvas if AI fails.
+ * Now uses the thumbnailDescriptionService for intelligent prompt building.
  */
 export const generateThumbnail = async (
     topic: string, 
     tone: string = 'Cinematic', 
-    scriptSummary: string = ''
+    scriptSummary: string = '',
+    script?: ScriptData,
+    niche?: string,
 ): Promise<string> => {
     try {
-        // Generate a TOPIC-RELATED dramatic scene, not a generic gradient
-        const scenePrompt = await executeGeminiRequest(async (ai) => {
-            const prompt = `You are a thumbnail visual director. Create an image generation prompt for a YouTube thumbnail background.
-
+        let imagePrompt: string;
+        
+        // If we have script data, use the new intelligent system
+        if (script) {
+            const { buildThumbnailPrompt } = await import('./thumbnailDescriptionService');
+            const result = buildThumbnailPrompt({
+                title: topic, script, narrativeTone: tone, niche: niche || '',
+            });
+            imagePrompt = result.imagePrompt;
+            console.log(`[DarkStream AI] 🎨 Thumbnail prompt (intelligent): ${imagePrompt.substring(0, 100)}...`);
+        } else {
+            // Fallback: generate prompt via AI
+            imagePrompt = await executeGeminiRequest(async (ai) => {
+                const prompt = `You are a thumbnail visual director. Create an image generation prompt for a YouTube thumbnail.
 VIDEO TOPIC: "${topic}"
 VIDEO SUMMARY: "${scriptSummary}"
 TONE: ${tone}
 
-THUMBNAIL IMAGE PSYCHOLOGY (what makes people click):
-- HIGH CONTRAST: Dark backgrounds with bright focal points
-- DRAMATIC LIGHTING: Rim light, volumetric light, god rays, neon glow
-- VISUAL TENSION: Something unexpected, dramatic, or surreal
-- DEPTH: Foreground/background separation with blur
-- EMOTION: The image should evoke curiosity, awe, or shock
-- RELEVANCE: Must be directly related to the topic, NOT generic
-
 RULES:
 - Output ONLY the image prompt, nothing else
-- NO text in the image, NO words, NO letters
-- NO human faces or recognizable people
 - Include dramatic lighting and cinematic composition
-- Use shallow depth of field (background blur)
 - Make it look like a $50M movie poster background
-- The image should make someone stop scrolling
-- Be SPECIFIC to the topic, use relevant visual elements
+- Be SPECIFIC to the topic
 
-Example for "Ancient Egypt Secrets": "Dramatic aerial view of a half-buried golden pyramid emerging from desert sand, volumetric god rays piercing storm clouds, sand particles in air, extreme cinematic lighting, shallow depth of field, 8K"`;
-            
-            const response = await ai.models.generateContent({ 
-                model: "gemini-2.5-flash", 
-                contents: prompt, 
-                config: { temperature: 0.9 } 
+Example: "Dramatic aerial view of a half-buried golden pyramid, volumetric god rays, storm clouds, cinematic lighting, 8K"`;
+                
+                const response = await ai.models.generateContent({ 
+                    model: "gemini-2.5-flash", 
+                    contents: prompt, 
+                    config: { temperature: 0.9 } 
+                });
+                return (response.text || "").trim();
             });
-            return (response.text || "").trim();
-        });
+        }
         
-        return await generateSceneImage(scenePrompt || `Dramatic cinematic scene related to ${topic}, volumetric lighting, dark atmosphere, 8K`, tone);
+        return await generateSceneImage(
+            imagePrompt || `Dramatic cinematic scene related to ${topic}, volumetric lighting, dark atmosphere, 8K`, 
+            tone
+        );
     } catch (err: any) {
         console.warn("[DarkStream AI] ⚠️ Thumbnail AI failed, using canvas fallback:", err.message);
         return generateCanvasThumbnail(topic, tone);
