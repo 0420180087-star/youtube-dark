@@ -13,10 +13,9 @@ import {
     decodeAudioData,
     mergeAudioBuffers,
     audioBufferToBase64,
-    searchStockVideos,
-    generatePexelsKeywords,
     VideoIdea as GeminiVideoIdea
 } from '../services/geminiService';
+import { searchContextualMedia } from '../services/pexelsService';
 import { renderVideoHeadless } from '../services/renderService';
 import { uploadVideoToYouTube } from '../services/youtubeService';
 
