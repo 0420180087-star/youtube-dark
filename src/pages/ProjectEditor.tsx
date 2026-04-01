@@ -835,7 +835,7 @@ export const ProjectEditor: React.FC = () => {
           if (!currentMetadata) {
               setRenderStatus('Gerando metadados…');
               const summary = video.script?.segments.slice(0, 3).map(s => s.narratorText).join(" ") || "";
-              currentMetadata = await generateVideoMetadata(video.title, summary, scriptTone, project.language, video.script?.segments || []);
+              currentMetadata = await generateVideoMetadata(video.title, summary, scriptTone, project.language, video.script?.segments || [], video.script, project.channelTheme);
               updateVideo(project.id, video.id, { videoMetadata: currentMetadata });
           }
 
