@@ -299,12 +299,17 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
                   if (Math.random() < pexelsChance) {
                       try {
-                          const keywords = await generatePexelsKeywords(prompt, video.title, project.channelTheme);
-                          const videos = await searchStockVideos(keywords, project.defaultTone, project.defaultFormat);
-                          if (videos.length > 0) {
-                              const bestVideo = videos[0];
-                              videoUrl = bestVideo.videoUrl;
-                              imgUrl = bestVideo.thumbnailUrl;
+                          const pexelsResult = await searchContextualMedia(
+                            seg.narratorText || prompt,
+                            seg.sectionTitle || `Section ${i}`,
+                            project.defaultTone || 'Cinematic',
+                            project.channelTheme || '',
+                            pexelsUsedIds,
+                            video.format || project.defaultFormat
+                          );
+                          if (pexelsResult) {
+                              videoUrl = pexelsResult.videoUrl;
+                              imgUrl = pexelsResult.thumbnailUrl;
                           }
                       } catch (e) {
                           console.warn("Pexels search failed in automation", e);
