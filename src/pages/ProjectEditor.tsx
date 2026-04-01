@@ -505,8 +505,8 @@ export const ProjectEditor: React.FC = () => {
 
                   if (Math.random() < pexelsChance) {
                       const pexelsResult = await searchContextualMedia(
-                        segment.narratorText || prompt,
-                        segment.sectionTitle || `Section ${i}`,
+                        s.narratorText || prompt,
+                        s.sectionTitle || `Section ${i}`,
                         scriptTone,
                         project?.channelTheme || '',
                         pexelsUsedIds,
