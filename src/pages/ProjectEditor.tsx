@@ -1165,11 +1165,11 @@ export const ProjectEditor: React.FC = () => {
       try {
           const scriptSummary = video!.script!.segments.slice(0, 3).map(s => s.narratorText).join(" ").slice(0, 500);
           
-          // 1. Generate topic-related dramatic background
-          const baseImageUrl = await generateThumbnail(video!.title, scriptTone, scriptSummary);
+          // 1. Generate topic-related dramatic background (with intelligent prompts)
+          const baseImageUrl = await generateThumbnail(video!.title, scriptTone, scriptSummary, video!.script, project!.channelTheme);
           
           // 2. Generate clickbait hook text with style recommendation
-          const hookData = await generateThumbnailHook(video!.title, scriptTone, project!.language || 'Portuguese', scriptSummary);
+          const hookData = await generateThumbnailHook(video!.title, scriptTone, project!.language || 'Portuguese', scriptSummary, video!.script, project!.channelTheme);
           
           if (!baseImageUrl) throw new Error("Falha ao gerar a imagem base da thumbnail.");
 
