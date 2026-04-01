@@ -1109,15 +1109,20 @@ export const ProjectEditor: React.FC = () => {
 
               const isDocumentary = scriptTone.toLowerCase().includes('documentary') || scriptTone.toLowerCase().includes('wendover') || scriptTone.toLowerCase().includes('explainer');
               const pexelsChance = isDocumentary ? 0.7 : 0.4;
+              const singleUsedIds = new Set<number>();
 
               if (Math.random() < pexelsChance) {
-                  const keywords = await generatePexelsKeywords(prompt, video!.title, project?.channelTheme);
-                  const videos = await searchStockVideos(keywords, scriptTone, video!.format || 'Landscape 16:9');
-                  if (videos.length > 0) {
-                      const randomIndex = Math.floor(Math.random() * Math.min(3, videos.length));
-                      const bestVideo = videos[randomIndex];
-                      videoUrl = bestVideo.videoUrl;
-                      url = bestVideo.thumbnailUrl;
+                  const pexelsResult = await searchContextualMedia(
+                    segment.narratorText || prompt,
+                    segment.sectionTitle || `Section ${idx}`,
+                    scriptTone,
+                    project?.channelTheme || '',
+                    singleUsedIds,
+                    video!.format || 'Landscape 16:9'
+                  );
+                  if (pexelsResult) {
+                      videoUrl = pexelsResult.videoUrl;
+                      url = pexelsResult.thumbnailUrl;
                   }
               }
 
