@@ -338,7 +338,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
           // 6. Generate Metadata
           setAutoPilotStatus("Optimizing Metadata...");
-          const metadata = await generateVideoMetadata(video.title, script.segments.map(s=>s.narratorText).join(' '), project.defaultTone, project.language, script.segments);
+          const metadata = await generateVideoMetadata(video.title, script.segments.map(s=>s.narratorText).join(' '), project.defaultTone, project.language, script.segments, script, project.channelTheme);
           updateVideo(project.id, video.id, { videoMetadata: metadata });
           const finalVideo = { ...visualVideo, videoMetadata: metadata };
 

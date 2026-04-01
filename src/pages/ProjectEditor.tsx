@@ -1372,7 +1372,7 @@ export const ProjectEditor: React.FC = () => {
       try {
           const summary = video!.script?.segments.slice(0, 3).map(s => s.narratorText).join(" ") || "";
           const promptContext = scriptContext ? `Specific Details: ${scriptContext}. ` : '';
-          const metadata = await generateVideoMetadata(video!.title, promptContext + summary, scriptTone, project!.language, video!.script?.segments || []); 
+          const metadata = await generateVideoMetadata(video!.title, promptContext + summary, scriptTone, project!.language, video!.script?.segments || [], video!.script, project!.channelTheme); 
           updateVideo(project!.id, video!.id, { videoMetadata: metadata });
           alert("SEO Metadata generated successfully!");
       } catch (e: any) { 
