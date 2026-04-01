@@ -449,6 +449,7 @@ export const ProjectEditor: React.FC = () => {
           scenes = [];
       }
 
+      const pexelsUsedIds = new Set<number>();
       try { 
           const segs = video!.script!.segments; 
           let totDur = 0; 
