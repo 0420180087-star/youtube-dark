@@ -331,7 +331,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
           }
           const musicUrl = await generateDarkAmbience(project.defaultTone || 'Dark');
           const scriptSummary = script.segments.slice(0, 3).map(s => s.narratorText).join(' ').slice(0, 500);
-          const thumbnailUrl = await generateThumbnail(video.title, project.defaultTone, scriptSummary);
+          const thumbnailUrl = await generateThumbnail(video.title, project.defaultTone, scriptSummary, script, project.channelTheme);
           
           updateVideo(project.id, video.id, { visualScenes: scenes, backgroundMusicUrl: musicUrl, thumbnailUrl, status: ProjectStatus.VIDEO_GENERATED });
           const visualVideo = { ...audioVideo, visualScenes: scenes, backgroundMusicUrl: musicUrl, thumbnailUrl };
