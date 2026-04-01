@@ -530,7 +530,79 @@ export const generateSingleNarratorText = async (topic: string, sectionTitle: st
 
 const formatTimestamp = (seconds: number): string => { const mins = Math.floor(seconds / 60); const secs = Math.floor(seconds % 60); return `${mins}:${secs.toString().padStart(2, '0')}`; };
 
-export const generateVideoMetadata = async (topic: string, scriptSummary: string, tone: string = 'Viral', language: string = 'English', segments: ScriptSegment[] = []): Promise<VideoMetadata> => {
+export const generateVideoMetadata = async (
+  topic: string, 
+  scriptSummary: string, 
+  tone: string = 'Viral', 
+  language: string = 'English', 
+  segments: ScriptSegment[] = [],
+  script?: ScriptData,
+  niche?: string,
+): Promise<VideoMetadata> => {
+  // If we have full script data, use the new intelligent description builder
+  if (script && script.segments.length > 0) {
+    const { buildVideoDescription, buildTimestamps } = await import('./thumbnailDescriptionService');
+    const descResult = buildVideoDescription({
+      title: topic, script, narrativeTone: tone, niche: niche || '', language,
+    });
+    const timestamps = buildTimestamps(script.segments);
+    const fullDesc = descResult.fullDescription + '\n\n📋 CAPÍTULOS:\n' + timestamps;
+    
+    // Still use AI for the optimized title and tags
+    try {
+      return await executeGeminiRequest(async (ai) => {
+        const prompt = `Generate an SEO-optimized YouTube title and tags for: "${topic}".
+Context: ${scriptSummary.substring(0, 500)}
+Tone: ${tone}
+Language: ${language}
+
+RULES:
+- youtubeTitle: Clickbait-optimized, max 70 chars, in ${language}
+- tags: 15-20 relevant SEO tags in ${language}
+- The title must generate curiosity and urgency`;
+        
+        const response = await ai.models.generateContent({ 
+          model: "gemini-2.5-flash", 
+          contents: prompt, 
+          config: { 
+            responseMimeType: "application/json", 
+            responseSchema: { 
+              type: Type.OBJECT, 
+              properties: { 
+                youtubeTitle: { type: Type.STRING }, 
+                tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+                categoryId: { type: Type.STRING },
+                isShorts: { type: Type.BOOLEAN }
+              },
+              required: ["youtubeTitle", "tags"]
+            } 
+          } 
+        });
+        
+        const data = JSON.parse(response.text || "{}");
+        return {
+          youtubeTitle: data.youtubeTitle || topic,
+          youtubeDescription: fullDesc,
+          tags: data.tags || [],
+          categoryId: data.categoryId || "24",
+          visibility: "public" as const,
+          isShorts: data.isShorts || false,
+        };
+      });
+    } catch {
+      // If AI fails, still return the intelligent description
+      return {
+        youtubeTitle: topic,
+        youtubeDescription: fullDesc,
+        tags: [],
+        categoryId: "24",
+        visibility: "public",
+        isShorts: false,
+      };
+    }
+  }
+  
+  // Fallback: original AI-only approach
   return executeGeminiRequest(async (ai) => {
       let timestampsContext = ""; 
       if (segments.length > 0) { 
