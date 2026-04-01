@@ -8,9 +8,10 @@ import {
     generateVideoScript, generateVoiceover, generateSceneImage, 
     generateDarkAmbience, decodeAudioData, mergeAudioBuffers, 
     audioBufferToBase64, generateThumbnail, generateVideoMetadata,
-    searchStockVideos, generateSingleNarratorText, generateMissingNarratorTexts,
-    generateThumbnailHook, generatePexelsSearchQuery, generatePexelsKeywords, clearExhaustedKeys
+    generateSingleNarratorText, generateMissingNarratorTexts,
+    generateThumbnailHook, clearExhaustedKeys
 } from '../services/geminiService';
+import { searchContextualMedia } from '../services/pexelsService';
 import { uploadVideoToYouTube } from '../services/youtubeService';
 import { 
   FileText, Mic, Image as ImageIcon, Upload, Loader2, Play, CheckCircle, 
