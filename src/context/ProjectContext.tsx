@@ -13,10 +13,9 @@ import {
     decodeAudioData,
     mergeAudioBuffers,
     audioBufferToBase64,
-    searchStockVideos,
-    generatePexelsKeywords,
     VideoIdea as GeminiVideoIdea
 } from '../services/geminiService';
+import { searchContextualMedia } from '../services/pexelsService';
 import { renderVideoHeadless } from '../services/renderService';
 import { uploadVideoToYouTube } from '../services/youtubeService';
 
@@ -271,7 +270,8 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
           // 5. Generate Visuals & Music
           setAutoPilotStatus("Generating Visuals & Music...");
           const scenes: VisualScene[] = [];
-          for(let i=0; i<script.segments.length; i++) {
+           const pexelsUsedIds = new Set<number>();
+           for(let i=0; i<script.segments.length; i++) {
               const start = timestamps[i];
               const next = timestamps[i+1] || totalDur;
               const totalSegmentDur = next - start;
@@ -299,12 +299,17 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
                   if (Math.random() < pexelsChance) {
                       try {
-                          const keywords = await generatePexelsKeywords(prompt, video.title, project.channelTheme);
-                          const videos = await searchStockVideos(keywords, project.defaultTone, project.defaultFormat);
-                          if (videos.length > 0) {
-                              const bestVideo = videos[0];
-                              videoUrl = bestVideo.videoUrl;
-                              imgUrl = bestVideo.thumbnailUrl;
+                          const pexelsResult = await searchContextualMedia(
+                            seg.narratorText || prompt,
+                            seg.sectionTitle || `Section ${i}`,
+                            project.defaultTone || 'Cinematic',
+                            project.channelTheme || '',
+                            pexelsUsedIds,
+                            video.format || project.defaultFormat
+                          );
+                          if (pexelsResult) {
+                              videoUrl = pexelsResult.videoUrl;
+                              imgUrl = pexelsResult.thumbnailUrl;
                           }
                       } catch (e) {
                           console.warn("Pexels search failed in automation", e);

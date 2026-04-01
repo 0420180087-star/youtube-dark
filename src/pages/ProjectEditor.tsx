@@ -8,9 +8,10 @@ import {
     generateVideoScript, generateVoiceover, generateSceneImage, 
     generateDarkAmbience, decodeAudioData, mergeAudioBuffers, 
     audioBufferToBase64, generateThumbnail, generateVideoMetadata,
-    searchStockVideos, generateSingleNarratorText, generateMissingNarratorTexts,
-    generateThumbnailHook, generatePexelsSearchQuery, generatePexelsKeywords, clearExhaustedKeys
+    generateSingleNarratorText, generateMissingNarratorTexts,
+    generateThumbnailHook, clearExhaustedKeys
 } from '../services/geminiService';
+import { searchContextualMedia } from '../services/pexelsService';
 import { uploadVideoToYouTube } from '../services/youtubeService';
 import { 
   FileText, Mic, Image as ImageIcon, Upload, Loader2, Play, CheckCircle, 
@@ -448,6 +449,7 @@ export const ProjectEditor: React.FC = () => {
           scenes = [];
       }
 
+      const pexelsUsedIds = new Set<number>();
       try { 
           const segs = video!.script!.segments; 
           let totDur = 0; 
@@ -502,14 +504,17 @@ export const ProjectEditor: React.FC = () => {
                   const pexelsChance = (project?.visualSourceMix?.pexelsPercentage || 50) / 100;
 
                   if (Math.random() < pexelsChance) {
-                      const keywords = await generatePexelsKeywords(prompt, video!.title, project?.channelTheme);
-                      const videos = await searchStockVideos(keywords, scriptTone, video!.format || 'Landscape 16:9');
-                      if (videos.length > 0) {
-                          // Pick a random video from the top 3 to avoid duplicates in the same project
-                          const randomIndex = Math.floor(Math.random() * Math.min(3, videos.length));
-                          const bestVideo = videos[randomIndex];
-                          videoUrl = bestVideo.videoUrl;
-                          url = bestVideo.thumbnailUrl; // Use Pexels thumbnail to save Gemini Image API call
+                      const pexelsResult = await searchContextualMedia(
+                        s.narratorText || prompt,
+                        s.sectionTitle || `Section ${i}`,
+                        scriptTone,
+                        project?.channelTheme || '',
+                        pexelsUsedIds,
+                        video!.format || 'Landscape 16:9'
+                      );
+                      if (pexelsResult) {
+                          videoUrl = pexelsResult.videoUrl;
+                          url = pexelsResult.thumbnailUrl;
                       }
                   }
 
@@ -1104,15 +1109,20 @@ export const ProjectEditor: React.FC = () => {
 
               const isDocumentary = scriptTone.toLowerCase().includes('documentary') || scriptTone.toLowerCase().includes('wendover') || scriptTone.toLowerCase().includes('explainer');
               const pexelsChance = isDocumentary ? 0.7 : 0.4;
+              const singleUsedIds = new Set<number>();
 
               if (Math.random() < pexelsChance) {
-                  const keywords = await generatePexelsKeywords(prompt, video!.title, project?.channelTheme);
-                  const videos = await searchStockVideos(keywords, scriptTone, video!.format || 'Landscape 16:9');
-                  if (videos.length > 0) {
-                      const randomIndex = Math.floor(Math.random() * Math.min(3, videos.length));
-                      const bestVideo = videos[randomIndex];
-                      videoUrl = bestVideo.videoUrl;
-                      url = bestVideo.thumbnailUrl;
+                  const pexelsResult = await searchContextualMedia(
+                    segment.narratorText || prompt,
+                    segment.sectionTitle || `Section ${idx}`,
+                    scriptTone,
+                    project?.channelTheme || '',
+                    singleUsedIds,
+                    video!.format || 'Landscape 16:9'
+                  );
+                  if (pexelsResult) {
+                      videoUrl = pexelsResult.videoUrl;
+                      url = pexelsResult.thumbnailUrl;
                   }
               }
 
