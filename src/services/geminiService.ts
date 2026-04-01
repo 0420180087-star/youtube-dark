@@ -913,14 +913,35 @@ export type ThumbnailStyle = 1 | 2;
 
 /**
  * Generates a clickbait hook phrase optimized for CTR.
- * Uses proven YouTube psychology: curiosity gap, shock, numbers, urgency, incomplete info.
+ * Now uses the thumbnailDescriptionService for intelligent clickbait generation.
  */
 export const generateThumbnailHook = async (
     title: string, 
     tone: string = 'Viral', 
     language: string = 'English',
-    scriptSummary: string = ''
+    scriptSummary: string = '',
+    script?: ScriptData,
+    niche?: string,
 ): Promise<{ mainText: string; accentText: string; style: ThumbnailStyle }> => {
+    // If we have script data, use the new intelligent system
+    if (script) {
+        const { buildThumbnailPrompt } = await import('./thumbnailDescriptionService');
+        const result = buildThumbnailPrompt({
+            title, script, narrativeTone: tone, niche: niche || '',
+            language,
+        });
+        const words = result.clickbaitText.split(' ');
+        const mid = Math.ceil(words.length / 2);
+        const mainText = words.slice(0, mid).join(' ').toUpperCase();
+        const accentText = words.slice(mid).join(' ').toUpperCase();
+        const styleMap: Record<string, ThumbnailStyle> = {
+            'viral': 1, 'neon': 1, 'warm': 1,
+            'horror': 2, 'cinematic': 2, 'clean': 1,
+        };
+        return { mainText, accentText, style: styleMap[result.style] || 1 };
+    }
+    
+    // Fallback: use AI generation for backwards compatibility
     return executeGeminiRequest(async (ai) => {
         const prompt = `You are a YouTube thumbnail text specialist. Your job is to create the MOST CLICKABLE thumbnail text possible.
 
@@ -930,13 +951,11 @@ LANGUAGE: ${language}
 TONE: ${tone}
 
 CLICKBAIT PSYCHOLOGY RULES (apply ALL):
-- CURIOSITY GAP: Leave something unanswered so viewers MUST click ("THEY FOUND...", "THIS CHANGES...")
-- SHOCK/EMOTION: Use power words that trigger emotion ("INSANE", "TERRIFYING", "IMPOSSIBLE", "EXPOSED")
-- NUMBERS: If relevant, use specific numbers ("99.9%", "24H", "$1M")
-- URGENCY: Create FOMO ("BEFORE IT'S DELETED", "NOBODY KNOWS")
+- CURIOSITY GAP: Leave something unanswered so viewers MUST click
+- SHOCK/EMOTION: Use power words that trigger emotion
+- NUMBERS: If relevant, use specific numbers
+- URGENCY: Create FOMO
 - INCOMPLETE INFO: Never give the full answer in the thumbnail
-- CONTRAST: Use opposing concepts ("GENIUS vs IDIOT", "RICH vs BROKE")
-- QUESTION: Sometimes a provocative question works ("WHY...?", "HOW...?")
 
 RULES:
 - Output EXACTLY 2 lines. Line 1 = MAIN TEXT (2-4 words, biggest impact). Line 2 = ACCENT TEXT (1-3 words, supporting hook).
@@ -944,7 +963,6 @@ RULES:
 - NO quotes, NO punctuation except ? or !
 - ALL CAPS
 - The text must be DIRECTLY related to the video topic, not generic.
-- Think: "What would make ME stop scrolling and click?"
 
 ALSO output on line 3: either "1" or "2" to pick the thumbnail style:
 - Style 1: Bold colored boxes (for energetic/shocking topics)
