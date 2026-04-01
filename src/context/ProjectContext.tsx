@@ -270,7 +270,8 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
           // 5. Generate Visuals & Music
           setAutoPilotStatus("Generating Visuals & Music...");
           const scenes: VisualScene[] = [];
-          for(let i=0; i<script.segments.length; i++) {
+           const pexelsUsedIds = new Set<number>();
+           for(let i=0; i<script.segments.length; i++) {
               const start = timestamps[i];
               const next = timestamps[i+1] || totalDur;
               const totalSegmentDur = next - start;
