@@ -7,6 +7,16 @@ export enum ProjectStatus {
   VIDEO_GENERATED = 'VIDEO_GENERATED',
   SCHEDULED = 'SCHEDULED',
   PUBLISHED = 'PUBLISHED',
+  STANDBY = 'STANDBY',
+}
+
+export type AutoPilotStep = 
+  | 'idea' | 'script' | 'voice' | 'visuals' | 'studio' | 'thumbnail' | 'metadata' | 'upload';
+
+export interface StandbyInfo {
+  failedStep: AutoPilotStep;
+  errorMessage: string;
+  failedAt: string;
 }
 
 export type VideoDuration = 'Short (< 3 min)' | 'Standard (5-8 min)' | 'Long (10-15 min)' | 'Deep Dive (20+ min)';
