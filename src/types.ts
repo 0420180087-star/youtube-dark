@@ -122,6 +122,7 @@ export interface Video {
   thumbnailUrl?: string;
   videoMetadata?: VideoMetadata;
   youtubeUrl?: string;
+  standbyInfo?: StandbyInfo;
 }
 
 export interface ScheduleSettings {
@@ -129,6 +130,7 @@ export interface ScheduleSettings {
   timeWindowStart: string;
   timeWindowEnd: string;
   autoGenerate?: boolean;
+  nextScheduledRun?: string; // ISO date persisted for reload survival
 }
 
 export type VisualPacingStyle = 'static' | 'dynamic' | 'fast-cuts' | 'cinematic' | 'minimalist' | 'surreal' | 'vintage' | 'cyberpunk';
