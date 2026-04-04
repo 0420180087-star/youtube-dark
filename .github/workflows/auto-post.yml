@@ -1,0 +1,39 @@
+name: Auto Post Video
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      project_id:
+        description: 'ID do projeto para forçar execução'
+        required: false
+
+jobs:
+  auto-post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Instalar dependências
+        run: npm install
+
+      - name: Executar pipeline
+        env:
+          SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GEMINI_API_KEY: ${{ secrets.VITE_GEMINI_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.VITE_PEXELS_API_KEY }}
+          YOUTUBE_CLIENT_ID: ${{ secrets.VITE_GOOGLE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          PROJECT_ID: ${{ github.event.inputs.project_id }}
+        run: node scripts/automation-runner.js
