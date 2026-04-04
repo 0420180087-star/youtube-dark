@@ -6,6 +6,10 @@
 
 import { createClient } from '@supabase/supabase-js';
 import axios from 'axios';
+import path from 'path';
+import os from 'os';
+import { renderVideo, cleanupTmp } from './videoRenderer.js';
+import { refreshAccessToken, uploadVideoFile, uploadThumbnail } from './youtubeUploader.js';
 
 // --- ENV ---
 const {
