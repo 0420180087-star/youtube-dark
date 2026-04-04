@@ -24,6 +24,12 @@ jobs:
           node-version: '18'
           cache: 'npm'
 
+      - name: Instalar FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Verificar FFmpeg
+        run: ffmpeg -version
+
       - name: Instalar dependências
         run: npm install
 

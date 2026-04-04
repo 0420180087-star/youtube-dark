@@ -345,9 +345,13 @@ async function processProject(projectRow) {
     currentStep = 'metadata';
     const metadata = await stepMetadata(idea.topic, script, data);
 
-    // Step 6: Upload
+    // Step 6: Render Video
+    currentStep = 'render';
+    const renderResult = await stepRenderVideo(scenes, script, data);
+
+    // Step 7: Upload
     currentStep = 'upload';
-    const uploadResult = await stepUploadYouTube(data, metadata, thumbnail);
+    const uploadResult = await stepUploadYouTube(data, metadata, renderResult);
 
     // Calculate next run
     const settings = data.scheduleSettings || {};
