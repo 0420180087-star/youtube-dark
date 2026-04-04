@@ -257,8 +257,31 @@ Return JSON:
   return metadata;
 }
 
-async function stepUploadYouTube(projectData, metadata, thumbnailInfo) {
-  log('📤', 'Step 6: Uploading to YouTube...');
+async function stepRenderVideo(scenes, script, projectData) {
+  log('🎬', 'Step 6: Rendering video with FFmpeg...');
+
+  const tmpDir = path.join(os.tmpdir(), `autopost_${Date.now()}`);
+
+  const visuals = scenes.map((s) => ({
+    url: s.videoUrl || s.imageUrl,
+    effect: s.effect || 'zoom-in',
+  }));
+
+  const videoPath = await renderVideo({
+    visuals,
+    segments: script.segments || [],
+    audioBase64: projectData._audioBase64 || null,
+    musicUrl: projectData.backgroundMusicUrl || null,
+    thumbnailBase64: projectData._thumbnailBase64 || null,
+    tmpDir,
+  });
+
+  log('✅', `Video rendered: ${videoPath}`);
+  return { videoPath, tmpDir };
+}
+
+async function stepUploadYouTube(projectData, metadata, renderResult) {
+  log('📤', 'Step 7: Uploading to YouTube...');
 
   if (!YOUTUBE_CLIENT_ID || !YOUTUBE_CLIENT_SECRET) {
     throw new Error('YouTube credentials not configured');
@@ -269,28 +292,21 @@ async function stepUploadYouTube(projectData, metadata, thumbnailInfo) {
     throw new Error('No YouTube refresh token found in project. Connect YouTube in the app first.');
   }
 
-  // Refresh access token
-  const tokenRes = await axios.post('https://oauth2.googleapis.com/token', {
-    client_id: YOUTUBE_CLIENT_ID,
-    client_secret: YOUTUBE_CLIENT_SECRET,
-    refresh_token: refreshToken,
-    grant_type: 'refresh_token',
-  });
+  try {
+    const accessToken = await refreshAccessToken(YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, refreshToken);
+    log('🔑', 'Access token refreshed');
 
-  const accessToken = tokenRes.data.access_token;
-  if (!accessToken) throw new Error('Failed to refresh YouTube access token');
+    const { videoUrl, videoId } = await uploadVideoFile(accessToken, renderResult.videoPath, metadata);
 
-  log('🔑', 'Access token refreshed');
+    // Upload thumbnail separately
+    if (projectData._thumbnailBase64) {
+      await uploadThumbnail(accessToken, videoId, projectData._thumbnailBase64);
+    }
 
-  // Note: Full video rendering + upload requires browser APIs not available in Node.js
-  // This step would need a headless browser or pre-rendered video file
-  // For now, we log the metadata that would be uploaded
-  log('⚠️', 'Video rendering requires browser APIs — upload step is a placeholder in CI');
-  log('📋', `Would upload: "${metadata.title}"`);
-  log('📋', `Description: ${metadata.description?.slice(0, 100)}...`);
-  log('📋', `Tags: ${metadata.tags?.join(', ')}`);
-
-  return { uploaded: false, reason: 'Video rendering requires browser environment' };
+    return { uploaded: true, videoUrl };
+  } finally {
+    cleanupTmp(renderResult.tmpDir);
+  }
 }
 
 // --- MAIN ORCHESTRATOR ---
