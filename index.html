@@ -8,6 +8,15 @@
     <meta name="description" content="DarkStream AI — Automação completa de criação e publicação de vídeos no YouTube com inteligência artificial." />
     <meta name="author" content="DarkStream AI" />
     <meta name="theme-color" content="#020617" />
+    <script>
+      (function() {
+        var redirect = sessionStorage.redirect;
+        delete sessionStorage.redirect;
+        if (redirect && redirect !== location.href) {
+          history.replaceState(null, null, redirect);
+        }
+      })();
+    </script>
 
     <meta property="og:title" content="DarkStream AI AUTOMATION" />
     <meta property="og:description" content="Automação completa de criação e publicação de vídeos no YouTube com IA." />

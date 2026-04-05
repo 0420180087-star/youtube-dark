@@ -30,37 +30,51 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // 1. ASYNC INITIALIZATION to handle decryption
   useEffect(() => {
     const initAuth = async () => {
-        // Load Client ID
+      try {
         const storedClientId = localStorage.getItem('ds_google_client_id');
         if (storedClientId) {
+          try {
             const val = await decryptData(storedClientId);
-            setGoogleClientIdState(val);
+            if (val && val.length > 0) setGoogleClientIdState(val);
+          } catch {
+            localStorage.removeItem('ds_google_client_id');
+          }
         }
 
-        // Load User Profile
         const storedUser = localStorage.getItem('ds_user_profile');
         if (storedUser) {
-            try {
-                const val = await decryptData(storedUser);
-                setUser(JSON.parse(val));
-            } catch(e) {}
-        }
-        
-        // Load Channel
-        const storedChannel = localStorage.getItem('ds_youtube_channel');
-        if (storedChannel) {
-            try {
-                const val = await decryptData(storedChannel);
-                setYoutubeChannel(JSON.parse(val));
-            } catch(e) {}
+          try {
+            const val = await decryptData(storedUser);
+            const parsed = JSON.parse(val);
+            if (parsed?.email) setUser(parsed);
+          } catch {
+            localStorage.removeItem('ds_user_profile');
+          }
         }
 
-        // Load Token
+        const storedChannel = localStorage.getItem('ds_youtube_channel');
+        if (storedChannel) {
+          try {
+            const val = await decryptData(storedChannel);
+            const parsed = JSON.parse(val);
+            if (parsed?.id) setYoutubeChannel(parsed);
+          } catch {
+            localStorage.removeItem('ds_youtube_channel');
+          }
+        }
+
         const storedToken = localStorage.getItem('ds_youtube_access_token');
         if (storedToken) {
+          try {
             const val = await decryptData(storedToken);
-            setAccessToken(val);
+            if (val) setAccessToken(val);
+          } catch {
+            localStorage.removeItem('ds_youtube_access_token');
+          }
         }
+      } catch (e) {
+        console.error('Auth init failed:', e);
+      }
     };
     
     initAuth();

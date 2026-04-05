@@ -358,13 +358,20 @@ async function processProject(projectRow) {
     currentStep = 'visuals';
     const scenes = await stepVisuals(script, data);
 
-    // Step 4: Thumbnail
+    // Step 4: Thumbnail (optional — does not break pipeline)
     currentStep = 'thumbnail';
-    const thumbnail = await stepThumbnail(idea.topic, script, data);
+    let thumbnail = null;
+    try {
+      thumbnail = await stepThumbnail(idea.topic, script, data);
+      if (thumbnail) log('🖼️', 'Thumbnail generated');
+      else log('⚠️', 'Thumbnail not generated, continuing without it');
+    } catch {
+      log('⚠️', 'Thumbnail failed, continuing without it');
+    }
 
     // Step 5: Metadata
     currentStep = 'metadata';
-    const metadata = await stepMetadata(idea.topic, script, data);
+    const metadata = await geminiWithRetry(() => stepMetadata(idea.topic, script, data));
 
     // Step 6: Render Video
     currentStep = 'render';

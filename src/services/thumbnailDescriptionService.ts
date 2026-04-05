@@ -54,6 +54,7 @@ interface ToneVisualConfig {
   emotionalElement: string;
   descriptionVoice: string;
   clickbaitExamples: string[];
+  textColor: string;
 }
 
 const TONE_CONFIGS: Record<string, ToneVisualConfig> = {

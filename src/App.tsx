@@ -22,7 +22,7 @@ const App: React.FC = () => {
   return (
     <AuthProvider>
       <ProjectProvider>
-        <BrowserRouter>
+        <BrowserRouter basename={import.meta.env.VITE_BASE_URL || '/'}>
           <Layout>
             <Suspense fallback={<PageLoader />}>
               <Routes>
