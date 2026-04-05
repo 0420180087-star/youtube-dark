@@ -46,24 +46,45 @@ async function geminiGenerate(prompt, maxTokens = 4096) {
   return res.data.candidates?.[0]?.content?.parts?.[0]?.text || '';
 }
 
+async function geminiWithRetry(fn, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const isQuota = err?.response?.status === 429 ||
+                      (err?.message || '').toLowerCase().includes('quota');
+      if (isQuota && i < retries - 1) {
+        const wait = (i + 1) * 30000;
+        log('⏳', `Quota error, waiting ${wait/1000}s before retry ${i+2}/${retries}...`);
+        await new Promise(r => setTimeout(r, wait));
+      } else {
+        throw err;
+      }
+    }
+  }
+}
+
 async function geminiGenerateJSON(prompt, maxTokens = 4096) {
-  const raw = await geminiGenerate(prompt, maxTokens);
-  // Extract JSON from markdown code blocks if present
+  const raw = await geminiWithRetry(() => geminiGenerate(prompt, maxTokens));
   const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
   const jsonStr = match ? match[1].trim() : raw.trim();
   return JSON.parse(jsonStr);
 }
 
 async function geminiGenerateImage(prompt) {
-  const res = await axios.post(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
-    {
-      contents: [{ parts: [{ text: `Generate an image: ${prompt}` }] }],
-      generationConfig: { maxOutputTokens: 1024 },
-    }
-  );
-  // Return the text description as placeholder — actual image gen requires Imagen API
-  return res.data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  try {
+    const res = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:predict?key=${GEMINI_API_KEY}`,
+      {
+        instances: [{ prompt }],
+        parameters: { sampleCount: 1, aspectRatio: '16:9' }
+      }
+    );
+    return res.data.predictions?.[0]?.bytesBase64Encoded || null;
+  } catch (err) {
+    log('⚠️', `Image generation failed, skipping thumbnail: ${err.message}`);
+    return null;
+  }
 }
 
 async function searchPexels(query, usedIds, isVideo = true) {
@@ -337,13 +358,20 @@ async function processProject(projectRow) {
     currentStep = 'visuals';
     const scenes = await stepVisuals(script, data);
 
-    // Step 4: Thumbnail
+    // Step 4: Thumbnail (optional — does not break pipeline)
     currentStep = 'thumbnail';
-    const thumbnail = await stepThumbnail(idea.topic, script, data);
+    let thumbnail = null;
+    try {
+      thumbnail = await stepThumbnail(idea.topic, script, data);
+      if (thumbnail) log('🖼️', 'Thumbnail generated');
+      else log('⚠️', 'Thumbnail not generated, continuing without it');
+    } catch {
+      log('⚠️', 'Thumbnail failed, continuing without it');
+    }
 
     // Step 5: Metadata
     currentStep = 'metadata';
-    const metadata = await stepMetadata(idea.topic, script, data);
+    const metadata = await geminiWithRetry(() => stepMetadata(idea.topic, script, data));
 
     // Step 6: Render Video
     currentStep = 'render';
