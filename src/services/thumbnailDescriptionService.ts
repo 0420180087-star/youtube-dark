@@ -65,6 +65,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'fearful expression close-up, wide terrified eyes',
     descriptionVoice: 'sombria, suspense, frases curtas e impactantes, linguagem tensa',
     clickbaitExamples: ['Você não deveria saber disso', 'O que eles escondem', 'Isso não deveria existir', 'Ninguém sobreviveu'],
+    textColor: 'blood red or ghostly white',
   },
   'suspens': {
     style: 'horror',
@@ -73,6 +74,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'intense gaze, suspicious expression, narrowed eyes',
     descriptionVoice: 'sombria, suspense, frases curtas e impactantes, mistério',
     clickbaitExamples: ['Você não deveria saber disso', 'A verdade escondida', 'Ninguém percebeu isso', 'O que realmente aconteceu'],
+    textColor: 'cold white or pale blue',
   },
   'dark': {
     style: 'horror',
@@ -81,6 +83,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'shocked terrified expression, mouth agape',
     descriptionVoice: 'sombria, frases curtas, linguagem tensa e impactante',
     clickbaitExamples: ['Isso é real', 'Ninguém acreditou', 'O que aconteceu depois', 'Você não vai acreditar'],
+    textColor: 'blood red or ghostly white',
   },
   'motivat': {
     style: 'warm',
@@ -89,6 +92,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'determined powerful expression, clenched fist, triumphant pose',
     descriptionVoice: 'energética, verbos de ação, empoderamento, inspiração',
     clickbaitExamples: ['Isso mudou tudo', 'Ninguém te contou', 'Pare de fazer isso', 'O segredo que funciona'],
+    textColor: 'golden yellow',
   },
   'energetic': {
     style: 'warm',
@@ -97,6 +101,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'excited triumphant expression, arms raised, celebration',
     descriptionVoice: 'energética, dinâmica, inspiradora, cheia de ação',
     clickbaitExamples: ['Isso mudou tudo', 'Agora ou nunca', 'Comece hoje', 'A virada aconteceu'],
+    textColor: 'fiery orange or bold yellow',
   },
   'coach': {
     style: 'warm',
@@ -105,6 +110,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'confident determined expression, pointing forward',
     descriptionVoice: 'direta, motivadora, verbos de ação, tom de mentor',
     clickbaitExamples: ['Pare de fazer isso', 'Isso mudou tudo', 'A verdade que dói', 'Você está fazendo errado'],
+    textColor: 'golden yellow or power red',
   },
   'education': {
     style: 'clean',
@@ -113,6 +119,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'surprised enlightened expression, wide eyes of discovery, lightbulb moment',
     descriptionVoice: 'clara, didática, promessa de aprendizado, linguagem acessível',
     clickbaitExamples: ['O erro que todos cometem', 'Simples assim', 'Ninguém ensina isso', 'A resposta surpreende'],
+    textColor: 'bright white or knowledge blue',
   },
   'explanat': {
     style: 'clean',
@@ -121,6 +128,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'curious thoughtful expression, hand on chin',
     descriptionVoice: 'clara, lógica, passo a passo, didática',
     clickbaitExamples: ['O erro que todos cometem', 'Simples assim', 'Finalmente explicado', 'Agora faz sentido'],
+    textColor: 'highlight yellow or bright white',
   },
   'clear': {
     style: 'clean',
@@ -129,6 +137,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'confident knowing expression, nodding',
     descriptionVoice: 'clara, objetiva, sem rodeios, fácil de entender',
     clickbaitExamples: ['Ninguém ensina isso', 'A verdade é simples', 'Você não sabia', 'Finalmente explicado'],
+    textColor: 'bright white',
   },
   'wendover': {
     style: 'clean',
@@ -137,6 +146,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'intrigued analytical expression',
     descriptionVoice: 'analítica, informativa, curiosa, baseada em dados',
     clickbaitExamples: ['A logística impossível', 'Por que isso funciona', 'O sistema que ninguém vê', 'A matemática por trás'],
+    textColor: 'bright white or data green',
   },
   'business': {
     style: 'clean',
@@ -145,6 +155,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'shocked businessman expression, jaw dropped, professional disbelief',
     descriptionVoice: 'formal, dados, autoridade, tom profissional e confiante',
     clickbaitExamples: ['Por que você está perdendo dinheiro', 'A verdade sobre...', 'O mercado não quer que você saiba', 'Seus concorrentes já sabem'],
+    textColor: 'bright white or gold',
   },
   'corporate': {
     style: 'clean',
@@ -153,6 +164,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'serious authoritative expression, crossed arms',
     descriptionVoice: 'formal, autoritativa, baseada em dados e resultados',
     clickbaitExamples: ['A verdade sobre...', 'Seus concorrentes já sabem', 'O erro que custa milhões', 'Estratégia revelada'],
+    textColor: 'bright white or silver',
   },
   'finance': {
     style: 'clean',
@@ -161,6 +173,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'shocked expression at numbers, disbelief at charts',
     descriptionVoice: 'autoritativa, baseada em números, tom de especialista',
     clickbaitExamples: ['Perdendo dinheiro sem saber', 'O investimento que ninguém fala', 'Antes que seja tarde', 'O erro de R$ milhões'],
+    textColor: 'money green or gold',
   },
   'crime': {
     style: 'cinematic',
@@ -169,6 +182,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'serious investigative expression, stern face',
     descriptionVoice: 'sombria, investigativa, séria, linguagem de documentário criminal',
     clickbaitExamples: ['O caso que chocou', 'Ninguém acreditou', 'A evidência perdida', 'Caso não resolvido'],
+    textColor: 'evidence yellow or blood red',
   },
   'serious': {
     style: 'cinematic',
@@ -177,6 +191,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'intense serious expression, deep thought',
     descriptionVoice: 'séria, investigativa, documental, imparcial mas impactante',
     clickbaitExamples: ['O caso que chocou', 'Ninguém investigou', 'A verdade por trás', 'Caso encerrado?'],
+    textColor: 'cold white or evidence yellow',
   },
   'documentary': {
     style: 'cinematic',
@@ -185,6 +200,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'contemplative expression, gazing into distance',
     descriptionVoice: 'formal, jornalística, informativa, tom de narrador de documentário',
     clickbaitExamples: ['O que realmente aconteceu', 'A história que não contaram', 'Revelado pela primeira vez', 'Imagens inéditas'],
+    textColor: 'bright white or warm amber',
   },
   'calm': {
     style: 'warm',
@@ -193,6 +209,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'serene peaceful expression, gentle smile, relaxed',
     descriptionVoice: 'suave, acolhedora, convidativa, linguagem de conforto',
     clickbaitExamples: ['Você precisa ver isso', 'Tente fazer isso hoje', 'O momento perfeito', 'Relaxe e assista'],
+    textColor: 'warm white or soft gold',
   },
   'cozy': {
     style: 'warm',
@@ -201,6 +218,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'content peaceful smile, eyes half-closed, comfort',
     descriptionVoice: 'suave, íntima, acolhedora, como um abraço em palavras',
     clickbaitExamples: ['Você precisa disso', 'O momento perfeito', 'Assista antes de dormir', 'Puro conforto'],
+    textColor: 'warm cream or soft white',
   },
   'asmr': {
     style: 'warm',
@@ -209,6 +227,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'relaxed blissful expression, closed eyes, tingling',
     descriptionVoice: 'suave, delicada, sensorial, linguagem que acalma',
     clickbaitExamples: ['Você precisa ouvir isso', 'Sons que relaxam', 'Durma em minutos', 'Sensação única'],
+    textColor: 'soft lavender or whisper white',
   },
   'relax': {
     style: 'warm',
@@ -217,6 +236,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'peaceful meditative expression, deep breath',
     descriptionVoice: 'tranquila, contemplativa, convite ao descanso',
     clickbaitExamples: ['Você precisa ver isso', 'Pare e respire', 'O vídeo que acalma', 'Natureza pura'],
+    textColor: 'soft white or ocean blue',
   },
   'gaming': {
     style: 'neon',
@@ -225,6 +245,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'excited screaming expression, mind-blown reaction',
     descriptionVoice: 'dinâmica, gírias de gaming, energia alta, entusiasmo',
     clickbaitExamples: ['Ninguém faz isso', 'Isso é real?', 'Play insano', 'Impossível de repetir'],
+    textColor: 'neon green or electric blue',
   },
   'loud': {
     style: 'neon',
@@ -233,6 +254,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'screaming mind-blown expression, hands on head',
     descriptionVoice: 'explosiva, cheia de energia, gírias, reações exageradas',
     clickbaitExamples: ['IMPOSSÍVEL', 'Ninguém esperava isso', 'O play do século', 'Ficou maluco'],
+    textColor: 'neon yellow or explosive red',
   },
   'fast': {
     style: 'viral',
@@ -241,6 +263,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'shocked wide-eyed expression, hand over mouth',
     descriptionVoice: 'dinâmica, rápida, impactante, frases curtas e diretas',
     clickbaitExamples: ['#1 chocou a todos', 'Impossível? Não.', 'Você não sabia disso', 'Fatos insanos'],
+    textColor: 'attention yellow or bold red',
   },
   'viral': {
     style: 'viral',
@@ -249,6 +272,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'exaggerated shocked face, jaw on floor, hands up',
     descriptionVoice: 'ultra dinâmica, provocativa, irresistível, FOMO total',
     clickbaitExamples: ['Isso é real?', 'Ninguém acreditou', 'Você não vai acreditar', 'O mais insano de todos'],
+    textColor: 'attention yellow or bold white',
   },
   'vlog': {
     style: 'warm',
@@ -257,6 +281,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'genuine surprise expression, authentic reaction',
     descriptionVoice: 'primeira pessoa, próximo, autêntico, como um amigo contando',
     clickbaitExamples: ['Não acreditei', 'Isso aconteceu comigo', 'Nunca mais faço isso', 'Vocês pediram'],
+    textColor: 'bright white or warm yellow',
   },
   'personal': {
     style: 'warm',
@@ -265,6 +290,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'surprised genuine expression, hand pointing',
     descriptionVoice: 'pessoal, íntima, autêntica, como conversa de amigo',
     clickbaitExamples: ['Isso aconteceu comigo', 'Não acreditei quando vi', 'Preciso contar', 'Vocês não vão acreditar'],
+    textColor: 'bright white or friendly yellow',
   },
   'enthusiast': {
     style: 'warm',
@@ -273,6 +299,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'excited enthusiastic expression, big smile, thumbs up',
     descriptionVoice: 'entusiasmada, contagiante, cheia de energia positiva',
     clickbaitExamples: ['Melhor coisa que já fiz', 'Testei e aprovei', 'Isso é incrível', 'Vocês precisam ver'],
+    textColor: 'energetic orange or bright white',
   },
   'legend': {
     style: 'cinematic',
@@ -281,6 +308,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'mysterious knowing expression, raised eyebrow, ancient wisdom',
     descriptionVoice: 'narrativa, misteriosa, envolvente, tom de contador de histórias',
     clickbaitExamples: ['Isso realmente aconteceu', 'Ninguém explica', 'A lenda é verdadeira', 'Não deveria existir'],
+    textColor: 'ancient gold or mystic purple',
   },
   'folklore': {
     style: 'cinematic',
@@ -289,6 +317,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'awestruck ancient expression, gazing at something mystical',
     descriptionVoice: 'narrativa, misteriosa, ancestral, tom de lenda',
     clickbaitExamples: ['Isso realmente aconteceu', 'A lenda proibida', 'Ninguém deveria saber', 'O mistério continua'],
+    textColor: 'moonlight white or parchment yellow',
   },
   'child': {
     style: 'warm',
@@ -297,6 +326,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'wide-eyed wonder expression, magical sparkles, cute character',
     descriptionVoice: 'divertida, acessível, linguagem simples e encantadora',
     clickbaitExamples: ['O segredo do castelo', 'Ninguém sabia...', 'A aventura começa', 'O maior mistério'],
+    textColor: 'rainbow colors or sunshine yellow',
   },
   'kid': {
     style: 'warm',
@@ -305,6 +335,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'excited happy expression, jumping, magical wonder',
     descriptionVoice: 'alegre, lúdica, convidativa, linguagem infantil amigável',
     clickbaitExamples: ['Que legal!', 'O segredo revelado', 'A maior aventura', 'Você vai adorar'],
+    textColor: 'bright primary colors or fun pink',
   },
   'tech': {
     style: 'clean',
@@ -313,6 +344,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'skeptical analytical expression, raised eyebrow, inspecting closely',
     descriptionVoice: 'crítica, técnica, objetiva, com opinião fundamentada',
     clickbaitExamples: ['Vale mesmo a pena?', 'Testei por 30 dias', 'A verdade sobre...', 'Não compre antes de ver'],
+    textColor: 'bright white or circuit green',
   },
   'review': {
     style: 'clean',
@@ -321,6 +353,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'disappointed or impressed expression, comparing products',
     descriptionVoice: 'analítica, honesta, comparativa, baseada em testes reais',
     clickbaitExamples: ['Não vale o preço', 'Testei e me surpreendi', 'O melhor de todos?', 'Resultado inesperado'],
+    textColor: 'rating gold or bright white',
   },
   'science': {
     style: 'clean',
@@ -329,6 +362,7 @@ const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
     emotionalElement: 'amazed scientist expression, discovery moment',
     descriptionVoice: 'científica, curiosa, baseada em evidências, acessível',
     clickbaitExamples: ['A ciência explica', 'Descoberta chocante', 'Ninguém esperava esse resultado', 'O experimento proibido'],
+    textColor: 'neon accent or bright white',
   },
 };
 
@@ -340,6 +374,7 @@ const DEFAULT_CONFIG: ToneVisualConfig = {
   emotionalElement: 'impactful expression, strong emotion',
   descriptionVoice: 'envolvente, profissional, clara e impactante',
   clickbaitExamples: ['Você não vai acreditar', 'Isso muda tudo', 'A verdade revelada', 'Ninguém esperava'],
+  textColor: 'bright yellow or white',
 };
 
 // =============================================
