@@ -396,6 +396,7 @@ const getToneConfig = (tone: string): ToneVisualConfig => {
 /**
  * Generates the clickbait text and complete image prompt for thumbnail generation.
  * No AI call needed — deterministic based on tone + content analysis.
+ * Follows proven high-CTR YouTube thumbnail rules.
  */
 export const buildThumbnailPrompt = (params: ThumbnailDescriptionParams): ThumbnailResult => {
   const { title, script, narrativeTone, niche } = params;
@@ -407,19 +408,25 @@ export const buildThumbnailPrompt = (params: ThumbnailDescriptionParams): Thumbn
   // Build the niche-specific visual element
   const nicheVisual = getNicheVisualElement(niche, narrativeTone);
   
-  // Build complete image prompt (Rule 2)
-  const imagePrompt = [
-    `YouTube thumbnail`,
-    config.visualKeywords,
-    `text overlay "${clickbaitText}"`,
-    nicheVisual,
-    config.emotionalElement,
-    `color palette: ${config.colorPalette}`,
-    `high contrast, bold colors, professional design`,
-    `16:9 aspect ratio, no watermark, 4K quality`,
-    `the text must be large, bold, and perfectly readable`,
-    `cinematic depth of field, dramatic composition`,
-  ].join(', ');
+  // Build complete image prompt with high-CTR rules
+  const imagePrompt = `
+    YouTube thumbnail, ultra high CTR design, professional quality, 1280x720px.
+    
+    REQUIRED ELEMENTS:
+    1. Human face with EXTREME ${config.emotionalElement} emotion, eyes wide open looking directly at camera, photorealistic
+    2. Bold text overlay "${clickbaitText}" in the left or bottom third, maximum 4 words, 
+       ${config.textColor} color with thick black stroke, huge font size
+    3. A red arrow or circle pointing at the main subject
+    4. A thin red progress bar (4px height) at the very bottom of the image, filled 70% width, 
+       mimicking a YouTube video progress bar that is 70% watched
+    5. ${config.visualKeywords} background style, ${nicheVisual}
+    6. Color palette: ${config.colorPalette}
+    7. EXTREME contrast between background and foreground elements
+    8. NO watermarks, NO logos, NO text other than the overlay specified
+    
+    Style: ${config.style}, cinematic quality, thumbnail optimized for maximum click-through rate.
+    The overall composition must be immediately eye-catching even at small sizes (mobile feed).
+  `.trim();
   
   return {
     clickbaitText,
