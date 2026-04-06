@@ -994,13 +994,14 @@ export const generateThumbnailHook = async (
     scriptSummary: string = '',
     script?: ScriptData,
     niche?: string,
+    libraryItems?: import('../types').LibraryItem[],
 ): Promise<{ mainText: string; accentText: string; style: ThumbnailStyle }> => {
     // If we have script data, use the new intelligent system
     if (script) {
         const { buildThumbnailPrompt } = await import('./thumbnailDescriptionService');
         const result = buildThumbnailPrompt({
             title, script, narrativeTone: tone, niche: niche || '',
-            language,
+            language, libraryItems,
         });
         const words = result.clickbaitText.split(' ');
         const mid = Math.ceil(words.length / 2);
@@ -1070,6 +1071,7 @@ export const generateThumbnail = async (
     scriptSummary: string = '',
     script?: ScriptData,
     niche?: string,
+    libraryItems?: import('../types').LibraryItem[],
 ): Promise<string> => {
     try {
         let imagePrompt: string;
@@ -1079,6 +1081,7 @@ export const generateThumbnail = async (
             const { buildThumbnailPrompt } = await import('./thumbnailDescriptionService');
             const result = buildThumbnailPrompt({
                 title: topic, script, narrativeTone: tone, niche: niche || '',
+                libraryItems,
             });
             imagePrompt = result.imagePrompt;
             console.log(`[DarkStream AI] 🎨 Thumbnail prompt (intelligent): ${imagePrompt.substring(0, 100)}...`);
