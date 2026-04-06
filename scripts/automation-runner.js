@@ -1,13 +1,14 @@
 /**
  * 🤖 Automation Runner — GitHub Actions Pipeline
- * Executes the full video creation + YouTube upload pipeline.
- * Runs as a standalone Node.js script via GitHub Actions cron.
+ * Fully autonomous: generates idea → script → voice → visuals → thumbnail → metadata → render → upload.
+ * Runs as a standalone Node.js script via GitHub Actions cron — NO browser needed.
  */
 
 import { createClient } from '@supabase/supabase-js';
 import axios from 'axios';
 import path from 'path';
 import os from 'os';
+import fs from 'fs';
 import { renderVideo, cleanupTmp } from './videoRenderer.js';
 import { refreshAccessToken, uploadVideoFile, uploadThumbnail } from './youtubeUploader.js';
 
@@ -85,6 +86,54 @@ async function geminiGenerateImage(prompt) {
     log('⚠️', `Image generation failed, skipping thumbnail: ${err.message}`);
     return null;
   }
+}
+
+/**
+ * 🎙️ Generate TTS audio for a single text segment using Gemini TTS API.
+ * Returns base64-encoded PCM/WAV audio.
+ */
+async function geminiTTS(text, voiceName = 'Fenrir', tone = 'Cinematic') {
+  const SUPPORTED_VOICES = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'];
+  const VOICE_MAPPING = { 'Aoede': 'Kore', 'Leda': 'Kore' };
+
+  let finalVoice = voiceName;
+  if (!SUPPORTED_VOICES.includes(voiceName)) {
+    finalVoice = VOICE_MAPPING[voiceName] || 'Fenrir';
+  }
+
+  const t = (tone || '').toLowerCase();
+  let styleInstruction = 'Read clearly and naturally.';
+  if (t.includes('horror') || t.includes('dark') || t.includes('suspense')) {
+    styleInstruction = 'Read in a low, tense, and ominous tone with dramatic pauses.';
+  } else if (t.includes('child') || t.includes('kid')) {
+    styleInstruction = 'Read in a warm, enthusiastic, and friendly tone.';
+  } else if (t.includes('motiv') || t.includes('energ')) {
+    styleInstruction = 'Read in an energetic, inspiring, and powerful tone.';
+  }
+
+  const ttsPrompt = `Style: ${styleInstruction}\n\nText to read: "${text}"`;
+
+  const res = await axios.post(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${GEMINI_API_KEY}`,
+    {
+      contents: [{ parts: [{ text: ttsPrompt }] }],
+      generationConfig: {
+        responseModalities: ['AUDIO'],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: finalVoice },
+          },
+        },
+      },
+    }
+  );
+
+  const audioPart = res.data.candidates?.[0]?.content?.parts?.find(p => p.inlineData?.data);
+  if (!audioPart?.inlineData?.data) {
+    throw new Error('TTS returned no audio data');
+  }
+
+  return audioPart.inlineData.data; // base64 audio
 }
 
 async function searchPexels(query, usedIds, isVideo = true) {
@@ -180,20 +229,66 @@ Return JSON with this structure:
     {
       "sectionTitle": "Introduction",
       "narratorText": "full narration text for this section",
-      "visualDescriptions": ["visual prompt 1", "visual prompt 2"]
+      "visualDescriptions": ["visual prompt 1", "visual prompt 2"],
+      "estimatedDuration": 30
     }
   ]
 }
 
-Create 4-6 segments. Each segment should have 2-3 visual descriptions.`;
+Create 4-6 segments. Each segment should have 2-3 visual descriptions. estimatedDuration is in seconds.`;
 
-  const script = await geminiGenerateJSON(prompt, 8192);
+  const script = await geminiWithRetry(() => geminiGenerateJSON(prompt, 8192));
   log('✅', `Script generated: ${script.segments?.length || 0} segments`);
   return script;
 }
 
+/**
+ * 🎙️ Step 3: Generate voice narration for ALL segments using Gemini TTS.
+ * Concatenates all segment audio into a single base64 buffer.
+ * Returns the combined audio as a base64 string ready for the renderer.
+ */
+async function stepVoice(script, projectData) {
+  log('🎙️', 'Step 3: Generating voice narration...');
+
+  const segments = script.segments || [];
+  if (segments.length === 0) throw new Error('No segments in script for TTS');
+
+  const audioChunks = [];
+
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const text = seg.narratorText;
+    if (!text || !text.trim()) {
+      log('⚠️', `  Segment ${i + 1} has no text, skipping`);
+      continue;
+    }
+
+    log('🎤', `  Generating TTS for segment ${i + 1}/${segments.length} (${text.length} chars)...`);
+
+    const audioBase64 = await geminiWithRetry(() =>
+      geminiTTS(text, projectData.defaultVoice || 'Fenrir', projectData.defaultTone || 'Cinematic')
+    );
+
+    audioChunks.push(Buffer.from(audioBase64, 'base64'));
+
+    // Small delay between segments to avoid rate limits
+    if (i < segments.length - 1) {
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+
+  if (audioChunks.length === 0) throw new Error('No audio generated for any segment');
+
+  // Concatenate all audio buffers into one
+  const combined = Buffer.concat(audioChunks);
+  const combinedBase64 = combined.toString('base64');
+
+  log('✅', `Voice generated: ${audioChunks.length} segments, ${(combined.length / 1024 / 1024).toFixed(1)}MB total`);
+  return combinedBase64;
+}
+
 async function stepVisuals(script, projectData) {
-  log('🎨', 'Step 3: Searching visuals...');
+  log('🎨', 'Step 4: Searching visuals...');
   const usedIds = new Set();
   const toneModifier = getToneModifier(projectData.defaultTone);
   const scenes = [];
@@ -236,7 +331,7 @@ async function stepVisuals(script, projectData) {
 }
 
 async function stepThumbnail(title, script, projectData) {
-  log('🖼️', 'Step 4: Generating thumbnail prompt...');
+  log('🖼️', 'Step 5: Generating thumbnail...');
 
   const toneStyle = getToneModifier(projectData.defaultTone);
   const scriptSummary = script.segments
@@ -250,16 +345,19 @@ Tone: ${projectData.defaultTone}. Channel niche: ${projectData.channelTheme}.
 Script summary: ${scriptSummary}
 Return JSON: { "clickbaitText": "...", "imagePrompt": "full prompt for thumbnail image generation" }`;
 
-  const result = await geminiGenerateJSON(prompt);
+  const result = await geminiWithRetry(() => geminiGenerateJSON(prompt));
 
   const fullPrompt = `YouTube thumbnail, ${toneStyle} style, text overlay "${result.clickbaitText}", ${result.imagePrompt}, high contrast, bold colors, professional design, 16:9 aspect ratio, no watermark`;
 
-  log('✅', `Thumbnail: "${result.clickbaitText}"`);
-  return { clickbaitText: result.clickbaitText, imagePrompt: fullPrompt };
+  // Try to generate actual thumbnail image
+  const thumbnailBase64 = await geminiWithRetry(() => geminiGenerateImage(fullPrompt));
+
+  log('✅', `Thumbnail: "${result.clickbaitText}" ${thumbnailBase64 ? '(image generated)' : '(text only, no image)'}`);
+  return { clickbaitText: result.clickbaitText, imagePrompt: fullPrompt, thumbnailBase64 };
 }
 
 async function stepMetadata(title, script, projectData) {
-  log('📊', 'Step 5: Generating SEO metadata...');
+  log('📊', 'Step 6: Generating SEO metadata...');
 
   const fullText = script.segments.map((s) => s.narratorText).join(' ');
   const prompt = `Generate YouTube SEO metadata for a video titled "${title}".
@@ -273,13 +371,13 @@ Return JSON:
   "tags": ["tag1", "tag2", "...up to 15 tags"]
 }`;
 
-  const metadata = await geminiGenerateJSON(prompt);
+  const metadata = await geminiWithRetry(() => geminiGenerateJSON(prompt));
   log('✅', `Metadata: "${metadata.title}"`);
   return metadata;
 }
 
-async function stepRenderVideo(scenes, script, projectData) {
-  log('🎬', 'Step 6: Rendering video with FFmpeg...');
+async function stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, projectData) {
+  log('🎬', 'Step 7: Rendering video with FFmpeg...');
 
   const tmpDir = path.join(os.tmpdir(), `autopost_${Date.now()}`);
 
@@ -291,9 +389,9 @@ async function stepRenderVideo(scenes, script, projectData) {
   const videoPath = await renderVideo({
     visuals,
     segments: script.segments || [],
-    audioBase64: projectData._audioBase64 || null,
-    musicUrl: projectData.backgroundMusicUrl || null,
-    thumbnailBase64: projectData._thumbnailBase64 || null,
+    audioBase64: audioBase64,
+    musicUrl: null, // Music is handled via Pexels ambient or skipped on server
+    thumbnailBase64: thumbnailBase64 || null,
     tmpDir,
   });
 
@@ -301,8 +399,8 @@ async function stepRenderVideo(scenes, script, projectData) {
   return { videoPath, tmpDir };
 }
 
-async function stepUploadYouTube(projectData, metadata, renderResult) {
-  log('📤', 'Step 7: Uploading to YouTube...');
+async function stepUploadYouTube(projectData, metadata, renderResult, thumbnailBase64) {
+  log('📤', 'Step 8: Uploading to YouTube...');
 
   if (!YOUTUBE_CLIENT_ID || !YOUTUBE_CLIENT_SECRET) {
     throw new Error('YouTube credentials not configured');
@@ -319,12 +417,12 @@ async function stepUploadYouTube(projectData, metadata, renderResult) {
 
     const { videoUrl, videoId } = await uploadVideoFile(accessToken, renderResult.videoPath, metadata);
 
-    // Upload thumbnail separately
-    if (projectData._thumbnailBase64) {
-      await uploadThumbnail(accessToken, videoId, projectData._thumbnailBase64);
+    // Upload thumbnail separately if we have one
+    if (thumbnailBase64) {
+      await uploadThumbnail(accessToken, videoId, thumbnailBase64);
     }
 
-    return { uploaded: true, videoUrl };
+    return { uploaded: true, videoUrl, videoId };
   } finally {
     cleanupTmp(renderResult.tmpDir);
   }
@@ -354,32 +452,51 @@ async function processProject(projectRow) {
     currentStep = 'script';
     const script = await stepScript(idea.topic, data);
 
-    // Step 3: Visuals
+    // Step 3: Voice/Narration (NEW — was missing!)
+    currentStep = 'voice';
+    const audioBase64 = await stepVoice(script, data);
+
+    // Step 4: Visuals
     currentStep = 'visuals';
     const scenes = await stepVisuals(script, data);
 
-    // Step 4: Thumbnail (optional — does not break pipeline)
+    // Step 5: Thumbnail (optional — does not break pipeline)
     currentStep = 'thumbnail';
-    let thumbnail = null;
+    let thumbnailBase64 = null;
     try {
-      thumbnail = await stepThumbnail(idea.topic, script, data);
-      if (thumbnail) log('🖼️', 'Thumbnail generated');
+      const thumbResult = await stepThumbnail(idea.topic, script, data);
+      thumbnailBase64 = thumbResult?.thumbnailBase64 || null;
+      if (thumbnailBase64) log('🖼️', 'Thumbnail image generated');
       else log('⚠️', 'Thumbnail not generated, continuing without it');
     } catch {
       log('⚠️', 'Thumbnail failed, continuing without it');
     }
 
-    // Step 5: Metadata
+    // Step 6: Metadata
     currentStep = 'metadata';
-    const metadata = await geminiWithRetry(() => stepMetadata(idea.topic, script, data));
+    const metadata = await stepMetadata(idea.topic, script, data);
 
-    // Step 6: Render Video
+    // Step 7: Render Video (now receives audio!)
     currentStep = 'render';
-    const renderResult = await stepRenderVideo(scenes, script, data);
+    const renderResult = await stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, data);
 
-    // Step 7: Upload
+    // Step 8: Upload
     currentStep = 'upload';
-    const uploadResult = await stepUploadYouTube(data, metadata, renderResult);
+    const uploadResult = await stepUploadYouTube(data, metadata, renderResult, thumbnailBase64);
+
+    // Save video record into project data
+    const newVideo = {
+      id: `auto_${Date.now()}`,
+      projectId,
+      title: metadata.title || idea.topic,
+      status: 'PUBLISHED',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      youtubeUrl: uploadResult?.videoUrl || null,
+    };
+
+    if (!data.videos) data.videos = [];
+    data.videos.push(newVideo);
 
     // Calculate next run
     const settings = data.scheduleSettings || {};
@@ -393,7 +510,8 @@ async function processProject(projectRow) {
     nextRun.setDate(nextRun.getDate() + freqDays);
     nextRun.setHours(randomH, randomM, 0, 0);
 
-    data.nextScheduledRun = nextRun.toISOString();
+    if (!data.scheduleSettings) data.scheduleSettings = {};
+    data.scheduleSettings.nextScheduledRun = nextRun.toISOString();
 
     // Save updated project data
     await supabase.from('projects').update({ data, updated_at: new Date().toISOString() }).eq('id', projectId);
@@ -470,7 +588,9 @@ async function main() {
     if (PROJECT_ID) return true;
 
     // Check if it's time to run
-    const nextRun = d.nextScheduledRun ? new Date(d.nextScheduledRun) : new Date(0);
+    const nextRun = d.scheduleSettings?.nextScheduledRun
+      ? new Date(d.scheduleSettings.nextScheduledRun)
+      : new Date(0);
     return nextRun <= now;
   });
 
