@@ -1,11 +1,18 @@
 /**
- * THUMBNAIL & DESCRIPTION ENGINE
+ * THUMBNAIL & DESCRIPTION ENGINE v2
  * 
- * Intelligent clickbait thumbnail generation and 3-layer YouTube descriptions.
- * Tone-aware, SEO-optimized, and coherent between thumbnail text and description hook.
+ * Based on YouTube CTR Psychology Guide:
+ * - 200ms decision window → visual impact first, text second
+ * - 6 psychological triggers: Curiosity Gap, FOMO, Visual Dissonance, 
+ *   Personal Relevance, Facial Recognition, Reward Anticipation
+ * - Face covering 40-60% of frame with extreme expression
+ * - Max 3-5 words, bold font, high contrast
+ * - Honest clickbait (high CTR + high retention)
+ * 
+ * Uses channel branding from Library for visual identity consistency.
  */
 
-import { ScriptData, ScriptSegment } from "../types";
+import { ScriptData, ScriptSegment, LibraryItem } from "../types";
 
 // =============================================
 // TYPES
@@ -14,24 +21,16 @@ import { ScriptData, ScriptSegment } from "../types";
 export type ThumbnailStyle = 'viral' | 'cinematic' | 'horror' | 'clean' | 'neon' | 'warm';
 
 export interface ThumbnailResult {
-  /** Clickbait text for the thumbnail overlay (max 5 words) */
   clickbaitText: string;
-  /** Full image generation prompt ready for Gemini */
   imagePrompt: string;
-  /** Recommended visual style */
   style: ThumbnailStyle;
-  /** Color palette description */
   colorPalette: string;
 }
 
 export interface DescriptionResult {
-  /** Full YouTube description with all 3 layers */
   fullDescription: string;
-  /** Layer 1: Hook (first 2 lines visible before "show more") */
   hook: string;
-  /** Layer 2: Content summary */
   summary: string;
-  /** Layer 3: SEO hashtags + CTA */
   seoBlock: string;
 }
 
@@ -41,6 +40,8 @@ export interface ThumbnailDescriptionParams {
   narrativeTone: string;
   niche: string;
   language?: string;
+  /** Channel library items for branding context */
+  libraryItems?: LibraryItem[];
 }
 
 // =============================================
@@ -53,328 +54,579 @@ interface ToneVisualConfig {
   visualKeywords: string;
   emotionalElement: string;
   descriptionVoice: string;
-  clickbaitExamples: string[];
+  clickbaitPatterns: ClickbaitPattern[];
   textColor: string;
+  facialExpression: string; // Specific face instruction for 40-60% coverage
+}
+
+/** Clickbait patterns with psychological trigger type */
+interface ClickbaitPattern {
+  text: string;
+  trigger: 'curiosity_gap' | 'fomo' | 'shock' | 'personal' | 'urgency' | 'controversy' | 'number' | 'before_after';
 }
 
 const TONE_CONFIGS: Record<string, ToneVisualConfig> = {
   'horror': {
     style: 'horror',
-    colorPalette: 'dark blacks, deep reds, cold blues, fog whites',
-    visualKeywords: 'dark horror style with red accents, dramatic shadows, fog, eerie atmosphere',
-    emotionalElement: 'fearful expression close-up, wide terrified eyes',
+    colorPalette: 'pure blacks, blood reds (#FF0000), ghostly whites, cold blues',
+    visualKeywords: 'dark horror style with red accents, dramatic shadows, volumetric fog, eerie atmosphere',
+    emotionalElement: 'terrified person looking at something unseen off-camera',
+    facialExpression: 'extreme terror, wide eyes with visible whites, mouth slightly open in horror, sweating, pale skin',
     descriptionVoice: 'sombria, suspense, frases curtas e impactantes, linguagem tensa',
-    clickbaitExamples: ['Você não deveria saber disso', 'O que eles escondem', 'Isso não deveria existir', 'Ninguém sobreviveu'],
-    textColor: 'blood red or ghostly white',
+    clickbaitPatterns: [
+      { text: 'Não deveria existir', trigger: 'shock' },
+      { text: 'O que eles escondem', trigger: 'curiosity_gap' },
+      { text: 'Ninguém sobreviveu', trigger: 'shock' },
+      { text: 'Isso é real?', trigger: 'curiosity_gap' },
+      { text: 'Não assista sozinho', trigger: 'fomo' },
+    ],
+    textColor: '#FF0000 blood red with thick black stroke outline',
   },
   'suspens': {
     style: 'horror',
-    colorPalette: 'dark navy, shadow blacks, accent golds, muted teals',
-    visualKeywords: 'dark mysterious style, dramatic lighting, shadows, tension',
-    emotionalElement: 'intense gaze, suspicious expression, narrowed eyes',
+    colorPalette: 'dark navy (#0A1628), shadow blacks, accent golds (#FFD700), muted teals',
+    visualKeywords: 'dark mysterious style, dramatic side lighting, deep shadows, tension',
+    emotionalElement: 'person half-hidden in shadow looking suspicious',
+    facialExpression: 'intense suspicious gaze, narrowed eyes, one side lit dramatically, jaw clenched',
     descriptionVoice: 'sombria, suspense, frases curtas e impactantes, mistério',
-    clickbaitExamples: ['Você não deveria saber disso', 'A verdade escondida', 'Ninguém percebeu isso', 'O que realmente aconteceu'],
-    textColor: 'cold white or pale blue',
+    clickbaitPatterns: [
+      { text: 'A verdade escondida', trigger: 'curiosity_gap' },
+      { text: 'Ninguém percebeu isso', trigger: 'curiosity_gap' },
+      { text: 'O que aconteceu de verdade', trigger: 'curiosity_gap' },
+      { text: 'Você não deveria saber', trigger: 'fomo' },
+      { text: 'Caso não resolvido', trigger: 'curiosity_gap' },
+    ],
+    textColor: 'cold white (#FFFFFF) with heavy black stroke',
   },
   'dark': {
     style: 'horror',
-    colorPalette: 'pure blacks, blood reds, ghostly whites, purple shadows',
-    visualKeywords: 'dark atmospheric style, horror aesthetic, dramatic shadows, volumetric fog',
-    emotionalElement: 'shocked terrified expression, mouth agape',
+    colorPalette: 'pure blacks, blood reds (#CC0000), ghostly whites, purple shadows (#2D1B4E)',
+    visualKeywords: 'dark atmospheric style, horror aesthetic, dramatic shadows, volumetric fog, backlit silhouettes',
+    emotionalElement: 'person reacting to something terrifying behind them',
+    facialExpression: 'shocked terrified expression, mouth agape, eyes wide showing fear, hands raised defensively',
     descriptionVoice: 'sombria, frases curtas, linguagem tensa e impactante',
-    clickbaitExamples: ['Isso é real', 'Ninguém acreditou', 'O que aconteceu depois', 'Você não vai acreditar'],
-    textColor: 'blood red or ghostly white',
+    clickbaitPatterns: [
+      { text: 'Isso é real', trigger: 'shock' },
+      { text: 'Ninguém acreditou', trigger: 'shock' },
+      { text: 'O que aconteceu depois', trigger: 'curiosity_gap' },
+      { text: 'A verdade proibida', trigger: 'curiosity_gap' },
+      { text: 'Caso encerrado?', trigger: 'curiosity_gap' },
+    ],
+    textColor: 'blood red (#FF0000) or ghostly white with thick black stroke',
   },
   'motivat': {
     style: 'warm',
-    colorPalette: 'warm oranges, golden yellows, sunrise pinks, deep purples',
-    visualKeywords: 'motivational epic style, golden hour lighting, sunrise colors, empowering atmosphere',
-    emotionalElement: 'determined powerful expression, clenched fist, triumphant pose',
+    colorPalette: 'warm oranges (#FF6B00), golden yellows (#FFD700), sunrise pinks, deep purples',
+    visualKeywords: 'motivational epic style, golden hour lighting, sunrise colors, empowering atmosphere, lens flare',
+    emotionalElement: 'person in triumphant pose against sunrise backdrop',
+    facialExpression: 'determined powerful expression, clenched jaw, piercing eyes looking at camera, confident smile',
     descriptionVoice: 'energética, verbos de ação, empoderamento, inspiração',
-    clickbaitExamples: ['Isso mudou tudo', 'Ninguém te contou', 'Pare de fazer isso', 'O segredo que funciona'],
-    textColor: 'golden yellow',
+    clickbaitPatterns: [
+      { text: 'Isso mudou tudo', trigger: 'before_after' },
+      { text: 'Pare de fazer isso', trigger: 'personal' },
+      { text: 'O segredo que funciona', trigger: 'curiosity_gap' },
+      { text: 'Comece hoje', trigger: 'urgency' },
+      { text: 'A virada aconteceu', trigger: 'before_after' },
+    ],
+    textColor: 'golden yellow (#FFD700) with dark stroke',
   },
   'energetic': {
     style: 'warm',
-    colorPalette: 'fiery oranges, electric yellows, power reds, sunset golds',
-    visualKeywords: 'energetic powerful style, dynamic lighting, bold colors, epic atmosphere',
-    emotionalElement: 'excited triumphant expression, arms raised, celebration',
+    colorPalette: 'fiery oranges (#FF4500), electric yellows (#FFFF00), power reds, sunset golds',
+    visualKeywords: 'energetic powerful style, dynamic lighting, bold saturated colors, epic atmosphere',
+    emotionalElement: 'person celebrating with arms raised',
+    facialExpression: 'excited triumphant expression, big open smile, eyes bright, energy and joy radiating',
     descriptionVoice: 'energética, dinâmica, inspiradora, cheia de ação',
-    clickbaitExamples: ['Isso mudou tudo', 'Agora ou nunca', 'Comece hoje', 'A virada aconteceu'],
-    textColor: 'fiery orange or bold yellow',
+    clickbaitPatterns: [
+      { text: 'Agora ou nunca', trigger: 'urgency' },
+      { text: 'Isso mudou tudo', trigger: 'before_after' },
+      { text: 'Comece hoje', trigger: 'urgency' },
+      { text: 'A virada aconteceu', trigger: 'before_after' },
+      { text: 'Impossível? Não.', trigger: 'shock' },
+    ],
+    textColor: 'fiery orange (#FF4500) or bold yellow with dark stroke',
   },
   'coach': {
     style: 'warm',
-    colorPalette: 'deep orange, gold, motivational red, clean white',
-    visualKeywords: 'coaching motivational style, sunrise backdrop, powerful atmosphere',
-    emotionalElement: 'confident determined expression, pointing forward',
+    colorPalette: 'deep orange (#E65100), gold (#FFD700), motivational red (#CC0000), clean white',
+    visualKeywords: 'coaching motivational style, sunrise backdrop, powerful atmosphere, stadium lights',
+    emotionalElement: 'person pointing directly at camera like a mentor',
+    facialExpression: 'confident determined expression, pointing forward at viewer, slightly furrowed brow, authoritative',
     descriptionVoice: 'direta, motivadora, verbos de ação, tom de mentor',
-    clickbaitExamples: ['Pare de fazer isso', 'Isso mudou tudo', 'A verdade que dói', 'Você está fazendo errado'],
-    textColor: 'golden yellow or power red',
+    clickbaitPatterns: [
+      { text: 'Pare de fazer isso', trigger: 'personal' },
+      { text: 'Isso mudou tudo', trigger: 'before_after' },
+      { text: 'A verdade que dói', trigger: 'controversy' },
+      { text: 'Você está fazendo errado', trigger: 'personal' },
+      { text: 'Ninguém te contou', trigger: 'curiosity_gap' },
+    ],
+    textColor: 'golden yellow (#FFD700) or power red (#CC0000) with dark stroke',
   },
   'education': {
     style: 'clean',
-    colorPalette: 'clean whites, knowledge blues, accent greens, subtle grays',
-    visualKeywords: 'clean educational style, bright professional lighting, modern minimal design',
-    emotionalElement: 'surprised enlightened expression, wide eyes of discovery, lightbulb moment',
+    colorPalette: 'clean whites, knowledge blues (#1E88E5), accent greens (#43A047), subtle grays',
+    visualKeywords: 'clean educational style, bright professional lighting, modern minimal design, diagrams',
+    emotionalElement: 'person having a lightbulb moment of discovery',
+    facialExpression: 'surprised enlightened expression, wide eyes of discovery, eyebrows raised, mouth slightly open in amazement',
     descriptionVoice: 'clara, didática, promessa de aprendizado, linguagem acessível',
-    clickbaitExamples: ['O erro que todos cometem', 'Simples assim', 'Ninguém ensina isso', 'A resposta surpreende'],
-    textColor: 'bright white or knowledge blue',
+    clickbaitPatterns: [
+      { text: 'O erro que todos cometem', trigger: 'personal' },
+      { text: 'Simples assim', trigger: 'curiosity_gap' },
+      { text: 'Ninguém ensina isso', trigger: 'curiosity_gap' },
+      { text: '5 erros fatais', trigger: 'number' },
+      { text: 'Finalmente explicado', trigger: 'curiosity_gap' },
+    ],
+    textColor: 'bright white or knowledge blue (#1E88E5) with contrasting stroke',
   },
   'explanat': {
     style: 'clean',
-    colorPalette: 'blue whites, diagram blues, highlight yellows, clean grays',
-    visualKeywords: 'explainer style, clean infographic aesthetic, bright and organized',
-    emotionalElement: 'curious thoughtful expression, hand on chin',
+    colorPalette: 'blue whites, diagram blues (#1565C0), highlight yellows (#FDD835), clean grays',
+    visualKeywords: 'explainer style, clean infographic aesthetic, bright and organized, data visualization',
+    emotionalElement: 'person pointing at an invisible diagram with curiosity',
+    facialExpression: 'curious thoughtful expression, hand on chin, one eyebrow raised, intrigued look',
     descriptionVoice: 'clara, lógica, passo a passo, didática',
-    clickbaitExamples: ['O erro que todos cometem', 'Simples assim', 'Finalmente explicado', 'Agora faz sentido'],
-    textColor: 'highlight yellow or bright white',
+    clickbaitPatterns: [
+      { text: 'Simples assim', trigger: 'curiosity_gap' },
+      { text: 'Finalmente explicado', trigger: 'curiosity_gap' },
+      { text: 'O erro que todos cometem', trigger: 'personal' },
+      { text: 'Agora faz sentido', trigger: 'curiosity_gap' },
+      { text: '3 passos simples', trigger: 'number' },
+    ],
+    textColor: 'highlight yellow (#FDD835) or bright white with black stroke',
   },
   'clear': {
     style: 'clean',
-    colorPalette: 'clean whites, soft blues, mint greens, light grays',
+    colorPalette: 'clean whites, soft blues (#42A5F5), mint greens (#66BB6A), light grays',
     visualKeywords: 'clean minimal style, bright studio lighting, professional organized',
-    emotionalElement: 'confident knowing expression, nodding',
+    emotionalElement: 'person nodding with confident knowing look',
+    facialExpression: 'confident knowing expression, slight smile, eyes looking directly at camera, calm authority',
     descriptionVoice: 'clara, objetiva, sem rodeios, fácil de entender',
-    clickbaitExamples: ['Ninguém ensina isso', 'A verdade é simples', 'Você não sabia', 'Finalmente explicado'],
-    textColor: 'bright white',
+    clickbaitPatterns: [
+      { text: 'Ninguém ensina isso', trigger: 'curiosity_gap' },
+      { text: 'A verdade é simples', trigger: 'curiosity_gap' },
+      { text: 'Você não sabia', trigger: 'curiosity_gap' },
+      { text: 'Finalmente explicado', trigger: 'curiosity_gap' },
+      { text: 'Pare de complicar', trigger: 'personal' },
+    ],
+    textColor: 'bright white with black stroke',
   },
   'wendover': {
     style: 'clean',
-    colorPalette: 'infographic blues, data greens, map yellows, clean whites',
-    visualKeywords: 'documentary explainer style, aerial maps, data visualization aesthetic',
-    emotionalElement: 'intrigued analytical expression',
+    colorPalette: 'infographic blues (#0D47A1), data greens (#2E7D32), map yellows (#F9A825), clean whites',
+    visualKeywords: 'documentary explainer style, aerial maps, data visualization aesthetic, infographics',
+    emotionalElement: 'person looking at a map or data screen with intrigue',
+    facialExpression: 'intrigued analytical expression, eyes focused, slightly squinting, detective-like concentration',
     descriptionVoice: 'analítica, informativa, curiosa, baseada em dados',
-    clickbaitExamples: ['A logística impossível', 'Por que isso funciona', 'O sistema que ninguém vê', 'A matemática por trás'],
-    textColor: 'bright white or data green',
+    clickbaitPatterns: [
+      { text: 'A logística impossível', trigger: 'shock' },
+      { text: 'Por que isso funciona', trigger: 'curiosity_gap' },
+      { text: 'O sistema que ninguém vê', trigger: 'curiosity_gap' },
+      { text: 'A matemática por trás', trigger: 'curiosity_gap' },
+      { text: 'Em 7 números', trigger: 'number' },
+    ],
+    textColor: 'bright white or data green (#2E7D32) with dark stroke',
   },
   'business': {
     style: 'clean',
-    colorPalette: 'corporate dark blues, gold accents, clean whites, power blacks',
-    visualKeywords: 'corporate dark blue style, professional lighting, modern city backdrop',
-    emotionalElement: 'shocked businessman expression, jaw dropped, professional disbelief',
+    colorPalette: 'corporate dark blues (#0D47A1), gold accents (#FFD700), clean whites, power blacks',
+    visualKeywords: 'corporate dark blue style, professional lighting, modern city backdrop, skyscraper',
+    emotionalElement: 'businessman with jaw dropped at shocking information',
+    facialExpression: 'shocked businessman expression, jaw dropped, eyes wide, professional disbelief, suit and tie',
     descriptionVoice: 'formal, dados, autoridade, tom profissional e confiante',
-    clickbaitExamples: ['Por que você está perdendo dinheiro', 'A verdade sobre...', 'O mercado não quer que você saiba', 'Seus concorrentes já sabem'],
-    textColor: 'bright white or gold',
+    clickbaitPatterns: [
+      { text: 'Perdendo dinheiro sem saber', trigger: 'personal' },
+      { text: 'O mercado não quer que saiba', trigger: 'curiosity_gap' },
+      { text: 'Seus concorrentes já sabem', trigger: 'fomo' },
+      { text: 'O erro de R$ milhões', trigger: 'shock' },
+      { text: 'Estratégia revelada', trigger: 'curiosity_gap' },
+    ],
+    textColor: 'bright white or gold (#FFD700) with dark stroke',
   },
   'corporate': {
     style: 'clean',
-    colorPalette: 'navy blue, silver, executive gray, clean white',
+    colorPalette: 'navy blue (#1A237E), silver (#C0C0C0), executive gray, clean white',
     visualKeywords: 'corporate professional style, boardroom aesthetic, skyscraper backdrop',
-    emotionalElement: 'serious authoritative expression, crossed arms',
+    emotionalElement: 'executive with serious authoritative look',
+    facialExpression: 'serious authoritative expression, crossed arms, power pose, direct eye contact',
     descriptionVoice: 'formal, autoritativa, baseada em dados e resultados',
-    clickbaitExamples: ['A verdade sobre...', 'Seus concorrentes já sabem', 'O erro que custa milhões', 'Estratégia revelada'],
-    textColor: 'bright white or silver',
+    clickbaitPatterns: [
+      { text: 'Seus concorrentes já sabem', trigger: 'fomo' },
+      { text: 'O erro que custa milhões', trigger: 'shock' },
+      { text: 'Estratégia revelada', trigger: 'curiosity_gap' },
+      { text: 'A verdade sobre...', trigger: 'curiosity_gap' },
+      { text: 'Em 5 passos', trigger: 'number' },
+    ],
+    textColor: 'bright white or silver with dark stroke',
   },
   'finance': {
     style: 'clean',
-    colorPalette: 'money green, gold, dark blue, chart red',
-    visualKeywords: 'financial corporate style, stock market aesthetic, wealth imagery',
-    emotionalElement: 'shocked expression at numbers, disbelief at charts',
+    colorPalette: 'money green (#2E7D32), gold (#FFD700), dark blue (#0D47A1), chart red (#D32F2F)',
+    visualKeywords: 'financial corporate style, stock market aesthetic, wealth imagery, trading screens',
+    emotionalElement: 'person shocked at financial numbers on screen',
+    facialExpression: 'shocked expression at numbers, eyes wide, mouth open, pointing at invisible chart',
     descriptionVoice: 'autoritativa, baseada em números, tom de especialista',
-    clickbaitExamples: ['Perdendo dinheiro sem saber', 'O investimento que ninguém fala', 'Antes que seja tarde', 'O erro de R$ milhões'],
-    textColor: 'money green or gold',
+    clickbaitPatterns: [
+      { text: 'Perdendo dinheiro sem saber', trigger: 'personal' },
+      { text: 'O investimento que ninguém fala', trigger: 'curiosity_gap' },
+      { text: 'Antes que seja tarde', trigger: 'urgency' },
+      { text: 'O erro de R$ milhões', trigger: 'shock' },
+      { text: 'Em 3 meses', trigger: 'number' },
+    ],
+    textColor: 'money green (#2E7D32) or gold (#FFD700) with dark stroke',
   },
   'crime': {
     style: 'cinematic',
-    colorPalette: 'noir blacks, evidence yellows, blood reds, cold grays',
-    visualKeywords: 'true crime noir style, police investigation aesthetic, evidence lighting',
-    emotionalElement: 'serious investigative expression, stern face',
+    colorPalette: 'noir blacks, evidence yellows (#FDD835), blood reds (#B71C1C), cold grays',
+    visualKeywords: 'true crime noir style, police investigation aesthetic, evidence board, crime tape',
+    emotionalElement: 'investigator examining evidence with intense focus',
+    facialExpression: 'serious investigative expression, stern face, furrowed brow, flashlight under chin',
     descriptionVoice: 'sombria, investigativa, séria, linguagem de documentário criminal',
-    clickbaitExamples: ['O caso que chocou', 'Ninguém acreditou', 'A evidência perdida', 'Caso não resolvido'],
-    textColor: 'evidence yellow or blood red',
+    clickbaitPatterns: [
+      { text: 'O caso que chocou', trigger: 'shock' },
+      { text: 'A evidência perdida', trigger: 'curiosity_gap' },
+      { text: 'Caso não resolvido', trigger: 'curiosity_gap' },
+      { text: 'Ninguém investigou', trigger: 'curiosity_gap' },
+      { text: 'A pista ignorada', trigger: 'curiosity_gap' },
+    ],
+    textColor: 'evidence yellow (#FDD835) or blood red (#B71C1C) with black stroke',
   },
   'serious': {
     style: 'cinematic',
-    colorPalette: 'black and white, muted tones, evidence yellows, cold blues',
-    visualKeywords: 'serious documentary style, noir aesthetic, journalistic lighting',
-    emotionalElement: 'intense serious expression, deep thought',
+    colorPalette: 'desaturated tones, muted grays, evidence yellows (#FDD835), cold blues',
+    visualKeywords: 'serious documentary style, noir aesthetic, journalistic lighting, film grain',
+    emotionalElement: 'person in deep thought, dramatic side lighting',
+    facialExpression: 'intense serious expression, deep thought, one eye in shadow, contemplative',
     descriptionVoice: 'séria, investigativa, documental, imparcial mas impactante',
-    clickbaitExamples: ['O caso que chocou', 'Ninguém investigou', 'A verdade por trás', 'Caso encerrado?'],
-    textColor: 'cold white or evidence yellow',
+    clickbaitPatterns: [
+      { text: 'Ninguém investigou', trigger: 'curiosity_gap' },
+      { text: 'A verdade por trás', trigger: 'curiosity_gap' },
+      { text: 'Caso encerrado?', trigger: 'curiosity_gap' },
+      { text: 'O que realmente aconteceu', trigger: 'curiosity_gap' },
+      { text: 'Revelado pela primeira vez', trigger: 'shock' },
+    ],
+    textColor: 'cold white or evidence yellow (#FDD835) with heavy black stroke',
   },
   'documentary': {
     style: 'cinematic',
-    colorPalette: 'natural earth tones, sky blues, documentary grays, warm ambers',
-    visualKeywords: 'documentary cinematic style, natural lighting, journalistic composition',
-    emotionalElement: 'contemplative expression, gazing into distance',
+    colorPalette: 'natural earth tones, sky blues (#1976D2), documentary grays, warm ambers (#FF8F00)',
+    visualKeywords: 'documentary cinematic style, natural lighting, journalistic composition, wide shots',
+    emotionalElement: 'person gazing into the distance at a landscape',
+    facialExpression: 'contemplative expression, gazing into distance, wisdom in eyes, weathered face',
     descriptionVoice: 'formal, jornalística, informativa, tom de narrador de documentário',
-    clickbaitExamples: ['O que realmente aconteceu', 'A história que não contaram', 'Revelado pela primeira vez', 'Imagens inéditas'],
-    textColor: 'bright white or warm amber',
+    clickbaitPatterns: [
+      { text: 'O que realmente aconteceu', trigger: 'curiosity_gap' },
+      { text: 'A história não contada', trigger: 'curiosity_gap' },
+      { text: 'Revelado pela primeira vez', trigger: 'shock' },
+      { text: 'Imagens inéditas', trigger: 'shock' },
+      { text: 'A verdade completa', trigger: 'curiosity_gap' },
+    ],
+    textColor: 'bright white or warm amber (#FF8F00) with dark stroke',
   },
   'calm': {
     style: 'warm',
-    colorPalette: 'soft pastels, warm beiges, gentle greens, cozy ambers',
-    visualKeywords: 'soft cozy style, warm golden hour lighting, gentle atmosphere',
-    emotionalElement: 'serene peaceful expression, gentle smile, relaxed',
+    colorPalette: 'soft pastels, warm beiges (#D7CCC8), gentle greens (#81C784), cozy ambers',
+    visualKeywords: 'soft cozy style, warm golden hour lighting, gentle atmosphere, bokeh',
+    emotionalElement: 'person with serene peaceful smile in warm light',
+    facialExpression: 'serene peaceful expression, gentle smile, half-closed eyes, relaxed, warm lighting on face',
     descriptionVoice: 'suave, acolhedora, convidativa, linguagem de conforto',
-    clickbaitExamples: ['Você precisa ver isso', 'Tente fazer isso hoje', 'O momento perfeito', 'Relaxe e assista'],
-    textColor: 'warm white or soft gold',
+    clickbaitPatterns: [
+      { text: 'Você precisa ver isso', trigger: 'curiosity_gap' },
+      { text: 'Tente fazer isso hoje', trigger: 'personal' },
+      { text: 'O momento perfeito', trigger: 'curiosity_gap' },
+      { text: 'Relaxe e assista', trigger: 'personal' },
+      { text: 'Puro conforto', trigger: 'personal' },
+    ],
+    textColor: 'warm white or soft gold with subtle shadow',
   },
   'cozy': {
     style: 'warm',
-    colorPalette: 'candle warm, blanket beiges, tea browns, window rain blues',
-    visualKeywords: 'cozy intimate style, candlelight warmth, interior comfort',
-    emotionalElement: 'content peaceful smile, eyes half-closed, comfort',
+    colorPalette: 'candle warm (#FFB74D), blanket beiges, tea browns (#795548), window rain blues',
+    visualKeywords: 'cozy intimate style, candlelight warmth, interior comfort, rain on window',
+    emotionalElement: 'person content with warm drink, candle light',
+    facialExpression: 'content peaceful smile, eyes half-closed, comfort, wrapped in warmth',
     descriptionVoice: 'suave, íntima, acolhedora, como um abraço em palavras',
-    clickbaitExamples: ['Você precisa disso', 'O momento perfeito', 'Assista antes de dormir', 'Puro conforto'],
-    textColor: 'warm cream or soft white',
+    clickbaitPatterns: [
+      { text: 'Assista antes de dormir', trigger: 'personal' },
+      { text: 'O momento perfeito', trigger: 'curiosity_gap' },
+      { text: 'Puro conforto', trigger: 'personal' },
+      { text: 'Você merece isso', trigger: 'personal' },
+      { text: 'Relaxe e assista', trigger: 'personal' },
+    ],
+    textColor: 'warm cream or soft white with warm shadow',
   },
   'asmr': {
     style: 'warm',
-    colorPalette: 'soft lavenders, gentle pinks, whisper whites, calm blues',
-    visualKeywords: 'soft ASMR aesthetic, macro close-up textures, gentle lighting',
-    emotionalElement: 'relaxed blissful expression, closed eyes, tingling',
+    colorPalette: 'soft lavenders (#CE93D8), gentle pinks (#F48FB1), whisper whites, calm blues',
+    visualKeywords: 'soft ASMR aesthetic, macro close-up textures, gentle studio lighting, bokeh',
+    emotionalElement: 'person with blissful relaxed expression',
+    facialExpression: 'relaxed blissful expression, closed eyes, slight smile, tingling sensation, whisper pose',
     descriptionVoice: 'suave, delicada, sensorial, linguagem que acalma',
-    clickbaitExamples: ['Você precisa ouvir isso', 'Sons que relaxam', 'Durma em minutos', 'Sensação única'],
-    textColor: 'soft lavender or whisper white',
+    clickbaitPatterns: [
+      { text: 'Você precisa ouvir isso', trigger: 'curiosity_gap' },
+      { text: 'Sons que relaxam', trigger: 'personal' },
+      { text: 'Durma em minutos', trigger: 'personal' },
+      { text: 'Sensação única', trigger: 'curiosity_gap' },
+      { text: 'Arrepios garantidos', trigger: 'personal' },
+    ],
+    textColor: 'soft lavender or whisper white with gentle shadow',
   },
   'relax': {
     style: 'warm',
-    colorPalette: 'ocean blues, sunset oranges, forest greens, sand beiges',
-    visualKeywords: 'relaxing natural style, soft nature lighting, peaceful scenery',
-    emotionalElement: 'peaceful meditative expression, deep breath',
+    colorPalette: 'ocean blues (#0288D1), sunset oranges (#FF6D00), forest greens (#388E3C), sand beiges',
+    visualKeywords: 'relaxing natural style, soft nature lighting, peaceful scenery, ocean waves',
+    emotionalElement: 'person meditating in nature',
+    facialExpression: 'peaceful meditative expression, deep breath, eyes closed, connection with nature',
     descriptionVoice: 'tranquila, contemplativa, convite ao descanso',
-    clickbaitExamples: ['Você precisa ver isso', 'Pare e respire', 'O vídeo que acalma', 'Natureza pura'],
-    textColor: 'soft white or ocean blue',
+    clickbaitPatterns: [
+      { text: 'Pare e respire', trigger: 'personal' },
+      { text: 'O vídeo que acalma', trigger: 'personal' },
+      { text: 'Natureza pura', trigger: 'curiosity_gap' },
+      { text: 'Você precisa ver isso', trigger: 'curiosity_gap' },
+      { text: 'Paz absoluta', trigger: 'personal' },
+    ],
+    textColor: 'soft white or ocean blue with gentle stroke',
   },
   'gaming': {
     style: 'neon',
-    colorPalette: 'neon greens, electric purples, RGB rainbows, dark blacks',
-    visualKeywords: 'gaming neon style, RGB lighting, esports energy, electric atmosphere',
-    emotionalElement: 'excited screaming expression, mind-blown reaction',
+    colorPalette: 'neon greens (#00FF41), electric purples (#AA00FF), RGB rainbows, dark blacks',
+    visualKeywords: 'gaming neon style, RGB lighting, esports energy, electric atmosphere, screen glow',
+    emotionalElement: 'gamer with mind-blown reaction to gameplay',
+    facialExpression: 'excited screaming expression, mind-blown reaction, hands on head, mouth wide open, RGB light on face',
     descriptionVoice: 'dinâmica, gírias de gaming, energia alta, entusiasmo',
-    clickbaitExamples: ['Ninguém faz isso', 'Isso é real?', 'Play insano', 'Impossível de repetir'],
-    textColor: 'neon green or electric blue',
+    clickbaitPatterns: [
+      { text: 'Ninguém faz isso', trigger: 'shock' },
+      { text: 'Isso é real?', trigger: 'shock' },
+      { text: 'Play insano', trigger: 'shock' },
+      { text: 'Impossível de repetir', trigger: 'shock' },
+      { text: 'Bug ou habilidade?', trigger: 'curiosity_gap' },
+    ],
+    textColor: 'neon green (#00FF41) or electric blue with glow effect',
   },
   'loud': {
     style: 'neon',
-    colorPalette: 'explosive reds, neon yellows, electric blues, fire oranges',
-    visualKeywords: 'high energy explosive style, neon lights, maximum intensity',
-    emotionalElement: 'screaming mind-blown expression, hands on head',
+    colorPalette: 'explosive reds (#FF0000), neon yellows (#FFFF00), electric blues (#00B0FF), fire oranges',
+    visualKeywords: 'high energy explosive style, neon lights, maximum intensity, sparks, explosion effects',
+    emotionalElement: 'person screaming with explosive reaction',
+    facialExpression: 'screaming mind-blown expression, hands on head, veins visible, extreme shock, maximum energy',
     descriptionVoice: 'explosiva, cheia de energia, gírias, reações exageradas',
-    clickbaitExamples: ['IMPOSSÍVEL', 'Ninguém esperava isso', 'O play do século', 'Ficou maluco'],
-    textColor: 'neon yellow or explosive red',
+    clickbaitPatterns: [
+      { text: 'IMPOSSÍVEL', trigger: 'shock' },
+      { text: 'Ninguém esperava isso', trigger: 'shock' },
+      { text: 'O play do século', trigger: 'shock' },
+      { text: 'Ficou maluco', trigger: 'shock' },
+      { text: 'INACREDITÁVEL', trigger: 'shock' },
+    ],
+    textColor: 'neon yellow (#FFFF00) or explosive red (#FF0000) with maximum stroke',
   },
   'fast': {
     style: 'viral',
-    colorPalette: 'bold reds, attention yellows, contrast blacks, pop whites',
-    visualKeywords: 'viral facts style, bold impactful design, eye-catching colors',
-    emotionalElement: 'shocked wide-eyed expression, hand over mouth',
+    colorPalette: 'bold reds (#E53935), attention yellows (#FDD835), contrast blacks, pop whites',
+    visualKeywords: 'viral facts style, bold impactful design, eye-catching colors, speed lines',
+    emotionalElement: 'person shocked with hand over mouth',
+    facialExpression: 'shocked wide-eyed expression, hand over mouth, total disbelief, viral reaction face',
     descriptionVoice: 'dinâmica, rápida, impactante, frases curtas e diretas',
-    clickbaitExamples: ['#1 chocou a todos', 'Impossível? Não.', 'Você não sabia disso', 'Fatos insanos'],
-    textColor: 'attention yellow or bold red',
+    clickbaitPatterns: [
+      { text: '#1 chocou a todos', trigger: 'number' },
+      { text: 'Impossível? Não.', trigger: 'shock' },
+      { text: 'Você não sabia disso', trigger: 'curiosity_gap' },
+      { text: 'Fatos insanos', trigger: 'shock' },
+      { text: '7 coisas que chocam', trigger: 'number' },
+    ],
+    textColor: 'attention yellow (#FDD835) or bold red (#E53935) with heavy black stroke',
   },
   'viral': {
     style: 'viral',
-    colorPalette: 'MrBeast red, attention yellow, pop blue, bold white',
-    visualKeywords: 'viral MrBeast style, extremely bold colors, maximum visual impact',
-    emotionalElement: 'exaggerated shocked face, jaw on floor, hands up',
+    colorPalette: 'MrBeast red (#FF0000), attention yellow (#FFEB3B), pop blue (#2979FF), bold white',
+    visualKeywords: 'viral MrBeast style, extremely bold colors, maximum visual impact, confetti, dramatic lighting',
+    emotionalElement: 'person with extreme exaggerated reaction',
+    facialExpression: 'exaggerated shocked face, jaw on floor, hands up, maximum surprise, eyes popping',
     descriptionVoice: 'ultra dinâmica, provocativa, irresistível, FOMO total',
-    clickbaitExamples: ['Isso é real?', 'Ninguém acreditou', 'Você não vai acreditar', 'O mais insano de todos'],
-    textColor: 'attention yellow or bold white',
+    clickbaitPatterns: [
+      { text: 'Isso é real?', trigger: 'shock' },
+      { text: 'Ninguém acreditou', trigger: 'shock' },
+      { text: 'O mais insano de todos', trigger: 'shock' },
+      { text: 'Você não vai acreditar', trigger: 'shock' },
+      { text: 'ASSISTA ATÉ O FINAL', trigger: 'fomo' },
+    ],
+    textColor: 'attention yellow (#FFEB3B) or bold white with maximum black stroke',
   },
   'vlog': {
     style: 'warm',
     colorPalette: 'natural warm tones, everyday colors, bright and lively',
-    visualKeywords: 'personal vlog style, natural daylight, authentic real-life aesthetic',
-    emotionalElement: 'genuine surprise expression, authentic reaction',
+    visualKeywords: 'personal vlog style, natural daylight, authentic real-life aesthetic, outdoor',
+    emotionalElement: 'person with genuine surprise in everyday setting',
+    facialExpression: 'genuine surprise expression, authentic reaction, pointing at something off-camera, natural look',
     descriptionVoice: 'primeira pessoa, próximo, autêntico, como um amigo contando',
-    clickbaitExamples: ['Não acreditei', 'Isso aconteceu comigo', 'Nunca mais faço isso', 'Vocês pediram'],
-    textColor: 'bright white or warm yellow',
+    clickbaitPatterns: [
+      { text: 'Não acreditei', trigger: 'shock' },
+      { text: 'Isso aconteceu comigo', trigger: 'personal' },
+      { text: 'Nunca mais faço isso', trigger: 'before_after' },
+      { text: 'Vocês pediram', trigger: 'personal' },
+      { text: 'Preciso contar', trigger: 'curiosity_gap' },
+    ],
+    textColor: 'bright white or warm yellow with natural shadow',
   },
   'personal': {
     style: 'warm',
-    colorPalette: 'selfie warm tones, casual brights, friendly yellows',
-    visualKeywords: 'personal authentic style, casual daylight, real-life setting',
-    emotionalElement: 'surprised genuine expression, hand pointing',
+    colorPalette: 'selfie warm tones, casual brights, friendly yellows (#FFD54F)',
+    visualKeywords: 'personal authentic style, casual daylight, real-life setting, selfie angle',
+    emotionalElement: 'person pointing at camera with surprised look',
+    facialExpression: 'surprised genuine expression, hand pointing at viewer, wide eyes, "you won\'t believe" face',
     descriptionVoice: 'pessoal, íntima, autêntica, como conversa de amigo',
-    clickbaitExamples: ['Isso aconteceu comigo', 'Não acreditei quando vi', 'Preciso contar', 'Vocês não vão acreditar'],
-    textColor: 'bright white or friendly yellow',
+    clickbaitPatterns: [
+      { text: 'Isso aconteceu comigo', trigger: 'personal' },
+      { text: 'Não acreditei quando vi', trigger: 'shock' },
+      { text: 'Preciso contar', trigger: 'curiosity_gap' },
+      { text: 'Vocês não vão acreditar', trigger: 'shock' },
+      { text: 'Me arrependi', trigger: 'personal' },
+    ],
+    textColor: 'bright white or friendly yellow with shadow',
   },
   'enthusiast': {
     style: 'warm',
-    colorPalette: 'energetic oranges, fun yellows, action reds, outdoor greens',
-    visualKeywords: 'enthusiastic vlog style, outdoor energy, bright lively colors',
-    emotionalElement: 'excited enthusiastic expression, big smile, thumbs up',
+    colorPalette: 'energetic oranges (#FF6D00), fun yellows (#FFEA00), action reds, outdoor greens',
+    visualKeywords: 'enthusiastic vlog style, outdoor energy, bright lively colors, adventure',
+    emotionalElement: 'excited person giving thumbs up',
+    facialExpression: 'excited enthusiastic expression, big smile, thumbs up, eyes sparkling, genuine joy',
     descriptionVoice: 'entusiasmada, contagiante, cheia de energia positiva',
-    clickbaitExamples: ['Melhor coisa que já fiz', 'Testei e aprovei', 'Isso é incrível', 'Vocês precisam ver'],
-    textColor: 'energetic orange or bright white',
+    clickbaitPatterns: [
+      { text: 'Melhor coisa que já fiz', trigger: 'personal' },
+      { text: 'Testei e aprovei', trigger: 'personal' },
+      { text: 'Isso é incrível', trigger: 'shock' },
+      { text: 'Vocês precisam ver', trigger: 'fomo' },
+      { text: 'Resultado surpreendente', trigger: 'curiosity_gap' },
+    ],
+    textColor: 'energetic orange (#FF6D00) or bright white with dark stroke',
   },
   'legend': {
     style: 'cinematic',
-    colorPalette: 'ancient golds, forest greens, mysterious purples, campfire oranges',
-    visualKeywords: 'folklore mysterious style, ancient forest atmosphere, mythical lighting',
-    emotionalElement: 'mysterious knowing expression, raised eyebrow, ancient wisdom',
+    colorPalette: 'ancient golds (#FFB300), forest greens (#1B5E20), mysterious purples (#4A148C), campfire oranges',
+    visualKeywords: 'folklore mysterious style, ancient forest atmosphere, mythical lighting, moonlight, fog',
+    emotionalElement: 'storyteller by campfire with mysterious expression',
+    facialExpression: 'mysterious knowing expression, raised eyebrow, ancient wisdom, firelight on face, half smile',
     descriptionVoice: 'narrativa, misteriosa, envolvente, tom de contador de histórias',
-    clickbaitExamples: ['Isso realmente aconteceu', 'Ninguém explica', 'A lenda é verdadeira', 'Não deveria existir'],
-    textColor: 'ancient gold or mystic purple',
+    clickbaitPatterns: [
+      { text: 'Isso realmente aconteceu', trigger: 'shock' },
+      { text: 'Ninguém explica', trigger: 'curiosity_gap' },
+      { text: 'A lenda é verdadeira', trigger: 'shock' },
+      { text: 'Não deveria existir', trigger: 'shock' },
+      { text: 'O mistério continua', trigger: 'curiosity_gap' },
+    ],
+    textColor: 'ancient gold (#FFB300) or mystic purple with dark stroke',
   },
   'folklore': {
     style: 'cinematic',
-    colorPalette: 'moonlight blues, old parchment yellows, forest blacks, fire oranges',
-    visualKeywords: 'mythical folklore style, moonlit forest, ancient mysterious atmosphere',
-    emotionalElement: 'awestruck ancient expression, gazing at something mystical',
+    colorPalette: 'moonlight blues (#1565C0), old parchment yellows (#F9A825), forest blacks, fire oranges (#E65100)',
+    visualKeywords: 'mythical folklore style, moonlit forest, ancient mysterious atmosphere, candlelight',
+    emotionalElement: 'person looking at something mystical in forest',
+    facialExpression: 'awestruck ancient expression, gazing at something mystical, wonder and fear mixed',
     descriptionVoice: 'narrativa, misteriosa, ancestral, tom de lenda',
-    clickbaitExamples: ['Isso realmente aconteceu', 'A lenda proibida', 'Ninguém deveria saber', 'O mistério continua'],
-    textColor: 'moonlight white or parchment yellow',
+    clickbaitPatterns: [
+      { text: 'A lenda proibida', trigger: 'curiosity_gap' },
+      { text: 'Ninguém deveria saber', trigger: 'curiosity_gap' },
+      { text: 'O mistério continua', trigger: 'curiosity_gap' },
+      { text: 'Isso realmente aconteceu', trigger: 'shock' },
+      { text: 'A criatura existe', trigger: 'shock' },
+    ],
+    textColor: 'moonlight white or parchment yellow (#F9A825) with dark stroke',
   },
   'child': {
     style: 'warm',
-    colorPalette: 'rainbow colors, candy pinks, sky blues, sunshine yellows',
-    visualKeywords: 'colorful kids style, pixar-like 3D render, bright cheerful whimsical',
-    emotionalElement: 'wide-eyed wonder expression, magical sparkles, cute character',
+    colorPalette: 'rainbow colors, candy pinks (#F48FB1), sky blues (#64B5F6), sunshine yellows (#FFF176)',
+    visualKeywords: 'colorful kids style, pixar-like 3D render, bright cheerful whimsical, cartoon',
+    emotionalElement: 'cute animated character with wide-eyed wonder',
+    facialExpression: 'wide-eyed wonder expression, magical sparkles, cute character, mouth open in amazement',
     descriptionVoice: 'divertida, acessível, linguagem simples e encantadora',
-    clickbaitExamples: ['O segredo do castelo', 'Ninguém sabia...', 'A aventura começa', 'O maior mistério'],
-    textColor: 'rainbow colors or sunshine yellow',
+    clickbaitPatterns: [
+      { text: 'O segredo do castelo', trigger: 'curiosity_gap' },
+      { text: 'A aventura começa', trigger: 'curiosity_gap' },
+      { text: 'O maior mistério', trigger: 'curiosity_gap' },
+      { text: 'Quem é o vilão?', trigger: 'curiosity_gap' },
+      { text: 'Ninguém sabia', trigger: 'curiosity_gap' },
+    ],
+    textColor: 'rainbow colors or sunshine yellow with playful stroke',
   },
   'kid': {
     style: 'warm',
     colorPalette: 'bright primary colors, playful pastels, fun neons',
-    visualKeywords: 'playful children style, cartoon aesthetic, bright and fun',
-    emotionalElement: 'excited happy expression, jumping, magical wonder',
+    visualKeywords: 'playful children style, cartoon aesthetic, bright and fun, confetti',
+    emotionalElement: 'excited happy animated character',
+    facialExpression: 'excited happy expression, jumping, magical wonder, big cartoon eyes',
     descriptionVoice: 'alegre, lúdica, convidativa, linguagem infantil amigável',
-    clickbaitExamples: ['Que legal!', 'O segredo revelado', 'A maior aventura', 'Você vai adorar'],
-    textColor: 'bright primary colors or fun pink',
+    clickbaitPatterns: [
+      { text: 'Que legal!', trigger: 'shock' },
+      { text: 'O segredo revelado', trigger: 'curiosity_gap' },
+      { text: 'A maior aventura', trigger: 'curiosity_gap' },
+      { text: 'Você vai adorar', trigger: 'personal' },
+      { text: 'Brinquedo mágico', trigger: 'curiosity_gap' },
+    ],
+    textColor: 'bright primary colors or fun pink with white stroke',
   },
   'tech': {
     style: 'clean',
-    colorPalette: 'tech blacks, circuit greens, LED blues, clean whites',
-    visualKeywords: 'tech reviewer style, studio product lighting, clean modern aesthetic',
-    emotionalElement: 'skeptical analytical expression, raised eyebrow, inspecting closely',
+    colorPalette: 'tech blacks (#212121), circuit greens (#00E676), LED blues (#00B0FF), clean whites',
+    visualKeywords: 'tech reviewer style, studio product lighting, clean modern aesthetic, gadgets',
+    emotionalElement: 'person skeptically inspecting a device',
+    facialExpression: 'skeptical analytical expression, raised eyebrow, inspecting closely, one hand on product',
     descriptionVoice: 'crítica, técnica, objetiva, com opinião fundamentada',
-    clickbaitExamples: ['Vale mesmo a pena?', 'Testei por 30 dias', 'A verdade sobre...', 'Não compre antes de ver'],
-    textColor: 'bright white or circuit green',
+    clickbaitPatterns: [
+      { text: 'Vale mesmo a pena?', trigger: 'curiosity_gap' },
+      { text: 'Testei por 30 dias', trigger: 'personal' },
+      { text: 'A verdade sobre...', trigger: 'curiosity_gap' },
+      { text: 'Não compre antes de ver', trigger: 'urgency' },
+      { text: 'Resultado inesperado', trigger: 'curiosity_gap' },
+    ],
+    textColor: 'bright white or circuit green (#00E676) with dark stroke',
   },
   'review': {
     style: 'clean',
-    colorPalette: 'studio whites, product blacks, rating stars gold, clean grays',
-    visualKeywords: 'product review style, studio lighting, close-up product shots',
-    emotionalElement: 'disappointed or impressed expression, comparing products',
+    colorPalette: 'studio whites, product blacks, rating stars gold (#FFD700), clean grays',
+    visualKeywords: 'product review style, studio lighting, close-up product shots, comparison layout',
+    emotionalElement: 'person comparing two products with strong opinion',
+    facialExpression: 'disappointed or impressed expression, comparing products, one raised eyebrow, verdict face',
     descriptionVoice: 'analítica, honesta, comparativa, baseada em testes reais',
-    clickbaitExamples: ['Não vale o preço', 'Testei e me surpreendi', 'O melhor de todos?', 'Resultado inesperado'],
-    textColor: 'rating gold or bright white',
+    clickbaitPatterns: [
+      { text: 'Não vale o preço', trigger: 'controversy' },
+      { text: 'Testei e me surpreendi', trigger: 'curiosity_gap' },
+      { text: 'O melhor de todos?', trigger: 'curiosity_gap' },
+      { text: 'Resultado inesperado', trigger: 'curiosity_gap' },
+      { text: 'vs — Qual vence?', trigger: 'curiosity_gap' },
+    ],
+    textColor: 'rating gold (#FFD700) or bright white with dark stroke',
   },
   'science': {
     style: 'clean',
-    colorPalette: 'lab whites, data blues, futuristic purples, neon accents',
-    visualKeywords: 'scientific futuristic style, lab aesthetic, holographic data visualization',
-    emotionalElement: 'amazed scientist expression, discovery moment',
+    colorPalette: 'lab whites, data blues (#1565C0), futuristic purples (#7B1FA2), neon accents (#00E5FF)',
+    visualKeywords: 'scientific futuristic style, lab aesthetic, holographic data visualization, particles',
+    emotionalElement: 'scientist with amazed discovery expression',
+    facialExpression: 'amazed scientist expression, discovery moment, goggles pushed up, pointing at experiment',
     descriptionVoice: 'científica, curiosa, baseada em evidências, acessível',
-    clickbaitExamples: ['A ciência explica', 'Descoberta chocante', 'Ninguém esperava esse resultado', 'O experimento proibido'],
-    textColor: 'neon accent or bright white',
+    clickbaitPatterns: [
+      { text: 'A ciência explica', trigger: 'curiosity_gap' },
+      { text: 'Descoberta chocante', trigger: 'shock' },
+      { text: 'Ninguém esperava esse resultado', trigger: 'shock' },
+      { text: 'O experimento proibido', trigger: 'curiosity_gap' },
+      { text: 'Provado em laboratório', trigger: 'curiosity_gap' },
+    ],
+    textColor: 'neon accent (#00E5FF) or bright white with dark stroke',
   },
 };
 
-// Default config for unknown tones
 const DEFAULT_CONFIG: ToneVisualConfig = {
   style: 'cinematic',
   colorPalette: 'dramatic contrasts, bold accents, professional tones',
   visualKeywords: 'cinematic professional style, dramatic lighting, high production value',
-  emotionalElement: 'impactful expression, strong emotion',
+  emotionalElement: 'person with impactful emotional expression',
+  facialExpression: 'strong emotional expression, direct eye contact, dramatic lighting on face',
   descriptionVoice: 'envolvente, profissional, clara e impactante',
-  clickbaitExamples: ['Você não vai acreditar', 'Isso muda tudo', 'A verdade revelada', 'Ninguém esperava'],
-  textColor: 'bright yellow or white',
+  clickbaitPatterns: [
+    { text: 'Você não vai acreditar', trigger: 'shock' },
+    { text: 'Isso muda tudo', trigger: 'before_after' },
+    { text: 'A verdade revelada', trigger: 'curiosity_gap' },
+    { text: 'Ninguém esperava', trigger: 'shock' },
+    { text: 'Descoberta chocante', trigger: 'shock' },
+  ],
+  textColor: 'bright yellow (#FFEB3B) or white with heavy black stroke',
 };
 
 // =============================================
@@ -390,78 +642,188 @@ const getToneConfig = (tone: string): ToneVisualConfig => {
 };
 
 // =============================================
-// RULE 1+2: THUMBNAIL PROMPT BUILDER
+// CHANNEL BRANDING FROM LIBRARY
+// =============================================
+
+interface ChannelBranding {
+  brandColors?: string;
+  brandStyle?: string;
+  referenceChannels?: string;
+  brandElements?: string;
+}
+
+const extractBrandingFromLibrary = (items?: LibraryItem[]): ChannelBranding => {
+  if (!items || items.length === 0) return {};
+  
+  const branding: ChannelBranding = {};
+  const brandingItems: string[] = [];
+  const channelRefs: string[] = [];
+  
+  for (const item of items) {
+    const content = item.content.toLowerCase();
+    const title = item.title.toLowerCase();
+    
+    // Extract branding-specific items
+    if (title.includes('brand') || title.includes('marca') || title.includes('identidade') || 
+        title.includes('cor') || title.includes('color') || title.includes('visual') ||
+        title.includes('logo') || title.includes('paleta') || title.includes('palette')) {
+      brandingItems.push(item.content);
+    }
+    
+    // Extract YouTube channel references for inspiration
+    if (item.type === 'youtube_channel') {
+      channelRefs.push(`${item.title}: ${item.content}`);
+    }
+    
+    // Look for color patterns in any item
+    const hexColors = item.content.match(/#[0-9A-Fa-f]{6}/g);
+    if (hexColors && hexColors.length > 0) {
+      branding.brandColors = hexColors.join(', ');
+    }
+  }
+  
+  if (brandingItems.length > 0) {
+    branding.brandStyle = brandingItems.join('. ');
+  }
+  if (channelRefs.length > 0) {
+    branding.referenceChannels = channelRefs.join('; ');
+  }
+  
+  return branding;
+};
+
+// =============================================
+// THUMBNAIL PROMPT BUILDER (v2 — Psychology-driven)
 // =============================================
 
 /**
- * Generates the clickbait text and complete image prompt for thumbnail generation.
- * No AI call needed — deterministic based on tone + content analysis.
- * Follows proven high-CTR YouTube thumbnail rules.
+ * Generates clickbait text + image prompt following proven CTR psychology:
+ * 
+ * 1. Face covers 40-60% of frame with EXTREME expression
+ * 2. Max 3-5 words in bold text with highest contrast
+ * 3. Curiosity gap — never reveal the answer
+ * 4. High contrast colors (yellow+black, red+white)
+ * 5. Element of visual dissonance or unexpected object
+ * 6. Channel branding from Library is applied
+ * 7. Fake progress bar at bottom (70% watched illusion)
  */
 export const buildThumbnailPrompt = (params: ThumbnailDescriptionParams): ThumbnailResult => {
-  const { title, script, narrativeTone, niche } = params;
+  const { title, script, narrativeTone, niche, libraryItems } = params;
   const config = getToneConfig(narrativeTone);
+  const branding = extractBrandingFromLibrary(libraryItems);
   
-  // Select clickbait text based on script content analysis
+  // Select clickbait text using psychological triggers
   const clickbaitText = selectClickbaitText(title, script, config);
   
-  // Build the niche-specific visual element
+  // Build niche-specific visual element
   const nicheVisual = getNicheVisualElement(niche, narrativeTone);
   
-  // Build complete image prompt with high-CTR rules
+  // Build branding instructions
+  const brandingInstructions = buildBrandingInstructions(branding, config);
+  
+  // Build the complete prompt following CTR psychology rules
   const imagePrompt = `
-    YouTube thumbnail, ultra high CTR design, professional quality, 1280x720px.
+    YouTube thumbnail, ultra high CTR design, professional quality, exactly 1280x720 pixels.
     
-    REQUIRED ELEMENTS:
-    1. Human face with EXTREME ${config.emotionalElement} emotion, eyes wide open looking directly at camera, photorealistic
-    2. Bold text overlay "${clickbaitText}" in the left or bottom third, maximum 4 words, 
-       ${config.textColor} color with thick black stroke, huge font size
-    3. A red arrow or circle pointing at the main subject
-    4. A thin red progress bar (4px height) at the very bottom of the image, filled 70% width, 
-       mimicking a YouTube video progress bar that is 70% watched
-    5. ${config.visualKeywords} background style, ${nicheVisual}
-    6. Color palette: ${config.colorPalette}
-    7. EXTREME contrast between background and foreground elements
-    8. NO watermarks, NO logos, NO text other than the overlay specified
+    COMPOSITION (following 200ms decision psychology):
+    1. FACE (40-60% of frame): ${config.facialExpression}
+       - Face positioned in the right third of the image
+       - Eyes looking DIRECTLY at camera (creates personal connection)
+       - Dramatic lighting from one side (creates depth and drama)
+       - Face must be the FIRST thing noticed
     
-    Style: ${config.style}, cinematic quality, thumbnail optimized for maximum click-through rate.
-    The overall composition must be immediately eye-catching even at small sizes (mobile feed).
+    2. TEXT OVERLAY (left or bottom-left third):
+       "${clickbaitText}"
+       - Maximum 4 words, HUGE bold font
+       - Color: ${config.textColor}
+       - THICK black outline/stroke (minimum 4px) for mobile legibility
+       - Must be readable at 40x22 pixel thumbnail size
+       - Text creates curiosity gap — does NOT reveal the answer
+    
+    3. VISUAL DISSONANCE ELEMENT:
+       - One unexpected or out-of-place object/detail that forces a double-take
+       - ${nicheVisual}
+    
+    4. CONTRAST & COLOR:
+       - Color palette: ${config.colorPalette}
+       - EXTREME contrast between foreground and background
+       - Background should NOT compete with the face for attention
+       - If it looks "harmonious and balanced" it has INSUFFICIENT contrast
+    
+    5. SUBTLE ENGAGEMENT TRICKS:
+       - A thin red progress bar (3px height) at the very bottom, filled to 70% width
+       - This mimics a partially-watched video and triggers FOMO
+    
+    ${brandingInstructions}
+    
+    STYLE: ${config.style}, ${config.visualKeywords}
+    
+    ANTI-PATTERNS (do NOT include):
+    - NO watermarks, NO logos, NO URLs
+    - NO text other than the specified overlay
+    - NO cluttered compositions — maximum 3 focal elements
+    - NO neutral facial expressions
+    - NO low-contrast color combinations
+    - NO generic stock photo aesthetics
   `.trim();
   
   return {
     clickbaitText,
     imagePrompt,
     style: config.style,
-    colorPalette: config.colorPalette,
+    colorPalette: branding.brandColors || config.colorPalette,
   };
 };
 
 /**
- * Selects the best clickbait text by analyzing the script content.
+ * Builds branding instructions from library items
+ */
+const buildBrandingInstructions = (branding: ChannelBranding, config: ToneVisualConfig): string => {
+  const parts: string[] = [];
+  
+  if (branding.brandColors) {
+    parts.push(`CHANNEL BRAND COLORS: Use these as accent colors where possible: ${branding.brandColors}`);
+  }
+  if (branding.brandStyle) {
+    parts.push(`CHANNEL VISUAL IDENTITY: ${branding.brandStyle}`);
+  }
+  if (branding.referenceChannels) {
+    parts.push(`REFERENCE STYLE INSPIRATION: ${branding.referenceChannels}`);
+  }
+  
+  if (parts.length === 0) return '';
+  return `6. CHANNEL BRANDING:\n       ${parts.join('\n       ')}`;
+};
+
+/**
+ * Selects the best clickbait text using content theme analysis + psychological triggers.
+ * Prefers curiosity gap (highest CTR impact) when possible.
  */
 const selectClickbaitText = (title: string, script: ScriptData, config: ToneVisualConfig): string => {
   const fullText = (title + ' ' + script.segments.map(s => s.narratorText).join(' ')).toLowerCase();
   
-  // Detect content themes to pick the most relevant clickbait
-  const themes: Record<string, string[]> = {
-    'secret':    ['segredo', 'secret', 'escondido', 'hidden', 'oculto', 'proibido'],
-    'money':     ['dinheiro', 'money', 'investir', 'profit', 'lucro', 'rico', 'wealth', 'milhão', 'bilhão'],
-    'danger':    ['perigo', 'danger', 'risco', 'risk', 'morte', 'death', 'morrer', 'cuidado'],
-    'mistake':   ['erro', 'mistake', 'errado', 'wrong', 'falha', 'fail', 'problema'],
-    'change':    ['mudou', 'changed', 'transform', 'revolução', 'revolution', 'virada'],
-    'shock':     ['choc', 'shock', 'incr[ií]vel', 'impossible', 'impossível', 'inacredit'],
-    'truth':     ['verdade', 'truth', 'mentira', 'lie', 'real', 'fake', 'falso'],
-    'discovery': ['descobr', 'discover', 'encontr', 'find', 'revel', 'reveal'],
-    'fear':      ['medo', 'fear', 'terror', 'horror', 'assust', 'scared'],
-    'test':      ['test', 'experiment', 'prova', 'result', 'funciona'],
+  // Detect content themes
+  const themes: Record<string, { keywords: string[]; trigger: string }> = {
+    'secret':    { keywords: ['segredo', 'secret', 'escondido', 'hidden', 'oculto', 'proibido'], trigger: 'curiosity_gap' },
+    'money':     { keywords: ['dinheiro', 'money', 'investir', 'profit', 'lucro', 'rico', 'wealth', 'milhão', 'bilhão'], trigger: 'personal' },
+    'danger':    { keywords: ['perigo', 'danger', 'risco', 'risk', 'morte', 'death', 'morrer', 'cuidado'], trigger: 'urgency' },
+    'mistake':   { keywords: ['erro', 'mistake', 'errado', 'wrong', 'falha', 'fail', 'problema'], trigger: 'personal' },
+    'change':    { keywords: ['mudou', 'changed', 'transform', 'revolução', 'revolution', 'virada'], trigger: 'before_after' },
+    'shock':     { keywords: ['choc', 'shock', 'incrível', 'impossible', 'impossível', 'inacredit'], trigger: 'shock' },
+    'truth':     { keywords: ['verdade', 'truth', 'mentira', 'lie', 'real', 'fake', 'falso'], trigger: 'curiosity_gap' },
+    'discovery': { keywords: ['descobr', 'discover', 'encontr', 'find', 'revel', 'reveal'], trigger: 'curiosity_gap' },
+    'fear':      { keywords: ['medo', 'fear', 'terror', 'horror', 'assust', 'scared'], trigger: 'shock' },
+    'test':      { keywords: ['test', 'experiment', 'prova', 'result', 'funciona'], trigger: 'curiosity_gap' },
+    'number':    { keywords: ['lista', 'list', 'top', 'ranking', 'razões', 'reasons', 'erros', 'errors', 'passos', 'steps'], trigger: 'number' },
+    'personal':  { keywords: ['eu ', 'minha', 'meu', 'comigo', 'my ', 'i ', 'myself'], trigger: 'personal' },
   };
   
   let bestTheme = '';
   let bestScore = 0;
   
-  for (const [theme, keywords] of Object.entries(themes)) {
+  for (const [theme, data] of Object.entries(themes)) {
     let score = 0;
-    for (const kw of keywords) {
+    for (const kw of data.keywords) {
       if (fullText.includes(kw)) score++;
     }
     if (score > bestScore) {
@@ -470,28 +832,18 @@ const selectClickbaitText = (title: string, script: ScriptData, config: ToneVisu
     }
   }
   
-  // Map theme to clickbait pattern, then pick from tone examples
-  const themeClickbaits: Record<string, string[]> = {
-    'secret':    ['O que eles escondem', 'Ninguém deveria saber', 'O segredo revelado'],
-    'money':     ['Perdendo dinheiro sem saber', 'Isso muda sua vida financeira', 'O erro que custa caro'],
-    'danger':    ['Cuidado com isso', 'O risco que ninguém fala', 'Antes que seja tarde'],
-    'mistake':   ['O erro que todos cometem', 'Pare de fazer isso', 'Você está fazendo errado'],
-    'change':    ['Isso mudou tudo', 'A virada que ninguém esperava', 'Nunca mais o mesmo'],
-    'shock':     ['Impossível? Não.', 'Ninguém acreditou', 'Isso é real?'],
-    'truth':     ['A verdade que dói', 'Mentira ou verdade?', 'Finalmente revelado'],
-    'discovery': ['Descoberta chocante', 'Finalmente encontraram', 'A revelação'],
-    'fear':      ['Isso não deveria existir', 'O medo é real', 'Não assista sozinho'],
-    'test':      ['Testei e me surpreendi', 'O resultado chocou', 'Funciona mesmo?'],
-  };
+  // Pick clickbait that matches both theme and psychological trigger
+  const bestTrigger = bestTheme ? themes[bestTheme].trigger : 'curiosity_gap';
   
-  // Prefer theme-specific clickbait, fallback to tone examples
-  const candidates = bestTheme && themeClickbaits[bestTheme] 
-    ? [...themeClickbaits[bestTheme], ...config.clickbaitExamples]
-    : config.clickbaitExamples;
+  // First try to find a pattern matching the trigger
+  const triggerMatches = config.clickbaitPatterns.filter(p => p.trigger === bestTrigger);
+  const candidates = triggerMatches.length > 0 
+    ? triggerMatches 
+    : config.clickbaitPatterns;
   
-  // Pick one deterministically based on title hash for consistency
+  // Pick deterministically based on title hash
   const hash = title.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
-  return candidates[hash % candidates.length];
+  return candidates[hash % candidates.length].text;
 };
 
 /**
@@ -501,73 +853,64 @@ const getNicheVisualElement = (niche: string, tone: string): string => {
   const lower = niche.toLowerCase();
   
   const nicheVisuals: Record<string, string> = {
-    'financ':     'modern city skyline with stock charts overlay, gold coins',
-    'finance':    'modern city skyline with stock charts overlay, gold coins',
-    'money':      'stacks of money, luxury items, financial charts',
-    'invest':     'stock market graphs, rising charts, financial district',
-    'crypto':     'blockchain visualization, digital currency, holographic data',
-    'tech':       'futuristic technology devices, holographic screens, circuit boards',
-    'gaming':     'gaming setup with RGB lights, controller, game screens',
-    'horror':     'abandoned building with fog, dark corridor, eerie shadows',
-    'terror':     'dark forest at night, mysterious fog, abandoned place',
-    'crime':      'crime scene tape, dark alley, investigation board',
-    'cook':       'beautiful food photography, kitchen with dramatic lighting',
-    'food':       'stunning food close-up, chef hands, ingredients',
-    'fitness':    'powerful athlete silhouette, gym equipment, determination',
-    'health':     'wellness environment, medical imagery, healthy lifestyle',
-    'travel':     'stunning landscape, exotic destination, adventure gear',
-    'music':      'concert stage lights, musical instruments, sound waves',
-    'education':  'books, library, academic setting, knowledge symbols',
-    'science':    'laboratory equipment, molecular structures, space imagery',
-    'nature':     'dramatic landscape, wildlife, nature phenomenon',
-    'history':    'ancient artifacts, historical monuments, old maps',
-    'psychology': 'brain visualization, mind concept, human behavior',
-    'business':   'corporate boardroom, city skyline, professional setting',
-    'art':        'artistic composition, gallery, creative studio',
-    'fashion':    'high fashion photography, runway, designer items',
-    'auto':       'luxury car, racing track, mechanical parts',
-    'space':      'galaxy, planets, rocket launch, astronaut',
-    'mystery':    'mysterious door, fog, question marks, dark atmosphere',
-    'legend':     'ancient forest, mystical creature silhouette, moonlight',
-    'folklore':   'campfire in dark forest, old castle, mystical symbols',
+    'financ':     'stock trading screens glowing, falling money, red/green charts',
+    'finance':    'stock trading screens glowing, falling money, red/green charts',
+    'money':      'stacks of money with dramatic lighting, gold bars, wealth contrast',
+    'invest':     'stock market graphs with dramatic up/down arrows, trading floor',
+    'crypto':     'blockchain visualization, holographic Bitcoin, digital rain matrix',
+    'tech':       'futuristic holographic screens, circuit boards, blue LED glow',
+    'gaming':     'gaming setup with RGB explosion, controller on fire, screen glow',
+    'horror':     'abandoned corridor with single light, fog, door ajar with something behind',
+    'terror':     'dark forest at night with single flashlight beam, mysterious figure silhouette',
+    'crime':      'crime scene tape, red and blue police lights, investigation board with strings',
+    'cook':       'dramatic food explosion, ingredients flying, chef fire',
+    'food':       'stunning food close-up with steam, dramatic dark background',
+    'fitness':    'powerful athlete silhouette, sweat drops with dramatic backlight',
+    'health':     'medical imagery with dramatic lighting, DNA helix, heartbeat line',
+    'travel':     'stunning impossible landscape, golden hour, adventure gear',
+    'music':      'concert stage explosion of lights, sound wave visualization',
+    'education':  'giant book opening with light emanating, knowledge explosion',
+    'science':    'laboratory with glowing chemicals, molecular structures floating',
+    'nature':     'dramatic landscape with extreme weather, wildlife close-up',
+    'history':    'ancient artifacts with dramatic lighting, old maps with X marks',
+    'psychology': 'brain visualization split in two with different colors, mind concept',
+    'business':   'corporate boardroom with dramatic window view, city lights',
+    'art':        'paint explosion in slow motion, artistic composition',
+    'fashion':    'high fashion dramatic lighting, avant-garde styling',
+    'auto':       'luxury car with dramatic reflection, speed blur, chrome detail',
+    'space':      'galaxy nebula, planet close-up, astronaut visor reflection',
+    'mystery':    'mysterious door in fog with light streaming through crack',
+    'legend':     'ancient forest clearing with mystical light beam, runes',
+    'folklore':   'campfire in dark forest with faces in smoke, old castle ruins',
+    'politic':    'dramatic parliamentary or government building, flags, podium',
+    'president':  'presidential office or government building with dramatic lighting',
+    'govern':     'government building columns with dramatic sky, flags waving',
   };
   
   for (const [key, visual] of Object.entries(nicheVisuals)) {
     if (lower.includes(key)) return visual;
   }
   
-  // Generic fallback based on tone
   const toneConfig = getToneConfig(tone);
   return `dramatic background related to ${niche}, ${toneConfig.visualKeywords}`;
 };
 
 // =============================================
-// RULE 3+4+5: DESCRIPTION BUILDER
+// DESCRIPTION BUILDER
 // =============================================
 
-/**
- * Generates a complete YouTube description with 3 layers.
- * Returns the full description and each layer separately.
- */
 export const buildVideoDescription = (params: ThumbnailDescriptionParams): DescriptionResult => {
   const { title, script, narrativeTone, niche, language } = params;
   const config = getToneConfig(narrativeTone);
   const lang = (language || 'Portuguese').toLowerCase();
   const isPt = lang.includes('portug') || lang.includes('pt');
   
-  // Get the clickbait text for coherence with thumbnail
   const clickbaitText = selectClickbaitText(title, script, config);
   
-  // === LAYER 1: Hook (first 2 lines) ===
   const hook = buildHook(title, script, config, clickbaitText, isPt);
-  
-  // === LAYER 2: Content Summary ===
   const summary = buildSummary(title, script, config, isPt);
-  
-  // === LAYER 3: SEO + CTA ===
   const seoBlock = buildSeoBlock(title, script, niche, isPt);
   
-  // Combine all layers
   const fullDescription = [
     hook,
     '',
@@ -583,10 +926,6 @@ export const buildVideoDescription = (params: ThumbnailDescriptionParams): Descr
   return { fullDescription, hook, summary, seoBlock };
 };
 
-/**
- * Layer 1: Hook — First 2 lines visible before "show more".
- * Must generate immediate curiosity.
- */
 const buildHook = (
   title: string,
   script: ScriptData,
@@ -594,11 +933,8 @@ const buildHook = (
   clickbaitText: string,
   isPt: boolean
 ): string => {
-  // Extract key info from first segment for context
-  const firstSegment = script.segments[0];
   const coreTheme = script.coreThemes?.[0] || title;
   
-  // Build hook that's coherent with thumbnail clickbait
   const hookPatterns = isPt ? [
     `${clickbaitText}... E o que descobrimos vai mudar a forma como você enxerga ${extractTopic(title)}.`,
     `Você sabia que a maioria das pessoas comete esse erro sobre ${extractTopic(title)}? A verdade vai te surpreender.`,
@@ -613,16 +949,11 @@ const buildHook = (
     `${clickbaitText}. Get ready to discover something that will change your perspective on ${extractTopic(title)}.`,
   ];
   
-  // Pick based on title hash for consistency
   const hash = title.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
   return hookPatterns[hash % hookPatterns.length];
 };
 
-/**
- * Extract the main topic from a title for natural language insertion.
- */
 const extractTopic = (title: string): string => {
-  // Remove common clickbait prefixes/suffixes and clean up
   return title
     .replace(/^(o |a |os |as |the |why |how |what |como |por que |o que )/i, '')
     .replace(/[!?…\.]+$/, '')
@@ -631,9 +962,6 @@ const extractTopic = (title: string): string => {
     .substring(0, 60);
 };
 
-/**
- * Layer 2: Content summary — clear, no spoilers, 3-5 sentences.
- */
 const buildSummary = (
   title: string,
   script: ScriptData,
@@ -642,8 +970,6 @@ const buildSummary = (
 ): string => {
   const segments = script.segments;
   const sectionTitles = segments.map(s => s.sectionTitle).filter(Boolean);
-  
-  // Build summary from section titles and themes
   const themes = script.coreThemes || [];
   const topicsList = sectionTitles.slice(0, 4).join(', ');
   
@@ -672,16 +998,12 @@ const buildSummary = (
   }
 };
 
-/**
- * Layer 3: SEO hashtags + CTA.
- */
 const buildSeoBlock = (
   title: string,
   script: ScriptData,
   niche: string,
   isPt: boolean
 ): string => {
-  // Generate relevant hashtags from title, niche, and themes
   const hashtags = generateHashtags(title, script, niche);
   
   const cta = isPt
@@ -703,17 +1025,12 @@ const buildSeoBlock = (
   ].join('\n');
 };
 
-/**
- * Generates 8-12 relevant hashtags from content.
- */
 const generateHashtags = (title: string, script: ScriptData, niche: string): string[] => {
   const tags = new Set<string>();
   
-  // Add niche hashtag
   const nicheTag = niche.replace(/[^a-zA-ZÀ-ú0-9]/g, '').toLowerCase();
   if (nicheTag) tags.add(nicheTag);
   
-  // Extract keywords from title
   const titleWords = title
     .replace(/[^a-zA-ZÀ-ú0-9\s]/g, '')
     .split(/\s+/)
@@ -724,13 +1041,11 @@ const generateHashtags = (title: string, script: ScriptData, niche: string): str
     tags.add(w);
   }
   
-  // Extract from core themes
   for (const theme of (script.coreThemes || []).slice(0, 4)) {
     const tag = theme.replace(/[^a-zA-ZÀ-ú0-9]/g, '').toLowerCase();
     if (tag.length > 2) tags.add(tag);
   }
   
-  // Extract from section titles
   for (const seg of script.segments.slice(0, 5)) {
     const words = (seg.sectionTitle || '')
       .replace(/[^a-zA-ZÀ-ú0-9\s]/g, '')
@@ -741,10 +1056,8 @@ const generateHashtags = (title: string, script: ScriptData, niche: string): str
     }
   }
   
-  // Add common YouTube tags
   tags.add('youtube');
   
-  // Limit to 12
   return [...tags].slice(0, 12);
 };
 
@@ -752,9 +1065,6 @@ const generateHashtags = (title: string, script: ScriptData, niche: string): str
 // TIMESTAMPS BUILDER
 // =============================================
 
-/**
- * Generates YouTube chapter timestamps from script segments.
- */
 export const buildTimestamps = (segments: ScriptSegment[]): string => {
   let currentTime = 0;
   const lines: string[] = [];
@@ -779,10 +1089,6 @@ export interface FullMetadataResult {
   timestamps: string;
 }
 
-/**
- * Generates thumbnail prompt + description + timestamps in one call.
- * Ensures coherence between thumbnail clickbait and description hook.
- */
 export const generateFullMetadata = (params: ThumbnailDescriptionParams): FullMetadataResult => {
   const thumbnail = buildThumbnailPrompt(params);
   const description = buildVideoDescription(params);
