@@ -219,7 +219,7 @@ export async function stepGenerateThumbnail(
 ) {
   callbacks.onStepStart('thumbnail', 'Gerando thumbnail com clickbait...');
   const scriptSummary = script.segments.slice(0, 3).map((s: any) => s.narratorText).join(' ').slice(0, 500);
-  const thumbnailUrl = await generateThumbnail(video.title, project.defaultTone, scriptSummary, script, project.channelTheme);
+  const thumbnailUrl = await generateThumbnail(video.title, project.defaultTone, scriptSummary, script, project.channelTheme, project.library);
   callbacks.updateVideo(project.id, video.id, { thumbnailUrl });
   callbacks.onStepComplete('thumbnail');
   return thumbnailUrl;

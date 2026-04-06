@@ -724,8 +724,8 @@ export const ProjectHub: React.FC = () => {
                             Knowledge Base & Library
                         </h2>
                         <p className="text-sm text-slate-400 mt-1 max-w-2xl">
-                            Add reference materials, links, or text summaries here. 
-                            The AI Brainstorming tool will use this context to generate more relevant and accurate video ideas.
+                            Add reference materials, branding guidelines, and competitor channel analysis. 
+                            The AI uses this context for brainstorming AND thumbnail visual identity.
                         </p>
                     </div>
                     <button 
@@ -736,11 +736,45 @@ export const ProjectHub: React.FC = () => {
                     </button>
                 </div>
 
+                {/* Quick-add suggestions */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <button 
+                        onClick={() => { setNewItemType('youtube_channel'); setNewItemTitle(''); setNewItemContent(''); setIsLibraryModalOpen(true); }}
+                        className="flex items-center gap-3 p-3 bg-red-500/5 border border-red-500/20 rounded-xl hover:bg-red-500/10 transition-colors text-left group"
+                    >
+                        <div className="p-2 rounded-lg bg-red-500/10"><Youtube className="w-4 h-4 text-red-400" /></div>
+                        <div>
+                            <p className="text-sm font-bold text-slate-200 group-hover:text-white">Inspiração de Canal</p>
+                            <p className="text-[10px] text-slate-500">Analise o estilo de outros canais para se inspirar</p>
+                        </div>
+                    </button>
+                    <button 
+                        onClick={() => { setNewItemType('reference'); setNewItemTitle('Identidade Visual'); setNewItemContent(''); setIsLibraryModalOpen(true); }}
+                        className="flex items-center gap-3 p-3 bg-purple-500/5 border border-purple-500/20 rounded-xl hover:bg-purple-500/10 transition-colors text-left group"
+                    >
+                        <div className="p-2 rounded-lg bg-purple-500/10"><Sparkles className="w-4 h-4 text-purple-400" /></div>
+                        <div>
+                            <p className="text-sm font-bold text-slate-200 group-hover:text-white">Identidade Visual</p>
+                            <p className="text-[10px] text-slate-500">Cores, fontes e estilo do canal para thumbnails</p>
+                        </div>
+                    </button>
+                    <button 
+                        onClick={() => { setNewItemType('text'); setNewItemTitle(''); setNewItemContent(''); setIsLibraryModalOpen(true); }}
+                        className="flex items-center gap-3 p-3 bg-blue-500/5 border border-blue-500/20 rounded-xl hover:bg-blue-500/10 transition-colors text-left group"
+                    >
+                        <div className="p-2 rounded-lg bg-blue-500/10"><FileText className="w-4 h-4 text-blue-400" /></div>
+                        <div>
+                            <p className="text-sm font-bold text-slate-200 group-hover:text-white">Nota de Pesquisa</p>
+                            <p className="text-[10px] text-slate-500">Adicione contexto para o brainstorming de ideias</p>
+                        </div>
+                    </button>
+                </div>
+
                 {!project.library || project.library.length === 0 ? (
                     <div className="flex flex-col items-center justify-center py-20 border border-dashed border-slate-800 rounded-xl bg-slate-900/20 text-slate-500">
                         <BookOpen className="w-10 h-10 mb-3 opacity-50" />
-                        <p>No reference materials added yet.</p>
-                        <p className="text-xs mt-1">Add books, articles, or notes to improve AI context.</p>
+                        <p>Nenhum material de referência adicionado.</p>
+                        <p className="text-xs mt-1">Adicione canais de inspiração, identidade visual ou notas de pesquisa.</p>
                     </div>
                 ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -753,12 +787,14 @@ export const ProjectHub: React.FC = () => {
                                             item.type === 'youtube_channel' ? 'bg-red-500/10 text-red-400' :
                                             item.type === 'book' ? 'bg-amber-500/10 text-amber-400' :
                                             item.type === 'file' ? 'bg-green-500/10 text-green-400' :
+                                            item.type === 'reference' ? 'bg-purple-500/10 text-purple-400' :
                                             'bg-slate-700 text-slate-300'
                                         }`}>
                                             {item.type === 'link' ? <LinkIcon className="w-4 h-4" /> : 
                                              item.type === 'youtube_channel' ? <Youtube className="w-4 h-4" /> :
                                              item.type === 'book' ? <BookOpen className="w-4 h-4" /> : 
                                              item.type === 'file' ? <File className="w-4 h-4" /> :
+                                             item.type === 'reference' ? <Sparkles className="w-4 h-4" /> :
                                              <FileText className="w-4 h-4" />}
                                         </div>
                                         <h4 className="font-bold text-slate-200 text-sm truncate">{item.title}</h4>
@@ -773,9 +809,17 @@ export const ProjectHub: React.FC = () => {
                                 <div className="text-xs text-slate-400 leading-relaxed line-clamp-4 bg-slate-950/50 p-2 rounded border border-slate-800/50 font-mono break-all">
                                     {item.content}
                                 </div>
-                                <div className="mt-2 flex justify-between items-center text-[10px] text-slate-600">
-                                    <span className="uppercase tracking-wider font-bold">{item.type}</span>
-                                    <span>{new Date(item.createdAt).toLocaleDateString()}</span>
+                                <div className="mt-2 flex justify-between items-center text-[10px]">
+                                    <span className={`uppercase tracking-wider font-bold ${
+                                        item.type === 'youtube_channel' ? 'text-red-500' :
+                                        item.type === 'reference' ? 'text-purple-500' :
+                                        'text-slate-600'
+                                    }`}>
+                                        {item.type === 'youtube_channel' ? '🎬 Inspiração' : 
+                                         item.type === 'reference' ? '🎨 Branding' :
+                                         item.type}
+                                    </span>
+                                    <span className="text-slate-600">{new Date(item.createdAt).toLocaleDateString()}</span>
                                 </div>
                             </div>
                         ))}
@@ -1297,13 +1341,23 @@ export const ProjectHub: React.FC = () => {
                                 }}
                                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-orange-500 outline-none appearance-none"
                             >
-                                <option value="text">Text Note / Summary</option>
-                                <option value="link">Link / URL</option>
-                                <option value="youtube_channel">YouTube Channel Reference (Style/Themes)</option>
-                                <option value="file">File Upload (Text/Doc)</option>
-                                <option value="book">Book Reference</option>
-                                <option value="reference">General Reference</option>
+                                <option value="youtube_channel">🎬 Canal YouTube de Inspiração (Estilo/Temas)</option>
+                                <option value="reference">🎨 Identidade Visual (Cores/Fontes/Branding)</option>
+                                <option value="text">📝 Nota de Pesquisa / Resumo</option>
+                                <option value="link">🔗 Link / URL</option>
+                                <option value="file">📄 Upload de Arquivo (Text/Doc)</option>
+                                <option value="book">📚 Referência de Livro</option>
                             </select>
+                            {newItemType === 'youtube_channel' && (
+                                <p className="text-xs text-red-400/80 mt-1">
+                                    💡 Descreva o estilo do canal: tipo de thumbnail, tons de cor, formatos de título, público-alvo, e o que você quer imitar.
+                                </p>
+                            )}
+                            {newItemType === 'reference' && (
+                                <p className="text-xs text-purple-400/80 mt-1">
+                                    💡 Inclua cores hex (#FF0000), fontes preferidas, e regras visuais. A IA usará isso nas thumbnails.
+                                </p>
+                            )}
                         </div>
 
                         {newItemType === 'file' ? (
@@ -1338,15 +1392,33 @@ export const ProjectHub: React.FC = () => {
                         </div>
 
                         <div className="space-y-2">
-                            <label className="text-sm font-semibold text-slate-300 ml-1">Content / URL / Summary</label>
+                            <label className="text-sm font-semibold text-slate-300 ml-1">
+                                {newItemType === 'youtube_channel' ? 'Análise do Canal' : 
+                                 newItemType === 'reference' ? 'Diretrizes Visuais' : 
+                                 'Conteúdo / URL / Resumo'}
+                            </label>
                             <textarea 
                                 value={newItemContent}
                                 onChange={(e) => setNewItemContent(e.target.value)}
                                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-orange-500 outline-none h-32 resize-none placeholder-slate-600 custom-scrollbar"
-                                placeholder={newItemType === 'link' || newItemType === 'youtube_channel' ? "https://..." : "Paste summary or key facts here..."}
-                                readOnly={newItemType === 'file'} // Make read-only if it was uploaded, or allow edit? Let's allow edit.
+                                placeholder={
+                                    newItemType === 'youtube_channel' 
+                                        ? "Ex: Canal @MrBeast — Thumbnails com rostos extremos, texto amarelo em negrito com fundo colorido, CTR alto. Estilo: choque e recompensa. Público: 18-35 anos. O que quero imitar: o contraste de cores e a expressão facial exagerada."
+                                    : newItemType === 'reference'
+                                        ? "Ex: Cores do canal: #FF6B00 (laranja principal), #1A1A2E (fundo escuro). Fonte: Impact para thumbnails. Estilo: dark e cinematográfico. Sempre usar borda preta grossa no texto."
+                                    : newItemType === 'link' 
+                                        ? "https://..."
+                                    : "Cole aqui o resumo, fatos-chave, ou contexto relevante..."
+                                }
+                                readOnly={newItemType === 'file'}
                             />
-                            <p className="text-xs text-slate-500">This content will be fed to the AI during brainstorming.</p>
+                            <p className="text-xs text-slate-500">
+                                {newItemType === 'youtube_channel' 
+                                    ? 'A IA analisará este canal para gerar ideias similares e aplicar o estilo nas thumbnails.'
+                                : newItemType === 'reference'
+                                    ? 'Estas diretrizes serão aplicadas automaticamente nas thumbnails geradas pela IA.'
+                                : 'Este conteúdo será alimentado à IA durante o brainstorming de ideias.'}
+                            </p>
                         </div>
 
                         <div className="flex gap-3 pt-2">
