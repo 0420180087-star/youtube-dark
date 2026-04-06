@@ -1392,15 +1392,33 @@ export const ProjectHub: React.FC = () => {
                         </div>
 
                         <div className="space-y-2">
-                            <label className="text-sm font-semibold text-slate-300 ml-1">Content / URL / Summary</label>
+                            <label className="text-sm font-semibold text-slate-300 ml-1">
+                                {newItemType === 'youtube_channel' ? 'Análise do Canal' : 
+                                 newItemType === 'reference' ? 'Diretrizes Visuais' : 
+                                 'Conteúdo / URL / Resumo'}
+                            </label>
                             <textarea 
                                 value={newItemContent}
                                 onChange={(e) => setNewItemContent(e.target.value)}
                                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-orange-500 outline-none h-32 resize-none placeholder-slate-600 custom-scrollbar"
-                                placeholder={newItemType === 'link' || newItemType === 'youtube_channel' ? "https://..." : "Paste summary or key facts here..."}
-                                readOnly={newItemType === 'file'} // Make read-only if it was uploaded, or allow edit? Let's allow edit.
+                                placeholder={
+                                    newItemType === 'youtube_channel' 
+                                        ? "Ex: Canal @MrBeast — Thumbnails com rostos extremos, texto amarelo em negrito com fundo colorido, CTR alto. Estilo: choque e recompensa. Público: 18-35 anos. O que quero imitar: o contraste de cores e a expressão facial exagerada."
+                                    : newItemType === 'reference'
+                                        ? "Ex: Cores do canal: #FF6B00 (laranja principal), #1A1A2E (fundo escuro). Fonte: Impact para thumbnails. Estilo: dark e cinematográfico. Sempre usar borda preta grossa no texto."
+                                    : newItemType === 'link' 
+                                        ? "https://..."
+                                    : "Cole aqui o resumo, fatos-chave, ou contexto relevante..."
+                                }
+                                readOnly={newItemType === 'file'}
                             />
-                            <p className="text-xs text-slate-500">This content will be fed to the AI during brainstorming.</p>
+                            <p className="text-xs text-slate-500">
+                                {newItemType === 'youtube_channel' 
+                                    ? 'A IA analisará este canal para gerar ideias similares e aplicar o estilo nas thumbnails.'
+                                : newItemType === 'reference'
+                                    ? 'Estas diretrizes serão aplicadas automaticamente nas thumbnails geradas pela IA.'
+                                : 'Este conteúdo será alimentado à IA durante o brainstorming de ideias.'}
+                            </p>
                         </div>
 
                         <div className="flex gap-3 pt-2">
