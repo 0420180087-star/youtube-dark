@@ -1341,13 +1341,23 @@ export const ProjectHub: React.FC = () => {
                                 }}
                                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-orange-500 outline-none appearance-none"
                             >
-                                <option value="text">Text Note / Summary</option>
-                                <option value="link">Link / URL</option>
-                                <option value="youtube_channel">YouTube Channel Reference (Style/Themes)</option>
-                                <option value="file">File Upload (Text/Doc)</option>
-                                <option value="book">Book Reference</option>
-                                <option value="reference">General Reference</option>
+                                <option value="youtube_channel">🎬 Canal YouTube de Inspiração (Estilo/Temas)</option>
+                                <option value="reference">🎨 Identidade Visual (Cores/Fontes/Branding)</option>
+                                <option value="text">📝 Nota de Pesquisa / Resumo</option>
+                                <option value="link">🔗 Link / URL</option>
+                                <option value="file">📄 Upload de Arquivo (Text/Doc)</option>
+                                <option value="book">📚 Referência de Livro</option>
                             </select>
+                            {newItemType === 'youtube_channel' && (
+                                <p className="text-xs text-red-400/80 mt-1">
+                                    💡 Descreva o estilo do canal: tipo de thumbnail, tons de cor, formatos de título, público-alvo, e o que você quer imitar.
+                                </p>
+                            )}
+                            {newItemType === 'reference' && (
+                                <p className="text-xs text-purple-400/80 mt-1">
+                                    💡 Inclua cores hex (#FF0000), fontes preferidas, e regras visuais. A IA usará isso nas thumbnails.
+                                </p>
+                            )}
                         </div>
 
                         {newItemType === 'file' ? (
