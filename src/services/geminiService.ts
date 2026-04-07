@@ -422,14 +422,69 @@ const getStyleInstruction = (style: string): string => {
     }
 };
 
+// =============================================
+// PHASE 2 — Duration-aware script generation
+// =============================================
+
+interface DurationSpec {
+  minWords: number;
+  maxWords: number;
+  segments: number;
+  minMinutes: number;
+  maxMinutes: number;
+}
+
+function durationToWordCount(targetDuration: string): DurationSpec {
+  const d = targetDuration.toLowerCase();
+  if (d.includes('short') || d.includes('< 3') || d.includes('60s') || d.includes('shorts'))
+    return { minWords: 100, maxWords: 450, segments: 4, minMinutes: 1, maxMinutes: 3 };
+  if (d.includes('standard') || d.includes('5-8') || d.includes('5-7'))
+    return { minWords: 750, maxWords: 1200, segments: 7, minMinutes: 5, maxMinutes: 8 };
+  if (d.includes('long') || d.includes('10-15') || d.includes('8-10'))
+    return { minWords: 1500, maxWords: 2250, segments: 12, minMinutes: 10, maxMinutes: 15 };
+  if (d.includes('deep') || d.includes('20+') || d.includes('15-20'))
+    return { minWords: 2250, maxWords: 3000, segments: 16, minMinutes: 20, maxMinutes: 30 };
+  // fallback: standard
+  return { minWords: 750, maxWords: 1200, segments: 7, minMinutes: 5, maxMinutes: 8 };
+}
+
+function validateScriptDuration(script: ScriptData, targetDuration: string): { totalWords: number; estimatedMinutes: number; warning?: string } {
+  const totalWords = script.segments.reduce((sum, seg) => {
+    return sum + (seg.narratorText || '').split(/\s+/).filter(Boolean).length;
+  }, 0);
+  const estimatedMinutes = totalWords / 150;
+  const spec = durationToWordCount(targetDuration);
+
+  let warning: string | undefined;
+  if (estimatedMinutes < spec.minMinutes * 0.7) {
+    warning = `⚠️ Script muito curto: ~${estimatedMinutes.toFixed(1)} min (alvo: ${spec.minMinutes}-${spec.maxMinutes} min, ${totalWords} palavras)`;
+    console.warn(`[DarkStream AI] ${warning}`);
+  } else if (estimatedMinutes > spec.maxMinutes * 1.3) {
+    warning = `⚠️ Script muito longo: ~${estimatedMinutes.toFixed(1)} min (alvo: ${spec.minMinutes}-${spec.maxMinutes} min, ${totalWords} palavras)`;
+    console.warn(`[DarkStream AI] ${warning}`);
+  } else {
+    console.log(`[DarkStream AI] ✅ Script dentro do alvo: ~${estimatedMinutes.toFixed(1)} min (${totalWords} palavras)`);
+  }
+
+  return { totalWords, estimatedMinutes, warning };
+}
+
 export const generateVideoScript = async (params: GenerateScriptParams): Promise<ScriptData> => {
   return executeGeminiRequest(async (ai) => {
       const languagePrompt = params.language ? `IMPORTANT: Write the entire script in ${params.language}.` : "Write the script in English.";
       const toneInstruction = getToneInstruction(params.tone);
+      const spec = durationToWordCount(params.targetDuration);
+
       const systemInstruction = `You are a world-class cinematic trailer scriptwriter. 
       Channel Theme: "${params.channelTheme}". Target Tone: "${params.tone}". ${languagePrompt}
       ${toneInstruction}
-      Target Duration: ${params.targetDuration}`;
+
+TARGET DURATION: ${params.targetDuration}
+WORD COUNT REQUIREMENT: Write narrator text totaling between ${spec.minWords} and ${spec.maxWords} words across all segments combined.
+NUMBER OF SEGMENTS: Generate exactly ${spec.segments} segments.
+SPEAKING RATE: Assume 150 words per minute for narration timing. Each segment's estimatedDuration should reflect the word count of its narratorText at this rate.
+CRITICAL: Each segment's narratorText MUST be a complete, detailed, word-for-word spoken paragraph. Do NOT write short summaries or bullet points. Write the FULL narration script as it would be read aloud by the narrator. Every segment must have substantial narratorText (minimum ${Math.round(spec.minWords / spec.segments)} words per segment).`;
+
       let prompt = `Topic: "${params.topic}".\n`; 
       if (params.additionalContext) { prompt += `Context: ${params.additionalContext}\n`; } 
       if (params.libraryContext) { 
@@ -442,7 +497,7 @@ export const generateVideoScript = async (params: GenerateScriptParams): Promise
           config: { 
               systemInstruction: systemInstruction, 
               responseMimeType: "application/json", 
-              maxOutputTokens: 8192, 
+              maxOutputTokens: 16384, 
               responseSchema: { 
                   type: Type.OBJECT, 
                   properties: { 
@@ -478,17 +533,28 @@ export const generateVideoScript = async (params: GenerateScriptParams): Promise
       } 
       if (!fullText) throw new Error("No script generated"); 
       let jsonString = fullText.replace(/```json/g, '').replace(/```/g, '').trim(); 
+      let script: ScriptData;
       try { 
-          return JSON.parse(jsonString) as ScriptData; 
+          script = JSON.parse(jsonString) as ScriptData; 
       } catch (parseError) { 
           console.warn("JSON Parse failed, attempting repair..."); 
           try { 
               const repaired = repairJson(jsonString); 
-              return JSON.parse(repaired) as ScriptData; 
+              script = JSON.parse(repaired) as ScriptData; 
           } catch (repairError) { 
               throw new Error("Generated script was incomplete. Please try again."); 
           } 
       }
+
+      // Validate and annotate
+      const validation = validateScriptDuration(script, params.targetDuration);
+      (script as any).estimatedDurationMinutes = validation.estimatedMinutes;
+      (script as any).totalWords = validation.totalWords;
+      if (validation.warning) {
+        (script as any).durationWarning = validation.warning;
+      }
+
+      return script;
   });
 };
 
