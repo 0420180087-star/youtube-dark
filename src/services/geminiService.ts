@@ -255,8 +255,8 @@ const runWithRotation = async <T>(op: (ai: GoogleGenAI) => Promise<T>, isRetry =
         try {
             const ai = new GoogleGenAI({ apiKey: key });
             const result = await op(ai);
-            // Success — advance round-robin for next call
-            roundRobinIndex = (idx + 1) % readyKeys.length;
+            // Success — advance round-robin globally (not relative to readyKeys subset)
+            roundRobinIndex = roundRobinIndex + i + 1;
             console.log(`[DarkStream AI] ✅ Sucesso com chave ${masked}`);
             return result;
         } catch (err: any) {
@@ -296,10 +296,17 @@ function repairJson(jsonStr: string): string {
   let isEscaped = false;
   const stack: string[] = [];
   
+  // BUG FIX: support both object and array JSON
   const firstBrace = jsonStr.indexOf('{');
-  if (firstBrace === -1) return "{}";
+  const firstBracket = jsonStr.indexOf('[');
   
-  let processed = jsonStr.substring(firstBrace);
+  let startIndex: number;
+  if (firstBrace === -1 && firstBracket === -1) return "{}";
+  else if (firstBrace === -1) startIndex = firstBracket;
+  else if (firstBracket === -1) startIndex = firstBrace;
+  else startIndex = Math.min(firstBrace, firstBracket);
+  
+  let processed = jsonStr.substring(startIndex);
   
   for (let i = 0; i < processed.length; i++) {
     const char = processed[i];
