@@ -39,6 +39,9 @@ export interface ScriptData {
   coreThemes: string[];
   ambientMusicDescription?: string;
   segments: ScriptSegment[];
+  estimatedDurationMinutes?: number;
+  totalWords?: number;
+  durationWarning?: string;
 }
 
 export type VisualEffect = 

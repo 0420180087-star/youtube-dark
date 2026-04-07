@@ -217,9 +217,22 @@ Return JSON: { "topic": "video title", "context": "brief description", "specific
 
 async function stepScript(topic, projectData) {
   log('📝', 'Step 2: Generating script...');
+  
+  const dur = (projectData.defaultDuration || 'Standard (5-8 min)').toLowerCase();
+  let minWords, maxWords, segments;
+  if (dur.includes('short') || dur.includes('< 3')) { minWords = 100; maxWords = 450; segments = 4; }
+  else if (dur.includes('long') || dur.includes('10-15')) { minWords = 1500; maxWords = 2250; segments = 12; }
+  else if (dur.includes('deep') || dur.includes('20+')) { minWords = 2250; maxWords = 3000; segments = 16; }
+  else { minWords = 750; maxWords = 1200; segments = 7; }
+
   const prompt = `Write a YouTube video script about "${topic}" for a ${projectData.defaultTone || 'Engaging'} channel about "${projectData.channelTheme}".
-Target duration: ${projectData.defaultDuration || '5-8 minutes'}.
+Target duration: ${projectData.defaultDuration || 'Standard (5-8 min)'}.
 Language: ${projectData.language || 'en'}.
+
+WORD COUNT REQUIREMENT: Write narrator text totaling between ${minWords} and ${maxWords} words across all segments combined.
+NUMBER OF SEGMENTS: Generate exactly ${segments} segments.
+SPEAKING RATE: Assume 150 words per minute for narration timing. Each segment's estimatedDuration should reflect the word count of its narratorText at this rate.
+CRITICAL: Each segment's narratorText MUST be a complete, detailed, word-for-word spoken paragraph. Do NOT write short summaries. Write the FULL narration script.
 
 Return JSON with this structure:
 {
@@ -233,12 +246,12 @@ Return JSON with this structure:
       "estimatedDuration": 30
     }
   ]
-}
+}`;
 
-Create 4-6 segments. Each segment should have 2-3 visual descriptions. estimatedDuration is in seconds.`;
-
-  const script = await geminiWithRetry(() => geminiGenerateJSON(prompt, 8192));
-  log('✅', `Script generated: ${script.segments?.length || 0} segments`);
+  const script = await geminiWithRetry(() => geminiGenerateJSON(prompt, 16384));
+  const totalWords = (script.segments || []).reduce((sum, s) => sum + (s.narratorText || '').split(/\s+/).filter(Boolean).length, 0);
+  const estMin = (totalWords / 150).toFixed(1);
+  log('✅', `Script generated: ${script.segments?.length || 0} segments, ~${totalWords} words (~${estMin} min)`);
   return script;
 }
 

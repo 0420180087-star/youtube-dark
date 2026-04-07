@@ -1512,7 +1512,14 @@ export const ProjectEditor: React.FC = () => {
                             )}
                         </div>
                         <div className="flex justify-between items-center mb-4">
-                            <h3 className="text-lg font-bold text-white">Storyboard & Script</h3>
+                            <div className="flex items-center gap-3">
+                                <h3 className="text-lg font-bold text-white">Storyboard & Script</h3>
+                                {video.script.estimatedDurationMinutes && (
+                                    <span className={`text-[10px] font-mono px-2 py-1 rounded ${video.script.durationWarning ? 'bg-yellow-500/20 text-yellow-400' : 'bg-green-500/20 text-green-400'}`}>
+                                        ~{video.script.estimatedDurationMinutes.toFixed(1)} min • {video.script.totalWords || '?'} palavras
+                                    </span>
+                                )}
+                            </div>
                             <div className="flex gap-2">
                                 <button 
                                     onClick={handleAutoFillNarrator}
