@@ -113,7 +113,6 @@ export interface Video {
   
   specificContext?: string;
   script?: ScriptData;
-  audioBuffer?: Float32Array; 
   audioUrl?: string;
   backgroundMusicUrl?: string;
   segmentTimestamps?: number[];
