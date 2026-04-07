@@ -78,6 +78,7 @@ type LoadedScene = {
   element: HTMLImageElement | HTMLVideoElement;
   isVideo: boolean;
   ready: boolean;
+  videoStarted: boolean; // tracks if play() was called
 };
 
 const loadSceneMedia = async (scene: {
@@ -87,24 +88,27 @@ const loadSceneMedia = async (scene: {
   videoUrl?: string;
   imageUrl: string;
 }): Promise<LoadedScene> => {
-  // 1. Tenta carregar como vídeo
+  // 1. Tenta carregar como vídeo — aguarda loadedmetadata + canplay
   if (scene.videoUrl) {
     try {
       const video = document.createElement("video");
       video.crossOrigin = "anonymous";
       video.muted = true;
       video.playsInline = true;
-      video.preload = "auto";
+      video.preload = "metadata"; // force metadata first
       video.src = scene.videoUrl;
 
+      // Wait for metadata (dimensions available)
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(
-          () => reject(new Error("video timeout")),
-          10000
+          () => reject(new Error("video metadata timeout")),
+          20000
         );
-        video.oncanplaythrough = () => {
+        video.onloadedmetadata = () => {
           clearTimeout(timeout);
-          resolve();
+          // Now upgrade to auto and wait for canplay
+          video.preload = "auto";
+          video.load();
         };
         video.onerror = () => {
           clearTimeout(timeout);
@@ -113,6 +117,32 @@ const loadSceneMedia = async (scene: {
         video.load();
       });
 
+      // Wait for canplay (frames available for drawing)
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(
+          () => reject(new Error("video canplay timeout")),
+          20000
+        );
+        if (video.readyState >= 3) {
+          clearTimeout(timeout);
+          resolve();
+          return;
+        }
+        video.oncanplay = () => {
+          clearTimeout(timeout);
+          resolve();
+        };
+        video.onerror = () => {
+          clearTimeout(timeout);
+          reject(new Error("video canplay error"));
+        };
+      });
+
+      // Validate dimensions are actually available
+      if (video.videoWidth === 0 || video.videoHeight === 0) {
+        throw new Error("video dimensions still 0 after load");
+      }
+
       return {
         startTime: scene.startTime,
         duration: scene.duration,
@@ -120,9 +150,10 @@ const loadSceneMedia = async (scene: {
         element: video,
         isVideo: true,
         ready: true,
+        videoStarted: false,
       };
-    } catch {
-      console.warn("⚠️ Vídeo falhou, usando imagem de fallback:", scene.videoUrl);
+    } catch (e) {
+      console.warn("⚠️ Vídeo falhou, usando imagem de fallback:", scene.videoUrl, e);
     }
   }
 
@@ -154,6 +185,7 @@ const loadSceneMedia = async (scene: {
       element: img,
       isVideo: false,
       ready: true,
+      videoStarted: false,
     };
   } catch {
     console.warn("⚠️ Imagem também falhou, usando placeholder:", scene.imageUrl);
@@ -183,7 +215,28 @@ const loadSceneMedia = async (scene: {
     element: placeholderImg,
     isVideo: false,
     ready: true,
+    videoStarted: false,
   };
+};
+
+// ─── Obtém dimensões do elemento de forma segura ─────────────────────────────
+
+const getMediaDimensions = (
+  scene: LoadedScene
+): { w: number; h: number } => {
+  if (scene.isVideo) {
+    const vid = scene.element as HTMLVideoElement;
+    const w = vid.videoWidth;
+    const h = vid.videoHeight;
+    // Guard: se dimensões ainda forem 0, usar fallback 1920x1080
+    if (w > 0 && h > 0) return { w, h };
+    return { w: 1920, h: 1080 };
+  }
+  const img = scene.element as HTMLImageElement;
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  if (w > 0 && h > 0) return { w, h };
+  return { w: 1920, h: 1080 };
 };
 
 // ─── Desenha um frame de vídeo ou imagem no canvas ───────────────────────────
@@ -195,29 +248,54 @@ const drawMediaFrame = (
   elapsed: number,
   width: number,
   height: number
-) => {
+): boolean => {
   ctx.save();
 
   if (scene.isVideo) {
     const videoEl = scene.element as HTMLVideoElement;
+
+    // Se readyState < 2 (HAVE_CURRENT_DATA), não temos frame para desenhar
+    if (videoEl.readyState < 2) {
+      ctx.restore();
+      return false; // sinaliza que não desenhou nada
+    }
+
+    // Play() apenas uma vez
+    if (!scene.videoStarted) {
+      videoEl.play().catch(() => {});
+      scene.videoStarted = true;
+    }
+
+    // Sincroniza currentTime com elapsed, com guards contra NaN e overflow
     const targetTime = elapsed - scene.startTime;
-    if (Math.abs(videoEl.currentTime - targetTime) > 0.1) {
-      videoEl.currentTime = Math.min(targetTime, videoEl.duration - 0.01);
+    if (
+      !isNaN(targetTime) &&
+      isFinite(targetTime) &&
+      targetTime >= 0 &&
+      videoEl.duration > 0 &&
+      !isNaN(videoEl.duration)
+    ) {
+      const clampedTime = Math.min(targetTime, videoEl.duration - 0.01);
+      if (Math.abs(videoEl.currentTime - clampedTime) > 0.15) {
+        videoEl.currentTime = clampedTime;
+      }
     }
   }
 
   calculateTransform(ctx, scene.effect, sceneProgress, width, height, elapsed);
   applyVisualFilter(ctx, "saturate");
 
-  const el = scene.element as HTMLImageElement;
-  const scale = Math.max(width / el.width, height / el.height);
-  const elW = el.width * scale;
-  const elH = el.height * scale;
+  // Usa getMediaDimensions para nunca ter divisão por zero
+  const { w: elW_orig, h: elH_orig } = getMediaDimensions(scene);
+  const scale = Math.max(width / elW_orig, height / elH_orig);
+  const elW = elW_orig * scale;
+  const elH = elH_orig * scale;
   const x = (width - elW) / 2;
   const y = (height - elH) / 2;
 
   ctx.drawImage(scene.element, x, y, elW, elH);
   ctx.restore();
+  return true; // frame desenhado com sucesso
 };
 
 // ─── Crossfade suave entre cenas ─────────────────────────────────────────────
@@ -398,7 +476,7 @@ export const renderVideoHeadless = async (
     recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
   });
 
-  recorder.start(100);
+  recorder.start(2000); // chunks de 2s forçam keyframes regulares
   await new Promise((r) => setTimeout(r, 200));
   audioSrc.start(0);
 
@@ -409,6 +487,7 @@ export const renderVideoHeadless = async (
 
   return new Promise((resolve, reject) => {
     let lastScene: LoadedScene | null = null;
+    let lastDrawnScene: LoadedScene | null = null; // último frame que de fato foi desenhado
 
     const renderLoop = () => {
       try {
@@ -443,6 +522,7 @@ export const renderVideoHeadless = async (
           const sceneTime = elapsed - currentScene.startTime;
           const sceneProgress = Math.min(1, sceneTime / currentScene.duration);
 
+          // Desenha cena anterior embaixo (para crossfade)
           if (prevScene) {
             const prevSceneTime = elapsed - prevScene.startTime;
             const prevProgress = Math.min(1, prevSceneTime / prevScene.duration);
@@ -450,11 +530,21 @@ export const renderVideoHeadless = async (
             drawMediaFrame(ctx2d, prevScene, prevProgress, elapsed, width, height);
           }
 
+          // Desenha cena atual com alpha de crossfade
           const alpha = getCrossfadeAlpha(currentScene, elapsed);
           ctx2d.globalAlpha = alpha;
-          drawMediaFrame(ctx2d, currentScene, sceneProgress, elapsed, width, height);
-          ctx2d.globalAlpha = 1;
+          const drawn = drawMediaFrame(ctx2d, currentScene, sceneProgress, elapsed, width, height);
 
+          if (drawn) {
+            lastDrawnScene = currentScene;
+          } else if (lastDrawnScene && lastDrawnScene !== currentScene) {
+            // Vídeo não está pronto (readyState < 2) — desenha último frame válido
+            const fallbackTime = elapsed - lastDrawnScene.startTime;
+            const fallbackProgress = Math.min(1, fallbackTime / lastDrawnScene.duration);
+            drawMediaFrame(ctx2d, lastDrawnScene, fallbackProgress, elapsed, width, height);
+          }
+
+          ctx2d.globalAlpha = 1;
           lastScene = currentScene;
 
           drawScanlines(ctx2d, width, height, elapsed);
