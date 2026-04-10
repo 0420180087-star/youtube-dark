@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { UserProfile, YouTubeChannel } from '../types';
 import { encryptData, decryptData } from '../services/securityService';
+import { supabase } from '../lib/supabaseClient';
 
 declare const google: any;
 
@@ -14,8 +15,9 @@ interface AuthContextType {
   setGoogleClientId: (id: string) => void;
   login: () => Promise<void>;
   logout: () => void;
-  connectYoutube: () => Promise<void>;
+  connectYoutube: (projectId?: string) => Promise<void>;
   disconnectYoutube: () => void;
+  refreshYouTubeToken: (projectId: string) => Promise<string | null>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -27,7 +29,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isLoading, setIsLoading] = useState(false);
   const [googleClientId, setGoogleClientIdState] = useState('');
 
-  // 1. ASYNC INITIALIZATION to handle decryption
   useEffect(() => {
     const initAuth = async () => {
       try {
@@ -80,6 +81,78 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     initAuth();
   }, []);
 
+  // Capture ?code= after Google OAuth redirect and exchange via Edge Function
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const code = urlParams.get('code');
+    const state = urlParams.get('state');
+
+    if (!code) return;
+
+    const pendingRaw = sessionStorage.getItem('yt_oauth_pending');
+    if (!pendingRaw) return;
+
+    let pending: { state: string; projectId: string; userEmail: string; redirectUri: string };
+    try {
+      pending = JSON.parse(pendingRaw);
+    } catch {
+      sessionStorage.removeItem('yt_oauth_pending');
+      return;
+    }
+
+    if (pending.state !== state) {
+      console.error('[Auth] State mismatch — possível CSRF');
+      sessionStorage.removeItem('yt_oauth_pending');
+      return;
+    }
+
+    sessionStorage.removeItem('yt_oauth_pending');
+    window.history.replaceState({}, '', window.location.pathname);
+
+    const exchangeCode = async () => {
+      setIsLoading(true);
+      try {
+        const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+        if (!supabaseUrl) {
+          throw new Error('VITE_SUPABASE_URL não configurada. Configure o Supabase nas variáveis de ambiente.');
+        }
+
+        const res = await fetch(`${supabaseUrl}/functions/v1/exchange-code`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+          },
+          body: JSON.stringify({
+            code,
+            redirect_uri: pending.redirectUri,
+            project_id: pending.projectId,
+            user_email: pending.userEmail,
+          }),
+        });
+
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Falha na troca de código');
+
+        setAccessToken(data.access_token);
+        const encToken = await encryptData(data.access_token);
+        localStorage.setItem('ds_youtube_access_token', encToken);
+
+        await fetchChannelData(data.access_token);
+
+        console.log('[Auth] ✅ YouTube conectado e refresh_token salvo no Supabase');
+      } catch (err: any) {
+        console.error('[Auth] Erro ao trocar code:', err);
+        alert(`Erro ao conectar YouTube: ${err.message}`);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    exchangeCode();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const setGoogleClientId = async (id: string) => {
     const cleanId = id.trim();
     const encrypted = await encryptData(cleanId);
@@ -87,7 +160,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setGoogleClientIdState(cleanId);
   };
 
-  // --- 1. BASIC USER LOGIN (Identity Only) ---
   const login = async () => {
     setIsLoading(true);
 
@@ -113,7 +185,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     try {
-        // Request only Profile and Email initially
         const client = google.accounts.oauth2.initTokenClient({
             client_id: activeClientId,
             scope: 'https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email',
@@ -156,43 +227,65 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
   };
 
-  // --- 2. YOUTUBE CONNECTION (Permissions) ---
-  const connectYoutube = async () => {
-      if (!user) { 
-          await login();
-          return; 
-      }
-      
-      setIsLoading(true);
-      const activeClientId = googleClientId ? googleClientId.trim() : '';
+  const connectYoutube = async (projectId?: string) => {
+    if (!user) { await login(); return; }
+    setIsLoading(true);
 
-      if (!activeClientId) {
-          alert("Por favor, configure o Google Client ID nas Configurações primeiro.");
-          setIsLoading(false);
-          return;
-      }
+    const activeClientId = googleClientId?.trim();
+    if (!activeClientId) {
+      alert('Por favor, configure o Google Client ID nas Configurações primeiro.');
+      setIsLoading(false);
+      return;
+    }
 
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+    if (!supabaseUrl) {
+      // Fallback to implicit flow if Supabase not configured
+      console.warn('[Auth] Supabase não configurado. Usando fluxo implícito (sem refresh_token).');
       if (typeof google !== 'undefined') {
         const client = google.accounts.oauth2.initTokenClient({
-            client_id: activeClientId,
-            // CRITICAL: Requesting upload scope here
-            scope: 'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly',
-            callback: async (tokenResponse: any) => {
-                if (tokenResponse && tokenResponse.access_token) {
-                    // Save Token Encrypted
-                    setAccessToken(tokenResponse.access_token);
-                    const encToken = await encryptData(tokenResponse.access_token);
-                    localStorage.setItem('ds_youtube_access_token', encToken);
-                    
-                    // Fetch Channel Data
-                    await fetchChannelData(tokenResponse.access_token);
-                }
-                setIsLoading(false);
-            },
+          client_id: activeClientId,
+          scope: 'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly',
+          callback: async (tokenResponse: any) => {
+            if (tokenResponse && tokenResponse.access_token) {
+              setAccessToken(tokenResponse.access_token);
+              const encToken = await encryptData(tokenResponse.access_token);
+              localStorage.setItem('ds_youtube_access_token', encToken);
+              await fetchChannelData(tokenResponse.access_token);
+            }
+            setIsLoading(false);
+          },
         });
-        
         client.requestAccessToken();
       }
+      return;
+    }
+
+    // Authorization Code Flow (redirect-based, returns refresh_token)
+    const redirectUri = window.location.origin + window.location.pathname;
+
+    const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+    authUrl.searchParams.set('client_id', activeClientId);
+    authUrl.searchParams.set('redirect_uri', redirectUri);
+    authUrl.searchParams.set('response_type', 'code');
+    authUrl.searchParams.set('scope', [
+      'https://www.googleapis.com/auth/youtube.upload',
+      'https://www.googleapis.com/auth/youtube.readonly',
+    ].join(' '));
+    authUrl.searchParams.set('access_type', 'offline');
+    authUrl.searchParams.set('prompt', 'consent');
+    authUrl.searchParams.set('include_granted_scopes', 'true');
+
+    const state = crypto.randomUUID();
+    sessionStorage.setItem('yt_oauth_pending', JSON.stringify({
+      state,
+      projectId: projectId || 'default',
+      userEmail: user.email,
+      redirectUri,
+    }));
+    authUrl.searchParams.set('state', state);
+
+    window.location.href = authUrl.toString();
   };
 
   const fetchChannelData = async (token: string) => {
@@ -224,13 +317,45 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
   };
 
+  const refreshYouTubeToken = async (projectId: string): Promise<string | null> => {
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+
+    if (!supabase || !supabaseUrl) {
+      return accessToken;
+    }
+
+    try {
+      const res = await fetch(`${supabaseUrl}/functions/v1/refresh-token`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+        },
+        body: JSON.stringify({ project_id: projectId, user_email: user?.email }),
+      });
+
+      if (!res.ok) return accessToken;
+
+      const data = await res.json();
+      if (data.access_token) {
+        setAccessToken(data.access_token);
+        const encToken = await encryptData(data.access_token);
+        localStorage.setItem('ds_youtube_access_token', encToken);
+        return data.access_token;
+      }
+    } catch (err) {
+      console.warn('[Auth] Falha ao renovar token:', err);
+    }
+
+    return accessToken;
+  };
+
   const disconnectYoutube = () => {
       setYoutubeChannel(null);
       setAccessToken(null);
       localStorage.removeItem('ds_youtube_channel');
       localStorage.removeItem('ds_youtube_access_token');
       
-      // Revoke token if possible
       if (accessToken && typeof google !== 'undefined') {
         try { google.accounts.oauth2.revoke(accessToken, () => {}); } catch (e) {}
       }
@@ -245,7 +370,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   return (
     <AuthContext.Provider value={{ 
       user, isLoading, googleClientId, youtubeChannel, accessToken,
-      setGoogleClientId, login, logout, connectYoutube, disconnectYoutube 
+      setGoogleClientId, login, logout, connectYoutube, disconnectYoutube, refreshYouTubeToken
     }}>
       {children}
     </AuthContext.Provider>
