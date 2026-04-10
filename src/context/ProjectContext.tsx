@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useRef } from 'r
 import { Project, Video, ProjectStatus, VideoDuration, VisualScene, VisualEffect, ProjectIdea, LibraryItem, LibraryItemType, VideoFormat, AutoPilotStep } from '../types';
 import { get, set } from 'idb-keyval';
 import { useAuth } from './AuthContext';
+import { supabase } from '../lib/supabaseClient';
 import { 
     generateVideoIdeas, 
     VideoIdea as GeminiVideoIdea
@@ -81,19 +82,36 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const storageKey = user?.email ? `darkstream_projects_${user.email}` : 'darkstream_projects_guest';
 
-  // Load projects
+  // Load projects — tries Supabase first, falls back to IndexedDB
   useEffect(() => {
     const loadProjects = async () => {
       setIsLoading(true);
       try {
-        let loaded = await get(storageKey); 
+        if (supabase && user?.email) {
+          const { data, error } = await supabase
+            .from("projects")
+            .select("data")
+            .eq("user_email", user.email);
+
+          if (!error && data && data.length > 0) {
+            const loaded = data.map((row: any) => row.data);
+            setProjects(loaded);
+            await set(storageKey, loaded);
+            return;
+          }
+        }
+
+        const loaded = await get(storageKey);
         if (!loaded || !Array.isArray(loaded)) setProjects([]);
         else setProjects(loaded);
-      } catch (e) { console.error("Failed to load projects", e); } 
-      finally { setIsLoading(false); }
+      } catch (e) {
+        console.error("Failed to load projects", e);
+      } finally {
+        setIsLoading(false);
+      }
     };
     loadProjects();
-  }, [storageKey]);
+  }, [storageKey, user?.email]);
 
   useEffect(() => { projectsRef.current = projects; }, [projects]);
 
