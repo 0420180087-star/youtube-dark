@@ -419,9 +419,19 @@ async function stepUploadYouTube(projectData, metadata, renderResult, thumbnailB
     throw new Error('YouTube credentials not configured');
   }
 
-  const refreshToken = projectData.youtubeRefreshToken;
+  // Try project_auth table first (new OAuth flow), fallback to project data (legacy)
+  let refreshToken = projectData.youtubeRefreshToken;
   if (!refreshToken) {
-    throw new Error('No YouTube refresh token found in project. Connect YouTube in the app first.');
+    const { data: authRow } = await supabase
+      .from('project_auth')
+      .select('youtube_refresh_token')
+      .eq('project_id', projectData.id || projectData.projectId || '')
+      .single();
+    refreshToken = authRow?.youtube_refresh_token;
+  }
+
+  if (!refreshToken) {
+    throw new Error('No YouTube refresh token found. Open the app, go to Project Settings and reconnect YouTube to authorize offline access.');
   }
 
   try {
@@ -449,6 +459,9 @@ async function processProject(projectRow) {
   const startTime = Date.now();
 
   log('🚀', `Processing project: "${data.channelTheme}" (${projectId})`);
+
+  // Ensure projectId is accessible inside data for token lookup
+  data.id = projectId;
 
   let currentStep = 'idea';
   try {
