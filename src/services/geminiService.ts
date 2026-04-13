@@ -99,8 +99,7 @@ const isQuotaError = (err: any): boolean => {
     const rawMsg = err.message || err.toString() || '';
     const msg = rawMsg.toLowerCase();
 
-    // Try to parse embedded JSON in the message (e.g. "{
- "error": {"code": 503 ...}}")
+    // Try to parse embedded JSON in the message (Google sometimes wraps errors as JSON strings)
     try {
         const jsonMatch = rawMsg.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
