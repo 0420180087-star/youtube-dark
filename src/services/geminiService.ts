@@ -228,12 +228,34 @@ const runWithRotation = async <T>(op: (ai: GoogleGenAI) => Promise<T>, isRetry =
     // Clean expired cooldowns
     for (const [k, cd] of keyCooldowns) { if (Date.now() >= cd.availableAt) keyCooldowns.delete(k); }
 
+    // Auto-reset: if ALL cooldowns are from temporary 503 errors, clear them and try again
+    // This fixes the "todas em cooldown" bug after a page reload or transient server overload
+    if (keyCooldowns.size > 0 && keyCooldowns.size >= allKeys.length) {
+        const allTemporary = [...keyCooldowns.values()].every(cd => {
+            const r = (cd.reason || '').toLowerCase();
+            return r.includes('unavailable') || r.includes('high demand') ||
+                   r.includes('503') || r.includes('try again') || r.includes('overload');
+        });
+        if (allTemporary) {
+            console.log('[DarkStream AI] 🔄 Todos os cooldowns são de erros temporários (503). Limpando e tentando novamente...');
+            keyCooldowns.clear();
+        }
+    }
+
     const readyKeys = allKeys.filter(isKeyReady);
 
     // If no keys ready, wait for the shortest cooldown (only once)
     if (readyKeys.length === 0) {
         if (isRetry) {
-            throw new Error(`Todas as ${allKeys.length} chaves estão em cooldown. Adicione mais chaves ou aguarde.`);
+            // Last resort: clear all cooldowns and try one more time
+            // This handles the case where keys were stuck from a previous session
+            const hadCooldowns = keyCooldowns.size > 0;
+            keyCooldowns.clear();
+            if (hadCooldowns) {
+                console.warn('[DarkStream AI] 🔄 Forçando limpeza de cooldowns e tentando novamente...');
+                return runWithRotation(op, false);
+            }
+            throw new Error(`Todas as ${allKeys.length} chaves estão em cooldown. Verifique suas chaves no Google AI Studio ou aguarde alguns minutos.`);
         }
 
         let minWait = Infinity;
@@ -242,9 +264,16 @@ const runWithRotation = async <T>(op: (ai: GoogleGenAI) => Promise<T>, isRetry =
             if (remaining > 0 && remaining < minWait) minWait = remaining;
         }
 
-        // Don't wait more than 2 minutes
+        // If wait is short (< 20s), wait automatically — otherwise surface the error
+        if (minWait <= 20_000) {
+            console.log(`[DarkStream AI] ⏳ Aguardando ${Math.ceil(minWait / 1000)}s para próxima chave disponível...`);
+            await delay(minWait + 300);
+            return runWithRotation(op, true);
+        }
+
+        // Long cooldown (quota exceeded) — wait up to 2min automatically, else error
         if (minWait > 120_000) {
-            throw new Error(`Todas as ${allKeys.length} chaves em cooldown longo (${Math.ceil(minWait / 60000)}min). Adicione mais chaves.`);
+            throw new Error(`Todas as ${allKeys.length} chaves em cooldown longo (${Math.ceil(minWait / 60000)}min). Adicione mais chaves no Google AI Studio.`);
         }
 
         console.log(`[DarkStream AI] ⏳ Aguardando ${Math.ceil(minWait / 1000)}s para próxima chave disponível...`);
@@ -264,7 +293,7 @@ const runWithRotation = async <T>(op: (ai: GoogleGenAI) => Promise<T>, isRetry =
         try {
             const ai = new GoogleGenAI({ apiKey: key });
             const result = await op(ai);
-            // Success — advance round-robin globally (not relative to readyKeys subset)
+            // Success — advance round-robin globally
             roundRobinIndex = roundRobinIndex + i + 1;
             console.log(`[DarkStream AI] ✅ Sucesso com chave ${masked}`);
             return result;
