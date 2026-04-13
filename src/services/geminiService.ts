@@ -85,15 +85,34 @@ let roundRobinIndex = 0;
 /** Check if an error is a rate/quota limit */
 const isQuotaError = (err: any): boolean => {
     if (!err) return false;
+
+    // 1. Check direct status fields
     const status = err.status || err.response?.status || err.error?.code || err.code;
     if (status === 429 || status === '429') return true;
-    // 503 UNAVAILABLE = server overloaded, treat as retriable
     if (status === 503 || status === '503') return true;
 
-    const msg = (err.message || err.toString() || '').toLowerCase();
+    // 2. Check error.status string (e.g. "UNAVAILABLE", "RESOURCE_EXHAUSTED")
     const errStatus = (err.error?.status || '').toUpperCase();
-
     if (errStatus === 'RESOURCE_EXHAUSTED' || errStatus === 'TOO_MANY_REQUESTS' || errStatus === 'UNAVAILABLE') return true;
+
+    // 3. Check message string — including when Google embeds JSON inside err.message
+    const rawMsg = err.message || err.toString() || '';
+    const msg = rawMsg.toLowerCase();
+
+    // Try to parse embedded JSON in the message (e.g. "{
+ "error": {"code": 503 ...}}")
+    try {
+        const jsonMatch = rawMsg.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            const embeddedCode = parsed?.error?.code || parsed?.code;
+            const embeddedStatus = (parsed?.error?.status || parsed?.status || '').toUpperCase();
+            if (embeddedCode === 429 || embeddedCode === 503) return true;
+            if (embeddedStatus === 'UNAVAILABLE' || embeddedStatus === 'RESOURCE_EXHAUSTED' || embeddedStatus === 'TOO_MANY_REQUESTS') return true;
+        }
+    } catch {
+        // JSON parse failed — fall through to keyword check
+    }
 
     const keywords = [
         'quota', 'rate_limit', 'rate limit', 'too many requests',
