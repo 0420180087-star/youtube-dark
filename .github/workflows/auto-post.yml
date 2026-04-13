@@ -2,17 +2,18 @@ name: Auto Post Video
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    # Runs every 3 hours — checks which projects are due for a new video
+    - cron: '0 */3 * * *'
   workflow_dispatch:
     inputs:
       project_id:
-        description: 'ID do projeto para forçar execução'
+        description: 'ID do projeto para forçar execução (opcional)'
         required: false
 
 jobs:
   auto-post:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -21,7 +22,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
           cache: 'npm'
 
       - name: Instalar FFmpeg
@@ -33,7 +34,7 @@ jobs:
       - name: Instalar dependências
         run: npm install
 
-      - name: Executar pipeline
+      - name: Executar pipeline de automação
         env:
           SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
