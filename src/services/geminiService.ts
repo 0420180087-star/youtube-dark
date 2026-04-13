@@ -125,16 +125,31 @@ const isQuotaError = (err: any): boolean => {
 
 /** Determine cooldown duration for a quota error */
 const getCooldownMs = (err: any): number => {
-    const msg = (err?.message || '').toLowerCase();
+    const rawMsg = err?.message || '';
+    const msg = rawMsg.toLowerCase();
     const status = err?.status || err?.response?.status || err?.error?.code || err?.code;
 
     // Check for explicit retry-after
     const retryAfter = err?.headers?.get?.('retry-after') || err?.response?.headers?.['retry-after'];
     if (retryAfter) { const s = parseInt(retryAfter, 10); if (!isNaN(s)) return s * 1000; }
 
-    // 503 UNAVAILABLE (server overloaded) → short cooldown, retry fast
-    if (status === 503 || status === '503' || msg.includes('unavailable') || msg.includes('high demand') || msg.includes('try again later')) {
-        return 15_000; // 15s
+    // Try to extract code from embedded JSON in message
+    let embeddedCode: number | null = null;
+    let embeddedStatus = '';
+    try {
+        const jsonMatch = rawMsg.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            embeddedCode = parsed?.error?.code || parsed?.code || null;
+            embeddedStatus = (parsed?.error?.status || parsed?.status || '').toUpperCase();
+        }
+    } catch { /* ignore */ }
+
+    // 503 UNAVAILABLE (server overloaded) → short cooldown 15s
+    if (status === 503 || status === '503' || embeddedCode === 503 ||
+        embeddedStatus === 'UNAVAILABLE' ||
+        msg.includes('unavailable') || msg.includes('high demand') || msg.includes('try again later')) {
+        return 15_000;
     }
 
     // Daily limit → 30 min cooldown
@@ -159,7 +174,25 @@ const isKeyReady = (key: string): boolean => {
 /** Put a key on cooldown */
 const cooldownKey = (key: string, err: any) => {
     const ms = getCooldownMs(err);
-    const reason = (err?.message || 'unknown').substring(0, 100);
+
+    // Normalize reason: try to extract status from embedded JSON, else use raw message
+    let reason = 'unknown';
+    const rawMsg = err?.message || '';
+    try {
+        const jsonMatch = rawMsg.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            const embeddedStatus = parsed?.error?.status || parsed?.status || '';
+            const embeddedCode = parsed?.error?.code || parsed?.code || '';
+            if (embeddedStatus) reason = `${embeddedCode} ${embeddedStatus}`.trim().toLowerCase();
+            else reason = rawMsg.substring(0, 100);
+        } else {
+            reason = rawMsg.substring(0, 100);
+        }
+    } catch {
+        reason = rawMsg.substring(0, 100);
+    }
+
     keyCooldowns.set(key, { availableAt: Date.now() + ms, reason });
     const masked = key.length > 8 ? `...${key.slice(-6)}` : '***';
     console.warn(`[DarkStream AI] ⏸️ Chave ${masked} em cooldown por ${Math.round(ms / 1000)}s — ${reason}`);
@@ -247,16 +280,19 @@ const runWithRotation = async <T>(op: (ai: GoogleGenAI) => Promise<T>, isRetry =
     // Clean expired cooldowns
     for (const [k, cd] of keyCooldowns) { if (Date.now() >= cd.availableAt) keyCooldowns.delete(k); }
 
-    // Auto-reset: if ALL cooldowns are from temporary 503 errors, clear them and try again
-    // This fixes the "todas em cooldown" bug after a page reload or transient server overload
+    // Auto-reset: if ALL cooldowns have short duration (< 30s remaining) they are
+    // temporary 503 errors — clear them and retry immediately instead of erroring
     if (keyCooldowns.size > 0 && keyCooldowns.size >= allKeys.length) {
-        const allTemporary = [...keyCooldowns.values()].every(cd => {
+        const allShortOrTemporary = [...keyCooldowns.values()].every(cd => {
+            const remaining = cd.availableAt - Date.now();
             const r = (cd.reason || '').toLowerCase();
-            return r.includes('unavailable') || r.includes('high demand') ||
-                   r.includes('503') || r.includes('try again') || r.includes('overload');
+            const isTemporaryReason = r.includes('unavailable') || r.includes('high demand') ||
+                r.includes('503') || r.includes('try again') || r.includes('overload');
+            const isShortWait = remaining < 30_000;
+            return isTemporaryReason || isShortWait;
         });
-        if (allTemporary) {
-            console.log('[DarkStream AI] 🔄 Todos os cooldowns são de erros temporários (503). Limpando e tentando novamente...');
+        if (allShortOrTemporary) {
+            console.log('[DarkStream AI] 🔄 Cooldowns temporários detectados. Limpando e tentando novamente...');
             keyCooldowns.clear();
         }
     }
