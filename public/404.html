@@ -4,12 +4,18 @@
     <meta charset="utf-8">
     <title>DarkStream AI</title>
     <script>
-      // SPA redirect for GitHub Pages
-      // Stores the real URL in sessionStorage and redirects to base
-      // index.html will read it and use history.replaceState
-      sessionStorage.redirect = location.href;
-      var base = location.pathname.split('/').slice(0, 2).join('/') + '/';
-      location.replace(base);
+      // GitHub Pages SPA Fallback
+      // When a direct URL like /youtube-dark/project/123 is accessed,
+      // GitHub serves this 404.html. We save the full URL to sessionStorage
+      // and redirect to the app root, which restores the path via history.replaceState.
+      (function() {
+        var full = window.location.href;
+        // Detect base: origin + first path segment (repo name)
+        var parts = window.location.pathname.split('/').filter(Boolean);
+        var base = window.location.origin + (parts.length > 0 ? '/' + parts[0] + '/' : '/');
+        sessionStorage.setItem('spa_redirect', full);
+        window.location.replace(base);
+      })();
     </script>
   </head>
   <body></body>
