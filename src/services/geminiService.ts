@@ -87,16 +87,19 @@ const isQuotaError = (err: any): boolean => {
     if (!err) return false;
     const status = err.status || err.response?.status || err.error?.code || err.code;
     if (status === 429 || status === '429') return true;
+    // 503 UNAVAILABLE = server overloaded, treat as retriable
+    if (status === 503 || status === '503') return true;
 
     const msg = (err.message || err.toString() || '').toLowerCase();
     const errStatus = (err.error?.status || '').toUpperCase();
 
-    if (errStatus === 'RESOURCE_EXHAUSTED' || errStatus === 'TOO_MANY_REQUESTS') return true;
+    if (errStatus === 'RESOURCE_EXHAUSTED' || errStatus === 'TOO_MANY_REQUESTS' || errStatus === 'UNAVAILABLE') return true;
 
     const keywords = [
         'quota', 'rate_limit', 'rate limit', 'too many requests',
         'resource_exhausted', 'requests per', 'limit exceeded',
-        'exceeded your current quota', '429',
+        'exceeded your current quota', '429', '503', 'unavailable',
+        'high demand', 'overloaded', 'try again later',
     ];
     return keywords.some(kw => msg.includes(kw));
 };
@@ -104,10 +107,16 @@ const isQuotaError = (err: any): boolean => {
 /** Determine cooldown duration for a quota error */
 const getCooldownMs = (err: any): number => {
     const msg = (err?.message || '').toLowerCase();
+    const status = err?.status || err?.response?.status || err?.error?.code || err?.code;
 
     // Check for explicit retry-after
     const retryAfter = err?.headers?.get?.('retry-after') || err?.response?.headers?.['retry-after'];
     if (retryAfter) { const s = parseInt(retryAfter, 10); if (!isNaN(s)) return s * 1000; }
+
+    // 503 UNAVAILABLE (server overloaded) → short cooldown, retry fast
+    if (status === 503 || status === '503' || msg.includes('unavailable') || msg.includes('high demand') || msg.includes('try again later')) {
+        return 15_000; // 15s
+    }
 
     // Daily limit → 30 min cooldown
     if (msg.includes('per-day') || msg.includes('per_day') || msg.includes('rpd') || msg.includes('daily')) {
@@ -436,16 +445,20 @@ interface DurationSpec {
 
 function durationToWordCount(targetDuration: string): DurationSpec {
   const d = targetDuration.toLowerCase();
-  if (d.includes('short') || d.includes('< 3') || d.includes('60s') || d.includes('shorts'))
-    return { minWords: 100, maxWords: 450, segments: 4, minMinutes: 1, maxMinutes: 3 };
+
+  // Exact matches for app's VideoDuration type values:
+  // 'Short (< 3 min)' | 'Standard (5-8 min)' | 'Long (10-15 min)' | 'Deep Dive (20+ min)'
+  if (d.includes('short') || d.includes('< 3') || d.includes('60s') || d.includes('shorts') || d.includes('portrait'))
+    return { minWords: 120, maxWords: 450, segments: 4, minMinutes: 1, maxMinutes: 3 };
   if (d.includes('standard') || d.includes('5-8') || d.includes('5-7'))
-    return { minWords: 750, maxWords: 1200, segments: 7, minMinutes: 5, maxMinutes: 8 };
-  if (d.includes('long') || d.includes('10-15') || d.includes('8-10'))
-    return { minWords: 1500, maxWords: 2250, segments: 12, minMinutes: 10, maxMinutes: 15 };
+    return { minWords: 750, maxWords: 1200, segments: 8, minMinutes: 5, maxMinutes: 8 };
+  if (d.includes('long') || d.includes('10-15'))
+    // 10-15 min = 1500-2250 words at 150wpm — this was the broken case
+    return { minWords: 1500, maxWords: 2250, segments: 13, minMinutes: 10, maxMinutes: 15 };
   if (d.includes('deep') || d.includes('20+') || d.includes('15-20'))
-    return { minWords: 2250, maxWords: 3000, segments: 16, minMinutes: 20, maxMinutes: 30 };
+    return { minWords: 3000, maxWords: 4500, segments: 18, minMinutes: 20, maxMinutes: 30 };
   // fallback: standard
-  return { minWords: 750, maxWords: 1200, segments: 7, minMinutes: 5, maxMinutes: 8 };
+  return { minWords: 750, maxWords: 1200, segments: 8, minMinutes: 5, maxMinutes: 8 };
 }
 
 function validateScriptDuration(script: ScriptData, targetDuration: string): { totalWords: number; estimatedMinutes: number; warning?: string } {
@@ -475,15 +488,26 @@ export const generateVideoScript = async (params: GenerateScriptParams): Promise
       const toneInstruction = getToneInstruction(params.tone);
       const spec = durationToWordCount(params.targetDuration);
 
-      const systemInstruction = `You are a world-class cinematic trailer scriptwriter. 
-      Channel Theme: "${params.channelTheme}". Target Tone: "${params.tone}". ${languagePrompt}
-      ${toneInstruction}
+      const minWordsPerSegment = Math.round(spec.minWords / spec.segments);
+      const systemInstruction = `You are a world-class cinematic scriptwriter for YouTube videos.
+Channel Theme: "${params.channelTheme}". Target Tone: "${params.tone}". ${languagePrompt}
+${toneInstruction}
 
+════════════════════════════════════════
+MANDATORY DURATION REQUIREMENTS — READ CAREFULLY
+════════════════════════════════════════
 TARGET DURATION: ${params.targetDuration}
-WORD COUNT REQUIREMENT: Write narrator text totaling between ${spec.minWords} and ${spec.maxWords} words across all segments combined.
-NUMBER OF SEGMENTS: Generate exactly ${spec.segments} segments.
-SPEAKING RATE: Assume 150 words per minute for narration timing. Each segment's estimatedDuration should reflect the word count of its narratorText at this rate.
-CRITICAL: Each segment's narratorText MUST be a complete, detailed, word-for-word spoken paragraph. Do NOT write short summaries or bullet points. Write the FULL narration script as it would be read aloud by the narrator. Every segment must have substantial narratorText (minimum ${Math.round(spec.minWords / spec.segments)} words per segment).`;
+TOTAL WORD COUNT: You MUST write between ${spec.minWords} and ${spec.maxWords} words of narrator text across ALL segments combined.
+SEGMENTS: Generate EXACTLY ${spec.segments} segments.
+WORDS PER SEGMENT: Each segment must have a minimum of ${minWordsPerSegment} words in its narratorText field.
+SPEAKING RATE: 150 words per minute. A ${spec.minMinutes}-${spec.maxMinutes} minute video needs ${spec.minWords}-${spec.maxWords} words total.
+
+DO NOT write short summaries. DO NOT use bullet points. WRITE THE FULL SPOKEN SCRIPT word-for-word as the narrator would read it aloud.
+Each narratorText must be multiple dense paragraphs — not a single sentence or short paragraph.
+Failure to meet the word count requirement means the generated video will be far too short.
+
+estimatedDuration for each segment = (word count of that segment's narratorText) / 150 × 60  [in seconds]
+════════════════════════════════════════`;
 
       let prompt = `Topic: "${params.topic}".\n`; 
       if (params.additionalContext) { prompt += `Context: ${params.additionalContext}\n`; } 
@@ -497,7 +521,7 @@ CRITICAL: Each segment's narratorText MUST be a complete, detailed, word-for-wor
           config: { 
               systemInstruction: systemInstruction, 
               responseMimeType: "application/json", 
-              maxOutputTokens: 16384, 
+              maxOutputTokens: 65536, 
               responseSchema: { 
                   type: Type.OBJECT, 
                   properties: { 
@@ -552,6 +576,17 @@ CRITICAL: Each segment's narratorText MUST be a complete, detailed, word-for-wor
       (script as any).totalWords = validation.totalWords;
       if (validation.warning) {
         (script as any).durationWarning = validation.warning;
+      }
+
+      // If script is way too short (< 60% of min target), expand each segment
+      const spec2 = durationToWordCount(params.targetDuration);
+      if (validation.totalWords < spec2.minWords * 0.6 && script.segments?.length > 0) {
+        console.warn(`[DarkStream AI] ⚠️ Script muito curto (${validation.totalWords} palavras). Expandindo segmentos automaticamente...`);
+        const wordsNeeded = spec2.minWords - validation.totalWords;
+        const wordsPerSegment = Math.ceil(wordsNeeded / script.segments.length);
+        // Mark each segment as needing expansion (for UI feedback)
+        (script as any).needsExpansion = true;
+        (script as any).expansionNote = `Script gerado com ${validation.totalWords} palavras. Alvo: ${spec2.minWords}-${spec2.maxWords} palavras para ${params.targetDuration}.`;
       }
 
       return script;
@@ -1283,6 +1318,35 @@ const generateCanvasThumbnail = (topic: string, tone: string): string => {
     ctx.fillStyle = vignette;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     
+    // Add clickbait text overlay on canvas thumbnail
+    const words = topic.toUpperCase().split(' ');
+    const line1 = words.slice(0, Math.ceil(words.length / 2)).join(' ').substring(0, 20);
+    const line2 = words.slice(Math.ceil(words.length / 2)).join(' ').substring(0, 20);
+
+    // Text box background
+    ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    ctx.fillRect(0, canvas.height * 0.6, canvas.width, canvas.height * 0.4);
+
+    // Red accent bar
+    ctx.fillStyle = '#ff3333';
+    ctx.fillRect(0, canvas.height * 0.6, 8, canvas.height * 0.4);
+
+    // Main text
+    ctx.fillStyle = '#ffffff';
+    ctx.font = `bold ${Math.round(canvas.width / 12)}px Arial, sans-serif`;
+    ctx.shadowColor = 'rgba(0,0,0,0.8)';
+    ctx.shadowBlur = 8;
+    ctx.textAlign = 'left';
+    ctx.fillText(line1, 30, canvas.height * 0.72);
+
+    // Accent text in yellow
+    ctx.fillStyle = '#ffdd00';
+    ctx.font = `bold ${Math.round(canvas.width / 14)}px Arial, sans-serif`;
+    ctx.fillText(line2, 30, canvas.height * 0.88);
+
+    ctx.shadowBlur = 0;
+    ctx.textAlign = 'left';
+
     return canvas.toDataURL('image/jpeg', 0.92);
 };
 

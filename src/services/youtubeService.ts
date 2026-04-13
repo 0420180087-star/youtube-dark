@@ -110,8 +110,20 @@ export const uploadVideoToYouTube = async (
 
     // ── 5. Upload thumbnail (best-effort) ────────────
     if (videoId && thumbnailUrl) {
-        if (onProgress) onProgress(95);
+        if (onProgress) onProgress(92);
         await uploadThumbnail(accessToken, videoId, thumbnailUrl);
+    }
+
+    // ── 6. Wait for YouTube to finish processing ─────
+    if (videoId) {
+        if (onProgress) onProgress(95);
+        console.log('[YouTube] Aguardando processamento do YouTube...');
+        try {
+            await waitForProcessing(accessToken, videoId, onProgress);
+        } catch (e: any) {
+            // Non-fatal: video was uploaded, just log the processing issue
+            console.warn('[YouTube] Aviso de processamento:', e.message);
+        }
     }
 
     if (onProgress) onProgress(100);
@@ -256,6 +268,58 @@ async function handleYouTubeError(res: Response, action: string): Promise<never>
         default:
             throw new Error(`Erro ${code} ao ${action}: ${detail || "Erro desconhecido do YouTube"}`);
     }
+}
+
+/**
+ * Poll YouTube until video finishes processing (or timeout).
+ * YouTube can take 1-10 min to go from "uploaded" to "processed".
+ */
+async function waitForProcessing(
+    accessToken: string,
+    videoId: string,
+    onProgress?: (pct: number) => void,
+    timeoutMs = 10 * 60 * 1000 // 10 min max
+): Promise<void> {
+    const start = Date.now();
+    let attempt = 0;
+
+    while (Date.now() - start < timeoutMs) {
+        attempt++;
+        await new Promise(r => setTimeout(r, 8000)); // poll every 8s
+
+        try {
+            const res = await fetch(
+                `https://www.googleapis.com/youtube/v3/videos?part=processingDetails,status&id=${videoId}`,
+                { headers: { Authorization: `Bearer ${accessToken}` } }
+            );
+            if (!res.ok) break;
+
+            const data = await res.json();
+            const video = data.items?.[0];
+            if (!video) break;
+
+            const uploadStatus = video.processingDetails?.processingStatus;
+            const privacyStatus = video.status?.uploadStatus;
+
+            console.log(`[YouTube] Processing status: ${uploadStatus || privacyStatus} (attempt ${attempt})`);
+
+            if (uploadStatus === 'succeeded' || privacyStatus === 'processed' || privacyStatus === 'uploaded') {
+                if (onProgress) onProgress(100);
+                return;
+            }
+            if (uploadStatus === 'failed' || privacyStatus === 'failed' || privacyStatus === 'rejected') {
+                throw new Error(`YouTube processamento falhou: ${uploadStatus || privacyStatus}`);
+            }
+
+            // Update progress during processing (90-99%)
+            if (onProgress) onProgress(90 + Math.min(9, attempt));
+        } catch (e: any) {
+            if (e.message.includes('falhou')) throw e;
+            console.warn('[YouTube] Polling error (non-fatal):', e.message);
+        }
+    }
+    // Timeout — video was uploaded, just not confirmed as processed yet
+    console.warn('[YouTube] Processing poll timed out — video was uploaded successfully but processing may still be ongoing.');
 }
 
 /**

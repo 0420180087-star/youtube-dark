@@ -98,44 +98,39 @@ const loadSceneMedia = async (scene: {
       video.preload = "metadata"; // force metadata first
       video.src = scene.videoUrl;
 
-      // Wait for metadata (dimensions available)
+      // Wait for metadata + canplay in a single robust Promise
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(
-          () => reject(new Error("video metadata timeout")),
-          20000
+          () => reject(new Error("video load timeout")),
+          25000
         );
-        video.onloadedmetadata = () => {
-          clearTimeout(timeout);
-          // Now upgrade to auto and wait for canplay
-          video.preload = "auto";
-          video.load();
-        };
-        video.onerror = () => {
-          clearTimeout(timeout);
-          reject(new Error("video error"));
-        };
-        video.load();
-      });
 
-      // Wait for canplay (frames available for drawing)
-      await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(
-          () => reject(new Error("video canplay timeout")),
-          20000
-        );
-        if (video.readyState >= 3) {
-          clearTimeout(timeout);
-          resolve();
-          return;
-        }
-        video.oncanplay = () => {
+        const onReady = () => {
           clearTimeout(timeout);
           resolve();
         };
-        video.onerror = () => {
+
+        const onError = () => {
           clearTimeout(timeout);
-          reject(new Error("video canplay error"));
+          reject(new Error("video load error"));
         };
+
+        video.onloadedmetadata = () => {
+          // Upgrade to full preload now that we have dimensions
+          video.preload = "auto";
+          // If already buffered enough, resolve immediately
+          if (video.readyState >= 3) {
+            onReady();
+            return;
+          }
+          // Otherwise wait for canplay
+          video.oncanplay = onReady;
+        };
+
+        // Also handle the case where metadata+canplay fire together
+        video.oncanplaythrough = onReady;
+        video.onerror = onError;
+        video.load();
       });
 
       // Validate dimensions are actually available
