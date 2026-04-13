@@ -598,46 +598,76 @@ estimatedDuration for each segment = (word count of that segment's narratorText)
           prompt += `\nLIBRARY CONTEXT:\n${params.libraryContext.substring(0, 20000)}\n`; 
       }
       
-      const responseStream = await ai.models.generateContentStream({ 
-          model: "gemini-2.5-flash", 
-          contents: prompt, 
-          config: { 
-              systemInstruction: systemInstruction, 
-              responseMimeType: "application/json", 
-              maxOutputTokens: 65536, 
-              responseSchema: { 
-                  type: Type.OBJECT, 
-                  properties: { 
-                      title: { type: Type.STRING }, 
-                      description: { type: Type.STRING }, 
-                      brainstorming: { type: Type.ARRAY, items: { type: Type.STRING } }, 
-                      narrativeOutline: { type: Type.ARRAY, items: { type: Type.STRING } }, 
-                      segments: { 
-                          type: Type.ARRAY, 
-                          items: { 
-                              type: Type.OBJECT, 
-                              properties: { 
-                                  sectionTitle: { type: Type.STRING }, 
-                                  visualDescriptions: { type: Type.ARRAY, items: { type: Type.STRING } }, 
-                                  narratorText: { type: Type.STRING }, 
-                                  estimatedDuration: { type: Type.NUMBER } 
-                              } 
-                          } 
-                      } 
-                  }, 
-                  propertyOrdering: ["brainstorming", "narrativeOutline", "title", "description", "segments"] 
-              } 
-          } 
-      }); 
-      
-      let fullText = ''; 
-      for await (const chunk of responseStream) { 
-          const text = chunk.text; 
-          if (text) { 
-              fullText += text; 
-              if (params.onProgress) params.onProgress(fullText); 
-          } 
-      } 
+      const scriptConfig = {
+          systemInstruction: systemInstruction,
+          responseMimeType: "application/json",
+          maxOutputTokens: 65536,
+          responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                  title: { type: Type.STRING },
+                  description: { type: Type.STRING },
+                  brainstorming: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  narrativeOutline: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  segments: {
+                      type: Type.ARRAY,
+                      items: {
+                          type: Type.OBJECT,
+                          properties: {
+                              sectionTitle: { type: Type.STRING },
+                              visualDescriptions: { type: Type.ARRAY, items: { type: Type.STRING } },
+                              narratorText: { type: Type.STRING },
+                              estimatedDuration: { type: Type.NUMBER }
+                          }
+                      }
+                  }
+              },
+              propertyOrdering: ["brainstorming", "narrativeOutline", "title", "description", "segments"]
+          }
+      };
+
+      let fullText = '';
+
+      // Try streaming first — with a 90s timeout watchdog
+      // If the stream stalls (no chunks for 90s), fall back to non-streaming
+      try {
+          const streamResult = await Promise.race([
+              (async () => {
+                  const responseStream = await ai.models.generateContentStream({
+                      model: "gemini-2.5-flash",
+                      contents: prompt,
+                      config: scriptConfig,
+                  });
+                  let text = '';
+                  for await (const chunk of responseStream) {
+                      if (chunk.text) {
+                          text += chunk.text;
+                          if (params.onProgress) params.onProgress(text);
+                      }
+                  }
+                  return text;
+              })(),
+              new Promise<never>((_, reject) =>
+                  setTimeout(() => reject(new Error('stream_timeout')), 90_000)
+              ),
+          ]);
+          fullText = streamResult as string;
+      } catch (streamErr: any) {
+          if (streamErr.message === 'stream_timeout' || !fullText) {
+              // Stream timed out or returned nothing — fall back to regular (non-streaming) call
+              console.warn('[DarkStream AI] Stream travou ou veio vazio. Usando fallback não-streaming...');
+              if (params.onProgress) params.onProgress('__fallback__');
+              const fallbackResponse = await ai.models.generateContent({
+                  model: "gemini-2.5-flash",
+                  contents: prompt,
+                  config: scriptConfig,
+              });
+              fullText = fallbackResponse.text || '';
+          } else {
+              throw streamErr;
+          }
+      }
+
       if (!fullText) throw new Error("No script generated"); 
       let jsonString = fullText.replace(/```json/g, '').replace(/```/g, '').trim(); 
       let script: ScriptData;
