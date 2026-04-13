@@ -220,8 +220,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               picture: data.picture
           };
           setUser(profile);
+
+          // Save locally (encrypted)
           const encrypted = await encryptData(JSON.stringify(profile));
           localStorage.setItem('ds_user_profile', encrypted);
+
+          // Save to Supabase for cross-device persistence
+          if (supabase && profile.email) {
+              try {
+                  await supabase.from('user_profiles').upsert({
+                      email: profile.email,
+                      name: profile.name,
+                      picture: profile.picture,
+                      updated_at: new Date().toISOString(),
+                  }, { onConflict: 'email' });
+              } catch (e) {
+                  console.warn('[Supabase] Falha ao salvar perfil:', e);
+              }
+          }
       } catch (e) {
           console.error(e);
       }
@@ -306,8 +322,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                   subscriberCount: ch.statistics.subscriberCount
               };
               setYoutubeChannel(channel);
+
+              // Save locally (encrypted)
               const encChannel = await encryptData(JSON.stringify(channel));
               localStorage.setItem('ds_youtube_channel', encChannel);
+
+              // Update channel info in project_auth table if Supabase available
+              const pendingRaw = sessionStorage.getItem('yt_oauth_pending');
+              const pending = pendingRaw ? JSON.parse(pendingRaw) : null;
+              if (supabase && pending?.userEmail) {
+                  try {
+                      await supabase.from('project_auth').update({
+                          youtube_channel_id: ch.id,
+                          youtube_channel_title: ch.snippet.title,
+                          updated_at: new Date().toISOString(),
+                      }).eq('user_email', pending.userEmail);
+                  } catch (e) {
+                      console.warn('[Supabase] Falha ao salvar canal:', e);
+                  }
+              }
           } else {
               alert("No YouTube channel found associated with this Google Account.");
           }

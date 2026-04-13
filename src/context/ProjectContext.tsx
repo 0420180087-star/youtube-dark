@@ -115,12 +115,33 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   useEffect(() => { projectsRef.current = projects; }, [projects]);
 
-  // Save projects
+  // Save projects — local + Supabase sync
   useEffect(() => {
-    if (!isLoading) {
-      set(storageKey, projects).catch(e => console.error("Failed to save projects", e));
-    }
-  }, [projects, isLoading, storageKey]);
+    if (isLoading) return;
+
+    // 1. Always save locally (works offline)
+    set(storageKey, projects).catch(e => console.error('Failed to save projects locally', e));
+
+    // 2. Sync to Supabase if available
+    if (!supabase || !user?.email) return;
+
+    const syncToSupabase = async () => {
+      for (const project of projects) {
+        try {
+          await supabase.from('projects').upsert({
+            id: project.id,
+            user_email: user.email,
+            data: project,
+            updated_at: new Date().toISOString(),
+          }, { onConflict: 'id' });
+        } catch (err) {
+          console.warn('[Supabase] Falha ao sincronizar projeto:', project.id, err);
+        }
+      }
+    };
+
+    syncToSupabase();
+  }, [projects, isLoading, storageKey, user?.email]);
 
   // Load persisted log
   useEffect(() => {
