@@ -4,6 +4,7 @@ import { decodeAudioData } from "./geminiService";
 const easeInOutCubic = (x: number): number =>
   x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
 
+// Scanlines only — subtle, not aggressive
 const drawScanlines = (
   ctx: CanvasRenderingContext2D,
   width: number,
@@ -11,58 +12,56 @@ const drawScanlines = (
   time: number
 ) => {
   ctx.save();
-  ctx.globalCompositeOperation = "overlay";
-  ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
-  const lineY = (time * 100) % height;
-  ctx.fillRect(0, lineY, width, 2);
-  ctx.fillStyle = "rgba(0, 0, 0, 0.1)";
+  ctx.globalAlpha = 0.06;
+  ctx.fillStyle = "rgba(0,0,0,1)";
   for (let i = 0; i < height; i += 4) ctx.fillRect(0, i, width, 1);
+  // Subtle moving line
+  const lineY = Math.floor(time * 80) % height;
+  ctx.globalAlpha = 0.08;
+  ctx.fillRect(0, lineY, width, 2);
   ctx.restore();
 };
 
-const applyVisualFilter = (
-  ctx: CanvasRenderingContext2D,
-  filterType: string
-) => {
-  if (filterType === "saturate") ctx.filter = `saturate(140%) contrast(1.1)`;
-  else if (filterType === "bw") ctx.filter = "grayscale(100%) contrast(1.2)";
-  else if (filterType === "invert") ctx.filter = "invert(100%)";
-  else ctx.filter = "none";
-};
-
+// Apply zoom/pan ONLY to static images — never to Pexels videos
 const calculateTransform = (
   ctx: CanvasRenderingContext2D,
   effect: VisualEffect,
   rawProgress: number,
   width: number,
-  height: number,
-  elapsedTime: number
+  height: number
 ) => {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   const progress = easeInOutCubic(rawProgress);
   const centerX = width / 2;
   const centerY = height / 2;
 
-  const shakeX =
-    (Math.sin(elapsedTime * 15) + Math.cos(elapsedTime * 42)) * 1.5;
-  const shakeY =
-    (Math.cos(elapsedTime * 12) + Math.sin(elapsedTime * 35)) * 1.5;
-  ctx.translate(shakeX, shakeY);
-
   if (effect === "zoom-in") {
-    const scale = 1 + 0.5 * progress;
+    const scale = 1 + 0.12 * progress; // subtle zoom
     ctx.translate(centerX, centerY);
     ctx.scale(scale, scale);
     ctx.translate(-centerX, -centerY);
   } else if (effect === "pan-right") {
-    const scale = 1.4;
-    const maxPan = width * 0.25;
-    const xOffset = -(maxPan / 2) + maxPan * progress;
+    const scale = 1.08;
+    const maxPan = width * 0.04;
+    const xOffset = -maxPan / 2 + maxPan * progress;
     ctx.translate(centerX + xOffset, centerY);
     ctx.scale(scale, scale);
     ctx.translate(-centerX, -centerY);
+  } else if (effect === "pan-left") {
+    const scale = 1.08;
+    const maxPan = width * 0.04;
+    const xOffset = maxPan / 2 - maxPan * progress;
+    ctx.translate(centerX + xOffset, centerY);
+    ctx.scale(scale, scale);
+    ctx.translate(-centerX, -centerY);
+  } else if (effect === "zoom-out") {
+    const scale = 1.12 - 0.12 * progress;
+    ctx.translate(centerX, centerY);
+    ctx.scale(scale, scale);
+    ctx.translate(-centerX, -centerY);
   } else {
-    const scale = 1.5 - 0.5 * progress;
+    // zoom-in-fast and default — slight scale only
+    const scale = 1 + 0.08 * progress;
     ctx.translate(centerX, centerY);
     ctx.scale(scale, scale);
     ctx.translate(-centerX, -centerY);
@@ -78,7 +77,7 @@ type LoadedScene = {
   element: HTMLImageElement | HTMLVideoElement;
   isVideo: boolean;
   ready: boolean;
-  videoStarted: boolean; // tracks if play() was called
+  videoStarted: boolean;
 };
 
 const loadSceneMedia = async (scene: {
@@ -88,17 +87,16 @@ const loadSceneMedia = async (scene: {
   videoUrl?: string;
   imageUrl: string;
 }): Promise<LoadedScene> => {
-  // 1. Tenta carregar como vídeo — aguarda loadedmetadata + canplay
+  // 1. Try loading as video
   if (scene.videoUrl) {
     try {
       const video = document.createElement("video");
       video.crossOrigin = "anonymous";
       video.muted = true;
       video.playsInline = true;
-      video.preload = "metadata"; // force metadata first
+      video.preload = "auto";
       video.src = scene.videoUrl;
 
-      // Wait for metadata + canplay in a single robust Promise
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(
           () => reject(new Error("video load timeout")),
@@ -109,34 +107,26 @@ const loadSceneMedia = async (scene: {
           clearTimeout(timeout);
           resolve();
         };
-
         const onError = () => {
           clearTimeout(timeout);
           reject(new Error("video load error"));
         };
 
         video.onloadedmetadata = () => {
-          // Upgrade to full preload now that we have dimensions
-          video.preload = "auto";
-          // If already buffered enough, resolve immediately
-          if (video.readyState >= 3) {
-            onReady();
-            return;
-          }
-          // Otherwise wait for canplay
+          if (video.readyState >= 3) { onReady(); return; }
           video.oncanplay = onReady;
         };
-
-        // Also handle the case where metadata+canplay fire together
         video.oncanplaythrough = onReady;
         video.onerror = onError;
         video.load();
       });
 
-      // Validate dimensions are actually available
       if (video.videoWidth === 0 || video.videoHeight === 0) {
         throw new Error("video dimensions still 0 after load");
       }
+
+      // Seek to beginning and pause — we control playback in render loop
+      video.currentTime = 0;
 
       return {
         startTime: scene.startTime,
@@ -152,24 +142,15 @@ const loadSceneMedia = async (scene: {
     }
   }
 
-  // 2. Fallback para imagem estática
+  // 2. Fallback: static image
   const img = new Image();
   img.crossOrigin = "anonymous";
 
   try {
     await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(
-        () => reject(new Error("image timeout")),
-        8000
-      );
-      img.onload = () => {
-        clearTimeout(timeout);
-        resolve();
-      };
-      img.onerror = () => {
-        clearTimeout(timeout);
-        reject(new Error("image error"));
-      };
+      const timeout = setTimeout(() => reject(new Error("image timeout")), 10000);
+      img.onload = () => { clearTimeout(timeout); resolve(); };
+      img.onerror = () => { clearTimeout(timeout); reject(new Error("image error")); };
       img.src = scene.imageUrl;
     });
 
@@ -183,10 +164,10 @@ const loadSceneMedia = async (scene: {
       videoStarted: false,
     };
   } catch {
-    console.warn("⚠️ Imagem também falhou, usando placeholder:", scene.imageUrl);
+    console.warn("⚠️ Imagem falhou, usando placeholder:", scene.imageUrl);
   }
 
-  // 3. Placeholder — NUNCA frame preto vazio
+  // 3. Placeholder gradient — never a black frame
   const placeholder = document.createElement("canvas");
   placeholder.width = 1920;
   placeholder.height = 1080;
@@ -214,16 +195,13 @@ const loadSceneMedia = async (scene: {
   };
 };
 
-// ─── Obtém dimensões do elemento de forma segura ─────────────────────────────
+// ─── Dimensões seguras ───────────────────────────────────────────────────────
 
-const getMediaDimensions = (
-  scene: LoadedScene
-): { w: number; h: number } => {
+const getMediaDimensions = (scene: LoadedScene): { w: number; h: number } => {
   if (scene.isVideo) {
     const vid = scene.element as HTMLVideoElement;
     const w = vid.videoWidth;
     const h = vid.videoHeight;
-    // Guard: se dimensões ainda forem 0, usar fallback 1920x1080
     if (w > 0 && h > 0) return { w, h };
     return { w: 1920, h: 1080 };
   }
@@ -234,7 +212,7 @@ const getMediaDimensions = (
   return { w: 1920, h: 1080 };
 };
 
-// ─── Desenha um frame de vídeo ou imagem no canvas ───────────────────────────
+// ─── Desenha frame ────────────────────────────────────────────────────────────
 
 const drawMediaFrame = (
   ctx: CanvasRenderingContext2D,
@@ -249,53 +227,58 @@ const drawMediaFrame = (
   if (scene.isVideo) {
     const videoEl = scene.element as HTMLVideoElement;
 
-    // Se readyState < 2 (HAVE_CURRENT_DATA), não temos frame para desenhar
     if (videoEl.readyState < 2) {
       ctx.restore();
-      return false; // sinaliza que não desenhou nada
+      return false;
     }
 
-    // Play() apenas uma vez
+    // Start video playback exactly once when its scene begins
     if (!scene.videoStarted) {
+      videoEl.currentTime = 0;
       videoEl.play().catch(() => {});
       scene.videoStarted = true;
     }
 
-    // Sincroniza currentTime com elapsed, com guards contra NaN e overflow
-    const targetTime = elapsed - scene.startTime;
-    if (
-      !isNaN(targetTime) &&
-      isFinite(targetTime) &&
-      targetTime >= 0 &&
-      videoEl.duration > 0 &&
-      !isNaN(videoEl.duration)
-    ) {
-      const clampedTime = Math.min(targetTime, videoEl.duration - 0.01);
-      if (Math.abs(videoEl.currentTime - clampedTime) > 0.15) {
-        videoEl.currentTime = clampedTime;
-      }
-    }
+    // DO NOT manipulate currentTime — let video play naturally
+    // This is the key fix: seeking during playback causes black frames
+
+    // No transform, no filter for Pexels videos — play as-is
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.filter = "none";
+
+    const { w: elW, h: elH } = getMediaDimensions(scene);
+    const scale = Math.max(width / elW, height / elH);
+    const dw = elW * scale;
+    const dh = elH * scale;
+    const dx = (width - dw) / 2;
+    const dy = (height - dh) / 2;
+
+    ctx.drawImage(videoEl, dx, dy, dw, dh);
+    ctx.restore();
+    return true;
   }
 
-  calculateTransform(ctx, scene.effect, sceneProgress, width, height, elapsed);
-  applyVisualFilter(ctx, "saturate");
+  // Static image — apply subtle Ken Burns effect
+  calculateTransform(ctx, scene.effect, sceneProgress, width, height);
 
-  // Usa getMediaDimensions para nunca ter divisão por zero
-  const { w: elW_orig, h: elH_orig } = getMediaDimensions(scene);
-  const scale = Math.max(width / elW_orig, height / elH_orig);
-  const elW = elW_orig * scale;
-  const elH = elH_orig * scale;
-  const x = (width - elW) / 2;
-  const y = (height - elH) / 2;
+  // Subtle color enhancement for images only
+  ctx.filter = "saturate(115%) contrast(1.05)";
 
-  ctx.drawImage(scene.element, x, y, elW, elH);
+  const { w: elW, h: elH } = getMediaDimensions(scene);
+  const scale = Math.max(width / elW, height / elH);
+  const dw = elW * scale;
+  const dh = elH * scale;
+  const dx = (width - dw) / 2;
+  const dy = (height - dh) / 2;
+
+  ctx.drawImage(scene.element, dx, dy, dw, dh);
   ctx.restore();
-  return true; // frame desenhado com sucesso
+  return true;
 };
 
-// ─── Crossfade suave entre cenas ─────────────────────────────────────────────
+// ─── Crossfade ────────────────────────────────────────────────────────────────
 
-const CROSSFADE_DURATION = 0.3;
+const CROSSFADE_DURATION = 0.5;
 
 const getCrossfadeAlpha = (scene: LoadedScene, elapsed: number): number => {
   const sceneEnd = scene.startTime + scene.duration;
@@ -357,7 +340,7 @@ export const renderVideoHeadless = async (
       mSrc.loop = true;
 
       const mGain = offlineCtx.createGain();
-      mGain.gain.value = 0.18;
+      mGain.gain.value = 0.15; // keep music subtle under voice
 
       const compressor = offlineCtx.createDynamicsCompressor();
       compressor.threshold.value = -24;
@@ -405,7 +388,7 @@ export const renderVideoHeadless = async (
     })
   );
 
-  // Cobre gaps entre cenas
+  // Cover gaps between scenes
   for (let i = 0; i < loadedScenes.length - 1; i++) {
     const current = loadedScenes[i];
     const next = loadedScenes[i + 1];
@@ -415,7 +398,7 @@ export const renderVideoHeadless = async (
     }
   }
 
-  // Última cena cobre até o fim do áudio
+  // Last scene covers to end of audio
   if (loadedScenes.length > 0) {
     const last = loadedScenes[loadedScenes.length - 1];
     const audioEnd = finalAudioBuffer.duration;
@@ -431,12 +414,11 @@ export const renderVideoHeadless = async (
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
+  // alpha: false is CRITICAL — prevents transparency being captured as black by MediaRecorder
   const ctx2d = canvas.getContext("2d", { alpha: false })!;
 
-  const bgGradient = ctx2d.createLinearGradient(0, 0, width, height);
-  bgGradient.addColorStop(0, "#1a1a2e");
-  bgGradient.addColorStop(1, "#16213e");
-  ctx2d.fillStyle = bgGradient;
+  // Paint solid background before any scene
+  ctx2d.fillStyle = "#0a0a0a";
   ctx2d.fillRect(0, 0, width, height);
 
   const audioCtx = new AudioContext({ sampleRate });
@@ -459,7 +441,7 @@ export const renderVideoHeadless = async (
 
   const recorder = new MediaRecorder(stream, {
     mimeType,
-    videoBitsPerSecond: 8000000,
+    videoBitsPerSecond: 12_000_000, // increased for better quality
   });
 
   const chunks: Blob[] = [];
@@ -471,8 +453,8 @@ export const renderVideoHeadless = async (
     recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
   });
 
-  recorder.start(2000); // chunks de 2s forçam keyframes regulares
-  await new Promise((r) => setTimeout(r, 200));
+  recorder.start(1000); // 1s chunks for more regular keyframes
+  await new Promise((r) => setTimeout(r, 100));
   audioSrc.start(0);
 
   const startTime = performance.now();
@@ -481,8 +463,8 @@ export const renderVideoHeadless = async (
   // ── LOOP DE RENDERIZAÇÃO ──────────────────────────────────────────────────
 
   return new Promise((resolve, reject) => {
-    let lastScene: LoadedScene | null = null;
-    let lastDrawnScene: LoadedScene | null = null; // último frame que de fato foi desenhado
+    let lastDrawnScene: LoadedScene | null = null;
+    let lastSceneRef: LoadedScene | null = null;
 
     const renderLoop = () => {
       try {
@@ -495,54 +477,65 @@ export const renderVideoHeadless = async (
 
         if (elapsed >= duration + 0.3) {
           recorder.stop();
-          try {
-            audioSrc.stop();
-          } catch {
-            // already stopped
-          }
+          try { audioSrc.stop(); } catch { /* already stopped */ }
           audioCtx.close();
           renderPromise.then(resolve).catch(reject);
           return;
         }
 
+        // Find current scene
         const currentScene =
           loadedScenes.find(
             (s) => elapsed >= s.startTime && elapsed < s.startTime + s.duration
           ) || loadedScenes[loadedScenes.length - 1];
 
-        const prevScene =
-          currentScene !== lastScene && lastScene ? lastScene : null;
+        // ALWAYS paint solid background first to prevent alpha bleed-through
+        ctx2d.globalAlpha = 1;
+        ctx2d.globalCompositeOperation = "source-over";
+        ctx2d.fillStyle = "#0a0a0a";
+        ctx2d.fillRect(0, 0, width, height);
 
         if (currentScene) {
+          const isNewScene = currentScene !== lastSceneRef;
           const sceneTime = elapsed - currentScene.startTime;
           const sceneProgress = Math.min(1, sceneTime / currentScene.duration);
 
-          // Desenha cena anterior embaixo (para crossfade)
-          if (prevScene) {
+          // Draw previous scene underneath for crossfade (only for image scenes)
+          const prevScene = isNewScene && lastDrawnScene && lastDrawnScene !== currentScene
+            ? lastDrawnScene
+            : null;
+
+          if (prevScene && !prevScene.isVideo && !currentScene.isVideo) {
             const prevSceneTime = elapsed - prevScene.startTime;
             const prevProgress = Math.min(1, prevSceneTime / prevScene.duration);
             ctx2d.globalAlpha = 1;
             drawMediaFrame(ctx2d, prevScene, prevProgress, elapsed, width, height);
           }
 
-          // Desenha cena atual com alpha de crossfade
-          const alpha = getCrossfadeAlpha(currentScene, elapsed);
+          // Draw current scene
+          const alpha = (prevScene && !currentScene.isVideo) ? getCrossfadeAlpha(currentScene, elapsed) : 1;
           ctx2d.globalAlpha = alpha;
           const drawn = drawMediaFrame(ctx2d, currentScene, sceneProgress, elapsed, width, height);
 
-          if (drawn) {
-            lastDrawnScene = currentScene;
-          } else if (lastDrawnScene && lastDrawnScene !== currentScene) {
-            // Vídeo não está pronto (readyState < 2) — desenha último frame válido
+          // Fallback: if video not ready, redraw last valid frame
+          if (!drawn && lastDrawnScene) {
+            ctx2d.globalAlpha = 1;
             const fallbackTime = elapsed - lastDrawnScene.startTime;
             const fallbackProgress = Math.min(1, fallbackTime / lastDrawnScene.duration);
             drawMediaFrame(ctx2d, lastDrawnScene, fallbackProgress, elapsed, width, height);
           }
 
-          ctx2d.globalAlpha = 1;
-          lastScene = currentScene;
+          if (drawn) lastDrawnScene = currentScene;
 
+          // Reset alpha BEFORE scanlines
+          ctx2d.globalAlpha = 1;
+          ctx2d.filter = "none";
+          ctx2d.setTransform(1, 0, 0, 1, 0, 0);
+
+          // Subtle scanlines overlay
           drawScanlines(ctx2d, width, height, elapsed);
+
+          lastSceneRef = currentScene;
         }
 
         requestAnimationFrame(renderLoop);
