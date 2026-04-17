@@ -82,11 +82,14 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const storageKey = user?.email ? `darkstream_projects_${user.email}` : 'darkstream_projects_guest';
 
-  // Load projects — tries Supabase first, falls back to IndexedDB
+  // Load projects — merges Supabase metadata (status/progress) with IndexedDB blobs (audio/images)
   useEffect(() => {
     const loadProjects = async () => {
       setIsLoading(true);
       try {
+        // Always load local first — it has full blobs
+        const localData: Project[] = (await get(storageKey)) || [];
+
         if (supabase && user?.email) {
           const { data, error } = await supabase
             .from("projects")
@@ -94,18 +97,52 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
             .eq("user_email", user.email);
 
           if (!error && data && data.length > 0) {
-            const loaded = data.map((row: any) => row.data);
-            setProjects(loaded);
-            await set(storageKey, loaded);
+            const remoteProjects: Project[] = data.map((row: any) => row.data);
+
+            // Merge: Supabase has latest status/metadata, IndexedDB has blobs
+            const merged = remoteProjects.map(remote => {
+              const local = localData.find(l => l.id === remote.id);
+              if (!local) return remote;
+              return {
+                ...remote,
+                videos: remote.videos.map((rv: Video) => {
+                  const lv = local.videos?.find((l: Video) => l.id === rv.id);
+                  if (!lv) return rv;
+                  return {
+                    ...rv,
+                    audioUrl: rv.audioUrl === '__has_audio__' ? lv.audioUrl : rv.audioUrl,
+                    backgroundMusicUrl: rv.backgroundMusicUrl === '__has_music__' ? lv.backgroundMusicUrl : rv.backgroundMusicUrl,
+                    thumbnailUrl: rv.thumbnailUrl === '__has_thumbnail__' ? lv.thumbnailUrl : rv.thumbnailUrl,
+                    visualScenes: rv.visualScenes?.map((rs: any) => {
+                      const ls = lv.visualScenes?.find((s: any) => s.startTime === rs.startTime && s.segmentIndex === rs.segmentIndex);
+                      return {
+                        ...rs,
+                        imageUrl: rs.imageUrl === '__has_image__' && ls?.imageUrl ? ls.imageUrl : rs.imageUrl,
+                      };
+                    }),
+                  };
+                }),
+              };
+            });
+
+            // Include local-only projects not yet synced to Supabase
+            const remoteIds = new Set(remoteProjects.map((p: Project) => p.id));
+            const localOnly = localData.filter((l: Project) => !remoteIds.has(l.id));
+
+            setProjects([...merged, ...localOnly]);
             return;
           }
         }
 
-        const loaded = await get(storageKey);
-        if (!loaded || !Array.isArray(loaded)) setProjects([]);
-        else setProjects(loaded);
+        // Fallback: IndexedDB only
+        if (!Array.isArray(localData) || localData.length === 0) setProjects([]);
+        else setProjects(localData);
       } catch (e) {
-        console.error("Failed to load projects", e);
+        console.error('Failed to load projects', e);
+        try {
+          const fallback = await get(storageKey);
+          setProjects(Array.isArray(fallback) ? fallback : []);
+        } catch { setProjects([]); }
       } finally {
         setIsLoading(false);
       }
@@ -119,19 +156,41 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   useEffect(() => {
     if (isLoading) return;
 
-    // 1. Always save locally (works offline)
+    // 1. Always save locally via IndexedDB (full data, no size limit)
     set(storageKey, projects).catch(e => console.error('Failed to save projects locally', e));
 
-    // 2. Sync to Supabase if available
+    // 2. Sync lightweight metadata to Supabase (strips heavy base64 blobs)
+    // Supabase has a ~5MB row limit — audio/images would exceed it silently
     if (!supabase || !user?.email) return;
 
     const syncToSupabase = async () => {
       for (const project of projects) {
         try {
+          // Strip base64 blobs from videos before sending to Supabase
+          // Full data stays in IndexedDB; Supabase stores progress + metadata only
+          const lightProject = {
+            ...project,
+            videos: project.videos.map(v => ({
+              ...v,
+              audioUrl: v.audioUrl ? '__has_audio__' : undefined,
+              backgroundMusicUrl: v.backgroundMusicUrl ? '__has_music__' : undefined,
+              visualScenes: v.visualScenes?.map(scene => ({
+                ...scene,
+                // Keep videoUrl (external URL, small) but strip base64 imageUrls
+                imageUrl: scene.imageUrl?.startsWith('data:')
+                  ? '__has_image__'
+                  : scene.imageUrl,
+              })),
+              thumbnailUrl: v.thumbnailUrl?.startsWith('data:')
+                ? '__has_thumbnail__'
+                : v.thumbnailUrl,
+            })),
+          };
+
           await supabase.from('projects').upsert({
             id: project.id,
             user_email: user.email,
-            data: project,
+            data: lightProject,
             updated_at: new Date().toISOString(),
           }, { onConflict: 'id' });
         } catch (err) {
