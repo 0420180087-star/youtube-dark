@@ -420,10 +420,16 @@ function repairJson(jsonStr: string): string {
 
 export interface VideoIdea { topic: string; context: string; specificContext?: string; }
 
-export const generateVideoIdeas = async (channelTheme: string, description: string, tone: string = 'Engaging', language: string = 'English', excludeTopics: string[] = [], libraryContext: string = ''): Promise<VideoIdea[]> => {
+export const generateVideoIdeas = async (channelTheme: string, description: string, tone: string = 'Engaging', language: string = 'English', excludeTopics: string[] = [], libraryContext: string = '', freshAngle: string = ''): Promise<VideoIdea[]> => {
     return executeGeminiRequest(async (ai) => {
         let exclusionsText = "";
-        if (excludeTopics.length > 0) { const recentExclusions = excludeTopics.slice(-20); exclusionsText = `IMPORTANT: Do NOT generate topics similar to these (already used): ${JSON.stringify(recentExclusions)}. Explore NEW angles.`; }
+        if (excludeTopics.length > 0) {
+            const recentExclusions = excludeTopics.slice(-25);
+            exclusionsText = `ALREADY COVERED (avoid repeating these exact topics): ${JSON.stringify(recentExclusions)}. Explore completely different angles and subjects.`;
+        }
+        const freshAngleText = freshAngle
+            ? `CREATIVE DIRECTION FOR THIS BATCH: Focus your ideas around the angle of "${freshAngle}". This will help generate fresh perspectives not covered before.`
+            : '';
         let libraryPrompt = "";
         if (libraryContext) { 
             libraryPrompt = `CHANNEL KNOWLEDGE BASE & REFERENCES:\n--------------------------------------------------\n${libraryContext.substring(0, 15000)}\n--------------------------------------------------\n
@@ -438,7 +444,7 @@ export const generateVideoIdeas = async (channelTheme: string, description: stri
         - HYBRID GOAL: Combine both. Create a mystery with a high-stakes consequence.
         `;
 
-        const prompt = `You are a YouTube Strategist for a channel about "${channelTheme}". Channel Description: "${description || 'General niche content'}". Target Narrative Tone: "${tone}". Target Language: "${language}" (Write the topics and context strictly in this language). ${libraryPrompt} ${exclusionsText} 
+        const prompt = `You are a YouTube Strategist for a channel about "${channelTheme}". Channel Description: "${description || 'General niche content'}". Target Narrative Tone: "${tone}". Target Language: "${language}" (Write the topics and context strictly in this language). ${libraryPrompt} ${exclusionsText} ${freshAngleText}
         Generate 4 unique, high-potential, click-worthy video ideas that fit this channel. 
         ${clickbaitStrategy}
         The ideas MUST reflect the specified Tone (e.g., if tone is 'Dark', use mysterious vocabulary; if 'Tech', use modern/crisp vocabulary). 
