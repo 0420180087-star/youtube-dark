@@ -1295,50 +1295,108 @@ export const generateThumbnail = async (
     libraryItems?: import('../types').LibraryItem[],
 ): Promise<string> => {
     try {
-        let imagePrompt: string;
-        
-        // If we have script data, use the new intelligent system
-        if (script) {
-            const { buildThumbnailPrompt } = await import('./thumbnailDescriptionService');
-            const result = buildThumbnailPrompt({
-                title: topic, script, narrativeTone: tone, niche: niche || '',
-                libraryItems,
-            });
-            imagePrompt = result.imagePrompt;
-            console.log(`[DarkStream AI] 🎨 Thumbnail prompt (intelligent): ${imagePrompt.substring(0, 100)}...`);
-        } else {
-            // Fallback: generate prompt via AI
-            imagePrompt = await executeGeminiRequest(async (ai) => {
-                const prompt = `You are a thumbnail visual director. Create an image generation prompt for a YouTube thumbnail.
-VIDEO TOPIC: "${topic}"
-VIDEO SUMMARY: "${scriptSummary}"
-TONE: ${tone}
+        // Step 1: Build a rich, clickbait-specific image prompt using AI
+        const imagePrompt = await executeGeminiRequest(async (ai) => {
+            // Extract key narrative hook from script if available
+            const hook = script?.segments?.[0]?.narratorText?.substring(0, 200) || scriptSummary.substring(0, 200);
+            const toneKeywords: Record<string, string> = {
+                dark: 'dramatic dark shadows, ominous atmosphere, high contrast',
+                horror: 'terrifying, dark shadows, blood red lighting, fear',
+                suspense: 'mysterious, silhouette, dramatic lighting, tension',
+                child: 'bright colorful, cartoon style, friendly, vibrant',
+                motivat: 'epic golden lighting, sunrise, power, triumph',
+                tech: 'futuristic neon, holographic, digital, sleek',
+                crime: 'noir, dark urban, gritty, black and white tones',
+            };
+            let toneStyle = 'dramatic cinematic lighting, high contrast, professional';
+            for (const [key, val] of Object.entries(toneKeywords)) {
+                if (tone.toLowerCase().includes(key)) { toneStyle = val; break; }
+            }
 
-RULES:
-- Output ONLY the image prompt, nothing else
-- Include dramatic lighting and cinematic composition
-- Make it look like a $50M movie poster background
-- Be SPECIFIC to the topic
+            const prompt = `You are a YouTube thumbnail art director for viral channels with millions of views.
 
-Example: "Dramatic aerial view of a half-buried golden pyramid, volumetric god rays, storm clouds, cinematic lighting, 8K"`;
-                
-                const response = await ai.models.generateContent({ 
-                    model: "gemini-2.5-flash", 
-                    contents: prompt, 
-                    config: { temperature: 0.9 } 
-                });
-                return (response.text || "").trim();
+VIDEO TITLE: "${topic}"
+NARRATIVE HOOK: "${hook}"
+VISUAL TONE: ${toneStyle}
+
+Create a SINGLE image generation prompt for a YouTube thumbnail that will get maximum clicks.
+
+CLICKBAIT VISUAL RULES (ALL must apply):
+1. ONE dramatic focal subject — a face with extreme emotion, OR a shocking object, OR a surreal scene
+2. Extreme lighting — god rays, neon glow, fire, lightning, or deep shadows
+3. Cinematic depth — foreground subject sharp, dramatic background
+4. Colors that POP — deep blacks with one dominant accent color (red, gold, cyan, or orange)
+5. Movie poster quality — looks like a $100M film still
+6. NO text, NO logos, NO UI elements
+7. SPECIFIC to the video topic — not generic
+
+Output ONLY the image generation prompt, nothing else. No explanation, no quotes.
+Example output: Extreme close-up of a young man's terrified face half-illuminated by red fire light, ancient crumbling temple in background with gold light rays, ultra sharp focus, cinematic 8K, dramatic shadows`;
+
+            const response = await ai.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: prompt,
+                config: { temperature: 1.0 },
             });
-        }
-        
-        return await generateSceneImage(
-            imagePrompt || `Dramatic cinematic scene related to ${topic}, volumetric lighting, dark atmosphere, 8K`, 
+            return (response.text || '').trim();
+        });
+
+        // Step 2: Generate the actual image using Gemini image model
+        return await generateThumbnailImage(
+            imagePrompt || `Dramatic cinematic scene: ${topic}, god rays, extreme contrast, movie poster quality, 8K`,
             tone
         );
     } catch (err: any) {
-        console.warn("[DarkStream AI] ⚠️ Thumbnail AI failed, using canvas fallback:", err.message);
+        console.warn('[DarkStream AI] ⚠️ Thumbnail AI failed, using canvas fallback:', err.message);
         return generateCanvasThumbnail(topic, tone);
     }
+};
+
+/**
+ * Generates thumbnail image exclusively via Gemini image generation models.
+ * Uses gemini-2.0-flash-preview-image-generation (the correct model for image output).
+ */
+const generateThumbnailImage = async (prompt: string, tone: string): Promise<string> => {
+    return executeGeminiRequest(async (ai) => {
+        const modelsToTry = [
+            'gemini-2.0-flash-preview-image-generation',
+            'gemini-2.0-flash-exp',
+            'gemini-2.0-flash',
+        ];
+
+        for (const modelName of modelsToTry) {
+            try {
+                console.log(`[DarkStream AI] 🖼️ Gerando thumbnail com: ${modelName}`);
+                const response = await ai.models.generateContent({
+                    model: modelName,
+                    contents: { parts: [{ text: `${prompt}. YouTube thumbnail format 16:9, ultra high quality, no text.` }] },
+                    config: {
+                        responseModalities: [Modality.IMAGE, Modality.TEXT],
+                        safetySettings: [
+                            { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                            { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                            { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                            { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                        ],
+                    },
+                });
+                const base64Image = response.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData)?.inlineData?.data;
+                if (base64Image) {
+                    console.log(`[DarkStream AI] ✅ Thumbnail gerada com ${modelName}`);
+                    return `data:image/jpeg;base64,${base64Image}`;
+                }
+            } catch (err: any) {
+                if (isQuotaError(err)) throw err; // bubble up for key rotation
+                const msg = (err.message || '').toLowerCase();
+                if (msg.includes('not found') || msg.includes('404') || msg.includes('not supported')) {
+                    console.warn(`[DarkStream AI] Modelo ${modelName} indisponível para imagens. Tentando próximo...`);
+                    continue;
+                }
+                throw err;
+            }
+        }
+        throw new Error('Nenhum modelo de imagem disponível');
+    });
 };
 
 /**
