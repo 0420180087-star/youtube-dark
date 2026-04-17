@@ -166,15 +166,25 @@ export const ProjectHub: React.FC = () => {
       }, 45000); // 45s safety
 
       try {
-          const excludeList = project.ideas 
-            ? project.ideas.map(i => i.topic) 
-            : (project.usedIdeas || []);
+          // Only exclude the last 25 used topics to avoid blocking generation
+          // This ensures infinite generation is possible over time
+          const allTopics = project.ideas?.map(i => i.topic) || project.usedIdeas || [];
+          const excludeList = allTopics.slice(-25);
           
           // Gather Library Context
           const libraryContext = project.library?.map(item => {
             const prefix = item.type === 'youtube_channel' ? 'YOUTUBE_REFERENCE_CHANNEL' : item.type?.toUpperCase() || 'INFO';
             return `[${prefix}] ${item.title}: ${item.content}`;
-        }).join('\n') || '';
+          }).join('\n') || '';
+
+          // Add a random seed angle to force fresh ideas on repeated generation
+          const angles = [
+            'controversy and debate', 'untold secrets', 'shocking reveals',
+            'myths debunked', 'behind the scenes', 'biggest mistakes',
+            'predictions for the future', 'hidden history', 'viral potential',
+            'emotional stories', 'expert secrets', 'surprising facts'
+          ];
+          const freshAngle = angles[Math.floor(Math.random() * angles.length)];
 
           const ideas = await generateVideoIdeas(
               project.channelTheme, 
@@ -182,13 +192,14 @@ export const ProjectHub: React.FC = () => {
               project.defaultTone,
               project.language, 
               excludeList,
-              libraryContext // Pass library info
+              libraryContext,
+              freshAngle
           );
           
           if (ideas && ideas.length > 0) {
               saveGeneratedIdeas(project.id, ideas);
           } else {
-              alert("AI returned no new ideas. Try adding more context to your Library.");
+              alert("A IA não retornou novas ideias. Tente adicionar mais contexto à sua Biblioteca.");
           }
       } catch (e: any) {
           console.error("Failed to generate ideas", e);
