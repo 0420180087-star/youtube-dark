@@ -73,6 +73,46 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             localStorage.removeItem('ds_youtube_access_token');
           }
         }
+
+        // Auto-refresh YouTube token on app load if Supabase is configured
+        // This keeps the session alive permanently without requiring re-login
+        const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+        const supabaseAnon = import.meta.env.VITE_SUPABASE_ANON_KEY;
+        if (supabaseUrl && supabaseAnon) {
+          try {
+            // Find the most recent project_id to use for token refresh
+            const storedEmail = localStorage.getItem('ds_user_profile');
+            let userEmail = '';
+            if (storedEmail) {
+              try {
+                const dec = await decryptData(storedEmail);
+                userEmail = JSON.parse(dec)?.email || '';
+              } catch { /* ignore */ }
+            }
+
+            if (userEmail) {
+              const res = await fetch(`${supabaseUrl}/functions/v1/refresh-token`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${supabaseAnon}`,
+                },
+                body: JSON.stringify({ project_id: 'default', user_email: userEmail }),
+              });
+              if (res.ok) {
+                const data = await res.json();
+                if (data.access_token) {
+                  setAccessToken(data.access_token);
+                  const encToken = await encryptData(data.access_token);
+                  localStorage.setItem('ds_youtube_access_token', encToken);
+                  console.log('[Auth] ✅ Token renovado automaticamente na inicialização');
+                }
+              }
+            }
+          } catch {
+            // Silent fail — app still works with cached token or no token
+          }
+        }
       } catch (e) {
         console.error('Auth init failed:', e);
       }
