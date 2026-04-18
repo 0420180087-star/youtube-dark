@@ -239,7 +239,8 @@ export async function stepGenerateMetadata(
     project.language,
     script.segments,
     script,
-    project.channelTheme
+    project.channelTheme,
+    video.format || project.defaultFormat  // Pass format so isShorts is auto-detected
   );
   callbacks.updateVideo(project.id, video.id, { videoMetadata: metadata });
   callbacks.onStepComplete('metadata');
