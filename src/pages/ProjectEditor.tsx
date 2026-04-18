@@ -835,7 +835,7 @@ export const ProjectEditor: React.FC = () => {
           if (!currentMetadata) {
               setRenderStatus('Gerando metadados…');
               const summary = video.script?.segments.slice(0, 3).map(s => s.narratorText).join(" ") || "";
-              currentMetadata = await generateVideoMetadata(video.title, summary, scriptTone, project.language, video.script?.segments || [], video.script, project.channelTheme);
+              currentMetadata = await generateVideoMetadata(video.title, summary, scriptTone, project.language, video.script?.segments || [], video.script, project.channelTheme, video.format);
               updateVideo(project.id, video.id, { videoMetadata: currentMetadata });
           }
 
@@ -1372,7 +1372,7 @@ export const ProjectEditor: React.FC = () => {
       try {
           const summary = video!.script?.segments.slice(0, 3).map(s => s.narratorText).join(" ") || "";
           const promptContext = scriptContext ? `Specific Details: ${scriptContext}. ` : '';
-          const metadata = await generateVideoMetadata(video!.title, promptContext + summary, scriptTone, project!.language, video!.script?.segments || [], video!.script, project!.channelTheme); 
+          const metadata = await generateVideoMetadata(video!.title, promptContext + summary, scriptTone, project!.language, video!.script?.segments || [], video!.script, project!.channelTheme, video!.format); 
           updateVideo(project!.id, video!.id, { videoMetadata: metadata });
           alert("SEO Metadata generated successfully!");
       } catch (e: any) { 
