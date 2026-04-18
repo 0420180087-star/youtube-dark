@@ -491,9 +491,14 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const deleteProject = (id: string) => { setProjects(prev => prev.filter(p => p.id !== id)); };
 
   const addVideo = (projectId: string, topic: string, duration: VideoDuration, format: VideoFormat, context?: string) => {
+    // Auto-detect Shorts from format — Portrait 9:16 always means YouTube Shorts
+    const isShorts = format?.includes('9:16') || format?.toLowerCase().includes('shorts');
+    // Shorts are always short duration
+    const effectiveDuration: VideoDuration = isShorts ? 'Short (< 3 min)' : duration;
+
     const newVideo: Video = {
       id: crypto.randomUUID(), projectId: projectId, title: topic, status: ProjectStatus.DRAFT,
-      targetDuration: duration, format: format, specificContext: context || '', 
+      targetDuration: effectiveDuration, format: format, specificContext: context || '',
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     };
     setProjects(prev => prev.map(p => {
