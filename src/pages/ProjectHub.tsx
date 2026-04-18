@@ -106,6 +106,28 @@ export const ProjectHub: React.FC = () => {
   // UI State for Description
   const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false);
 
+  // Sync project data -> edit states whenever project loads or changes
+  // This fixes the bug where settings revert to defaults when project loads async
+  useEffect(() => {
+    if (!project) return;
+    setEditTitle(project.title || '');
+    setEditTheme(project.channelTheme || '');
+    setEditTone(project.defaultTone || 'Suspenseful and Dark');
+    setEditVoice(project.defaultVoice || 'Fenrir');
+    setEditLanguage(project.language || 'Portuguese (BR)');
+    setEditDuration(project.defaultDuration || 'Standard (5-8 min)');
+    setEditFormat(project.defaultFormat || 'Landscape 16:9');
+    setEditGeminiPercent(project.visualSourceMix?.geminiPercentage ?? 50);
+    setEditPexelsPercent(project.visualSourceMix?.pexelsPercentage ?? 50);
+    setEditMinImages(project.visualPacing?.minImagesPer5Sec ?? 1);
+    setEditMaxImages(project.visualPacing?.maxImagesPer5Sec ?? 2);
+    setEditStyle(project.visualPacing?.style ?? 'dynamic');
+    setEditFreq(project.scheduleSettings?.frequencyDays || 1);
+    setEditTimeStart(project.scheduleSettings?.timeWindowStart || '13:00');
+    setEditTimeEnd(project.scheduleSettings?.timeWindowEnd || '15:00');
+    setEditAutoGenerate(project.scheduleSettings?.autoGenerate || false);
+  }, [project?.id]); // Only re-sync when project ID changes (not on every render)
+
   // New Video State
   const [newVideoTopic, setNewVideoTopic] = useState('');
   const [newVideoDuration, setNewVideoDuration] = useState<VideoDuration>('Standard (5-8 min)');
@@ -222,7 +244,7 @@ export const ProjectHub: React.FC = () => {
 
     const handleSaveSettings = () => {
         setIsSaving(true);
-        updateProject(project.id, {
+        const updates = {
             title: editTitle,
             channelTheme: editTheme,
             defaultTone: editTone,
@@ -230,6 +252,7 @@ export const ProjectHub: React.FC = () => {
             language: editLanguage,
             defaultDuration: editDuration,
             defaultFormat: editFormat,
+            description: project.description || '',
             visualSourceMix: {
                 geminiPercentage: editGeminiPercent,
                 pexelsPercentage: editPexelsPercent
@@ -245,8 +268,9 @@ export const ProjectHub: React.FC = () => {
                 timeWindowEnd: editTimeEnd,
                 autoGenerate: editAutoGenerate
             }
-        });
-        setTimeout(() => setIsSaving(false), 500);
+        };
+        updateProject(project.id, updates);
+        setTimeout(() => setIsSaving(false), 800);
     };
 
   const handlePreviewVoice = async () => {
