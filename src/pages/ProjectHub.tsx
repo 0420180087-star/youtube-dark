@@ -1071,6 +1071,12 @@ export const ProjectHub: React.FC = () => {
                                         <option key={fmt} value={fmt}>{fmt}</option>
                                     ))}
                                 </select>
+                                {editFormat?.includes('9:16') && (
+                                    <div className="mt-2 flex items-center gap-2 px-3 py-2 bg-red-500/10 border border-red-500/30 rounded-lg">
+                                        <span className="text-red-400 text-xs font-bold">▶ YOUTUBE SHORTS MODE</span>
+                                        <span className="text-slate-400 text-xs">Duration auto-set to &lt;60s · #Shorts added automatically · Vertical 9:16</span>
+                                    </div>
+                                )}
                             </div>
                             <div>
                                 <label className="flex items-center gap-2 text-sm font-medium text-slate-400 mb-1.5">
