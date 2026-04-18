@@ -79,6 +79,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const automationInterval = useRef<number | null>(null);
   const isRunningAutomation = useRef(false);
   const projectsRef = useRef(projects);
+  const userEmailRef = useRef<string>('');
 
   const storageKey = user?.email ? `darkstream_projects_${user.email}` : 'darkstream_projects_guest';
 
@@ -151,6 +152,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   }, [storageKey, user?.email]);
 
   useEffect(() => { projectsRef.current = projects; }, [projects]);
+  useEffect(() => { userEmailRef.current = user?.email || ''; }, [user?.email]);
 
   // Save projects — local + Supabase sync
   useEffect(() => {
@@ -400,7 +402,46 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   };
 
   const updateProject = (id: string, updates: Partial<Project>) => {
-    setProjects(prev => prev.map(p => p.id === id ? { ...p, ...updates } : p));
+    setProjects(prev => {
+      const updated = prev.map(p => p.id === id ? { ...p, ...updates } : p);
+
+      // Immediately persist to Supabase on settings changes (non-blob fields)
+      // This avoids waiting for the debounced useEffect which may miss rapid changes
+      const hasBlob = updates.videos?.some(v =>
+        v.audioUrl?.length > 100 || v.backgroundMusicUrl?.length > 100 ||
+        v.thumbnailUrl?.startsWith('data:') ||
+        v.visualScenes?.some(s => s.imageUrl?.startsWith('data:'))
+      );
+
+      if (!hasBlob && supabase && userEmailRef.current) {
+        const project = updated.find(p => p.id === id);
+        if (project) {
+          const lightProject = {
+            ...project,
+            videos: project.videos.map(v => ({
+              ...v,
+              audioUrl: v.audioUrl ? '__has_audio__' : undefined,
+              backgroundMusicUrl: v.backgroundMusicUrl ? '__has_music__' : undefined,
+              thumbnailUrl: v.thumbnailUrl?.startsWith('data:') ? '__has_thumbnail__' : v.thumbnailUrl,
+              visualScenes: v.visualScenes?.map(s => ({
+                ...s,
+                imageUrl: s.imageUrl?.startsWith('data:') ? '__has_image__' : s.imageUrl,
+              })),
+            })),
+          };
+          supabase.from('projects').upsert({
+            id: project.id,
+            user_email: userEmailRef.current,
+            data: lightProject,
+            updated_at: new Date().toISOString(),
+          }, { onConflict: 'id' }).then(({ error }) => {
+            if (error) console.warn('[Supabase] updateProject sync failed:', error.message);
+          });
+        }
+      }
+
+      return updated;
+    });
   };
 
   const saveGeneratedIdeas = (projectId: string, ideas: GeminiVideoIdea[]) => {
