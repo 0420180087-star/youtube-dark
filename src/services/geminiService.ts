@@ -765,7 +765,11 @@ export const generateVideoMetadata = async (
   segments: ScriptSegment[] = [],
   script?: ScriptData,
   niche?: string,
+  format?: string,
 ): Promise<VideoMetadata> => {
+  // Auto-detect Shorts from format — never rely on AI to guess this
+  const isShortsByFormat = !!(format?.includes('9:16') || format?.toLowerCase().includes('shorts'));
+
   // If we have full script data, use the new intelligent description builder
   if (script && script.segments.length > 0) {
     const { buildVideoDescription, buildTimestamps } = await import('./thumbnailDescriptionService');
@@ -807,13 +811,14 @@ RULES:
         });
         
         const data = JSON.parse(response.text || "{}");
+        const detectedIsShorts = isShortsByFormat || data.isShorts || false;
         return {
           youtubeTitle: data.youtubeTitle || topic,
           youtubeDescription: fullDesc,
           tags: data.tags || [],
-          categoryId: data.categoryId || "24",
+          categoryId: detectedIsShorts ? "22" : (data.categoryId || "24"),
           visibility: "public" as const,
-          isShorts: data.isShorts || false,
+          isShorts: detectedIsShorts,
         };
       });
     } catch {
@@ -822,9 +827,9 @@ RULES:
         youtubeTitle: topic,
         youtubeDescription: fullDesc,
         tags: [],
-        categoryId: "24",
+        categoryId: isShortsByFormat ? "22" : "24",
         visibility: "public",
-        isShorts: false,
+        isShorts: isShortsByFormat,
       };
     }
   }
