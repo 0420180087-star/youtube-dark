@@ -883,13 +883,53 @@ RULES:
   });
 };
 
+// ─── Voice style instructions per tone ──────────────────────────────────────
+const getVoiceStyleInstruction = (tone: string): string => {
+    const t = tone.toLowerCase();
+
+    if (t.includes('horror') || t.includes('dark') || t.includes('suspense') || t.includes('thriller')) {
+        return `You are a master horror narrator. Speak in a slow, deep, gravelly voice with deliberate dramatic pauses between key phrases. Let tension build gradually. Breathe between sentences. Lower your pitch on shocking reveals. Never rush. Make the listener feel dread.`;
+    }
+    if (t.includes('child') || t.includes('kid') || t.includes('fairy')) {
+        return `You are a warm, engaging children's storyteller. Speak with enthusiasm and playful energy. Vary your pitch — go higher for exciting moments, softer for gentle ones. Add wonder to your voice. Pause briefly after questions to let imagination work.`;
+    }
+    if (t.includes('documentary') || t.includes('historical') || t.includes('formal')) {
+        return `You are a seasoned documentary narrator in the style of David Attenborough. Speak with calm authority and gravitas. Use measured pacing with natural breathing pauses. Emphasize key facts with slight pitch drops. Sound thoughtful and wise.`;
+    }
+    if (t.includes('motivat') || t.includes('energetic') || t.includes('coach')) {
+        return `You are an inspiring motivational speaker. Speak with conviction and rising energy. Build momentum through each sentence. Use punchy pacing on action phrases. Sound like you genuinely believe every word. Pause powerfully before key statements.`;
+    }
+    if (t.includes('crime') || t.includes('true crime') || t.includes('investigat')) {
+        return `You are a true crime podcast narrator. Speak in a measured, slightly hushed tone as if sharing a secret. Build tension with pacing. Drop your voice on disturbing details. Sound investigative and compelling, never sensational.`;
+    }
+    if (t.includes('tech') || t.includes('science') || t.includes('explainer') || t.includes('wendover')) {
+        return `You are a confident, clear educational narrator. Speak at a comfortable pace — not too fast, not too slow. Sound genuinely excited about the subject. Use natural emphasis on technical terms. Be authoritative but approachable.`;
+    }
+    // Default: engaging, natural, broadcast quality
+    return `You are a professional YouTube narrator with a warm, engaging broadcast voice. Speak naturally with varied pacing — faster for exciting moments, slower for important points. Use natural emphasis and pauses. Sound like a real person telling a story, not reading a script. Breathe naturally between paragraphs.`;
+};
+
+// ─── Pre-process text to help TTS sound more natural ─────────────────────────
+const preprocessTextForTTS = (text: string): string => {
+    return text
+        // Replace ellipsis with pause markers the TTS understands
+        .replace(/\.\.\./g, '...')
+        // Ensure em-dashes create pauses
+        .replace(/—/g, ' — ')
+        // Add slight pause after colons in narrative context
+        .replace(/: /g, ': ')
+        // Clean up multiple spaces
+        .replace(/  +/g, ' ')
+        .trim();
+};
+
 export const generateVoiceover = async (text: string, voiceName: string = 'Fenrir', tone: string = 'Cinematic'): Promise<ArrayBuffer> => { 
     if (!text || !text.trim()) return new ArrayBuffer(0); 
     
-    const SUPPORTED_VOICES = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'];
+    // Gemini TTS supported voices as of 2025
+    const SUPPORTED_VOICES = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr', 'Aoede', 'Leda', 'Orus', 'Schedar'];
     const VOICE_MAPPING: Record<string, string> = {
-        'Aoede': 'Kore',
-        'Leda': 'Kore',
+        'Default': 'Fenrir',
     };
     
     let finalVoice = voiceName;
@@ -897,17 +937,18 @@ export const generateVoiceover = async (text: string, voiceName: string = 'Fenri
         finalVoice = VOICE_MAPPING[voiceName] || 'Fenrir';
     }
 
-    return executeGeminiRequest(async (ai) => {
-        const t = tone.toLowerCase();
-        let styleInstruction = "Read clearly and naturally.";
-        
-        if (t.includes('horror') || t.includes('dark') || t.includes('suspense')) {
-            styleInstruction = "Read in a low, tense, and ominous tone with dramatic pauses.";
-        } else if (t.includes('child') || t.includes('kid')) {
-            styleInstruction = "Read in a warm, enthusiastic, and friendly tone.";
-        }
+    const styleInstruction = getVoiceStyleInstruction(tone);
+    const cleanText = preprocessTextForTTS(text);
 
-        const ttsPrompt = `Style: ${styleInstruction}\n\nText to read: "${text}"`;
+    return executeGeminiRequest(async (ai) => {
+        // Craft the prompt to guide natural delivery
+        // DO NOT wrap text in quotes — that signals "read this literally" to the TTS model
+        // Instead, give acting direction then present the text as a continuation
+        const ttsPrompt = `${styleInstruction}
+
+Now narrate the following passage with full expression and natural rhythm:
+
+${cleanText}`;
         
         const response = await ai.models.generateContent({ 
             model: "gemini-2.5-flash-preview-tts", 
@@ -1635,14 +1676,38 @@ export const decodeAudioData = async (arrayBuffer: ArrayBuffer, ctx: AudioContex
 };
 
 export const mergeAudioBuffers = (buffers: AudioBuffer[], ctx: AudioContext): AudioBuffer => { 
-    if (buffers.length === 0) return ctx.createBuffer(1, 1, 24000); 
-    const totalLength = buffers.reduce((acc, b) => acc + b.length, 0); 
-    const sampleRate = buffers[0].sampleRate; 
-    const outputBuffer = ctx.createBuffer(1, totalLength, sampleRate); 
-    const outputData = outputBuffer.getChannelData(0); 
-    let offset = 0; 
-    for (const buffer of buffers) { outputData.set(buffer.getChannelData(0), offset); offset += buffer.length; } 
-    return outputBuffer; 
+    if (buffers.length === 0) return ctx.createBuffer(1, 1, 24000);
+
+    // All buffers must be at the same sample rate
+    const sampleRate = buffers[0].sampleRate;
+    const totalLength = buffers.reduce((acc, b) => acc + b.length, 0);
+    const outputBuffer = ctx.createBuffer(1, totalLength, sampleRate);
+    const outputData = outputBuffer.getChannelData(0);
+
+    let offset = 0;
+    for (let bi = 0; bi < buffers.length; bi++) {
+        const buffer = buffers[bi];
+        const channelData = buffer.getChannelData(0);
+
+        // Apply a very short fade-in (5ms) at the start of each non-silence buffer
+        // to eliminate click artifacts at segment boundaries
+        const fadeInSamples = Math.min(Math.ceil(0.005 * sampleRate), channelData.length);
+        const fadeData = new Float32Array(channelData);
+        for (let i = 0; i < fadeInSamples; i++) {
+            fadeData[i] *= i / fadeInSamples;
+        }
+        // Fade-out (5ms) at end
+        const fadeOutSamples = Math.min(Math.ceil(0.005 * sampleRate), channelData.length);
+        for (let i = 0; i < fadeOutSamples; i++) {
+            const idx = channelData.length - 1 - i;
+            fadeData[idx] *= i / fadeOutSamples;
+        }
+
+        outputData.set(fadeData, offset);
+        offset += buffer.length;
+    }
+
+    return outputBuffer;
 };
 
 export const audioBufferToBase64 = (buffer: AudioBuffer): string => { 
