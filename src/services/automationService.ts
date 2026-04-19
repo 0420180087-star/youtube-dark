@@ -95,6 +95,14 @@ export async function stepGenerateScript(
   return script;
 }
 
+// Creates a silent AudioBuffer of given duration at 24000Hz
+function createSilence(ctx: AudioContext, durationSeconds: number): AudioBuffer {
+  const frameCount = Math.ceil(durationSeconds * 24000);
+  const buf = ctx.createBuffer(1, Math.max(1, frameCount), 24000);
+  // Buffer is already zeroed (silence) by default
+  return buf;
+}
+
 export async function stepGenerateVoice(
   project: Project,
   video: Video,
@@ -107,13 +115,29 @@ export async function stepGenerateVoice(
   let totalDur = 0;
   const ctx = new AudioContext({ sampleRate: 24000 });
 
+  // Natural pause between segments (0.4s = realistic breath/transition)
+  const SEGMENT_PAUSE = 0.4;
+
   for (let i = 0; i < script.segments.length; i++) {
-    callbacks.onProgress('voice', `Segmento ${i + 1}/${script.segments.length}`);
+    callbacks.onProgress('voice', `Gerando voz: segmento ${i + 1}/${script.segments.length}...`);
     const seg = script.segments[i];
-    const ab = await decodeAudioData(await generateVoiceover(seg.narratorText, project.defaultVoice), ctx);
+
+    // Pass tone for style-aware narration
+    const tone = project.defaultTone || 'Cinematic';
+    const ab = await decodeAudioData(
+      await generateVoiceover(seg.narratorText, project.defaultVoice || 'Fenrir', tone),
+      ctx
+    );
     audioBuffers.push(ab);
     totalDur += ab.duration;
-    if (i < script.segments.length - 1) timestamps.push(totalDur);
+
+    // Add natural pause between segments (not after the last one)
+    if (i < script.segments.length - 1) {
+      timestamps.push(totalDur);
+      const silence = createSilence(ctx, SEGMENT_PAUSE);
+      audioBuffers.push(silence);
+      totalDur += SEGMENT_PAUSE;
+    }
   }
 
   const finalAudio = mergeAudioBuffers(audioBuffers, ctx);
@@ -366,6 +390,17 @@ export async function runAutomationPipeline(
     return { success: false, videoId: video!.id, videoTitle: video!.title, failedStep: 'upload', errorMessage: e.message };
   }
 
+  // Step 9: Auto-Shorts (non-blocking — failure never stops the main pipeline)
+  if (project.autoGenerateShorts) {
+    try {
+      callbacks.onStepStart('shorts', '⚡ Gerando Short automático...');
+      await stepGenerateAndUploadShort(project, video!, script, callbacks);
+    } catch (e: any) {
+      // Shorts failure is always non-blocking
+      console.warn('[Auto-Shorts] Falha ignorada:', e.message);
+    }
+  }
+
   return { success: true, videoId: video!.id, videoTitle: video!.title };
 }
 
@@ -426,5 +461,162 @@ export const STEP_LABELS: Record<AutoPilotStep, string> = {
   studio: '🎵 Música',
   thumbnail: '🖼️ Thumbnail',
   metadata: '📊 SEO/Metadata',
-  upload: '📤 Upload YouTube'
+  upload: '📤 Upload YouTube',
+  shorts: '⚡ Auto-Shorts'
 };
+
+// ─── Picks the most emotionally engaging segment for the Short ───────────────
+function pickBestSegmentForShort(script: any): number {
+  if (!script?.segments?.length) return 0;
+  
+  // Score each segment by emotional density keywords
+  const emotionKeywords = [
+    'never', 'impossible', 'secret', 'revealed', 'shocking', 'truth',
+    'never told', 'hidden', 'dark', 'terrifying', 'mysterious', 'incredible',
+    // Portuguese equivalents
+    'nunca', 'impossível', 'segredo', 'revelado', 'chocante', 'verdade',
+    'escondido', 'sombrio', 'aterrorizante', 'misterioso', 'incrível',
+    'jamais', 'oculto', 'surpreendente', 'descoberta', 'real',
+  ];
+
+  const scores = script.segments.map((seg: any, i: number) => {
+    const text = (seg.narratorText || '').toLowerCase();
+    // Prefer middle segments (not intro/outro)
+    const positionBonus = i > 0 && i < script.segments.length - 1 ? 2 : 0;
+    const emotionScore = emotionKeywords.filter(kw => text.includes(kw)).length;
+    // Prefer segments with enough words for a 45-60s clip
+    const words = text.split(/\s+/).length;
+    const lengthScore = words >= 80 && words <= 200 ? 3 : words >= 50 ? 1 : 0;
+    return { index: i, score: emotionScore + positionBonus + lengthScore };
+  });
+
+  scores.sort((a: any, b: any) => b.score - a.score);
+  return scores[0].index;
+}
+
+// ─── Generates and uploads a Short from the best segment ────────────────────
+export async function stepGenerateAndUploadShort(
+  project: Project,
+  video: Video,
+  script: any,
+  callbacks: PipelineCallbacks
+): Promise<string | null> {
+  callbacks.onStepStart('shorts', '⚡ Gerando Auto-Short...');
+
+  try {
+    // 1. Pick best segment
+    const segIdx = pickBestSegmentForShort(script);
+    const segment = script.segments[segIdx];
+    callbacks.onProgress('shorts', `Segmento selecionado: "${segment.sectionTitle}" (mais impactante)`);
+
+    // 2. Generate voice for just this segment
+    const { decodeAudioData, mergeAudioBuffers, audioBufferToBase64, generateVoiceover } = await import('./geminiService');
+    const ctx = new AudioContext({ sampleRate: 24000 });
+    const audioBuffer = await decodeAudioData(
+      await generateVoiceover(segment.narratorText, project.defaultVoice, project.defaultTone || 'Cinematic'),
+      ctx
+    );
+    await ctx.close();
+    
+    // Cap at 58 seconds for Shorts compliance
+    const shortDuration = Math.min(audioBuffer.duration, 58);
+    const shortAudioUrl = audioBufferToBase64(audioBuffer);
+
+    callbacks.onProgress('shorts', `Áudio do Short: ${shortDuration.toFixed(1)}s`);
+
+    // 3. Pick visual scenes that overlap with this segment's time range
+    const latestProject = callbacks.getLatestProject(project.id);
+    const latestVideo = latestProject?.videos.find(v => v.id === video.id);
+    const allScenes = latestVideo?.visualScenes || [];
+
+    // Get timestamps for this segment
+    const segTimestamps = latestVideo?.segmentTimestamps || [];
+    const segStart = segTimestamps[segIdx] ?? 0;
+    const segEnd = segTimestamps[segIdx + 1] ?? (segStart + shortDuration);
+
+    // Filter scenes that belong to this segment, rescaled to start from 0
+    let shortScenes = allScenes
+      .filter(s => s.segmentIndex === segIdx || 
+                   (s.startTime >= segStart - 0.5 && s.startTime < segEnd + 0.5))
+      .map(s => ({
+        ...s,
+        startTime: Math.max(0, s.startTime - segStart),
+        duration: Math.min(s.duration, shortDuration),
+      }));
+
+    // If no matching scenes, take first few scenes and rescale
+    if (shortScenes.length === 0) {
+      shortScenes = allScenes.slice(0, Math.min(4, allScenes.length)).map((s, i) => ({
+        ...s,
+        startTime: i * (shortDuration / Math.min(4, allScenes.length)),
+        duration: shortDuration / Math.min(4, allScenes.length),
+      }));
+    }
+
+    // Ensure last scene covers full short duration
+    if (shortScenes.length > 0) {
+      const last = shortScenes[shortScenes.length - 1];
+      if (last.startTime + last.duration < shortDuration) {
+        last.duration = shortDuration - last.startTime;
+      }
+    }
+
+    callbacks.onProgress('shorts', 'Renderizando Short em 9:16...');
+
+    // 4. Build a minimal Video object for the Short render
+    const shortVideo: Video = {
+      id: `short_${video.id}`,
+      projectId: project.id,
+      title: `${video.title} #Shorts`,
+      status: ProjectStatus.VIDEO_GENERATED,
+      targetDuration: 'Short (< 3 min)',
+      format: 'Portrait 9:16 (Shorts)',
+      specificContext: '',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      audioUrl: shortAudioUrl,
+      visualScenes: shortScenes,
+    };
+
+    // 5. Render the Short
+    const { renderVideoHeadless } = await import('./renderService');
+    const shortBlob = await renderVideoHeadless(shortVideo, (pct, status) => {
+      callbacks.onProgress('shorts', `Renderizando Short: ${status}`);
+    });
+
+    const shortFile = new File([shortBlob], 'short.webm', { type: 'video/webm' });
+
+    // 6. Build Shorts metadata
+    const shortsMetadata = {
+      youtubeTitle: `${segment.sectionTitle || video.title} #Shorts`.substring(0, 100),
+      youtubeDescription: `#Shorts
+
+${segment.narratorText?.substring(0, 300) || ''}
+
+📺 Assista ao vídeo completo no canal!`,
+      tags: ['shorts', 'viral', ...(latestVideo?.videoMetadata?.tags?.slice(0, 10) || [])],
+      categoryId: '22',
+      visibility: 'public' as const,
+      isShorts: true,
+    };
+
+    callbacks.onProgress('shorts', 'Enviando Short para o YouTube...');
+
+    // 7. Upload Short
+    const { uploadVideoToYouTube } = await import('./youtubeService');
+    const shortYtbId = await uploadVideoToYouTube(
+      project.youtubeAccessToken!,
+      shortFile,
+      shortsMetadata,
+      latestVideo?.thumbnailUrl
+    );
+
+    callbacks.onStepComplete('shorts');
+    callbacks.onProgress('shorts', `✅ Short publicado: https://youtu.be/${shortYtbId}`);
+
+    return shortYtbId;
+  } catch (err: any) {
+    console.warn('[Auto-Shorts] Falha ao gerar Short (não bloqueia pipeline):', err.message);
+    return null;
+  }
+}
