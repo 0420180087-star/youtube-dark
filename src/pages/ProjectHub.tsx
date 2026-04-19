@@ -99,6 +99,7 @@ export const ProjectHub: React.FC = () => {
   const [editTimeStart, setEditTimeStart] = useState(project?.scheduleSettings?.timeWindowStart || '13:00');
   const [editTimeEnd, setEditTimeEnd] = useState(project?.scheduleSettings?.timeWindowEnd || '15:00');
   const [editAutoGenerate, setEditAutoGenerate] = useState(project?.scheduleSettings?.autoGenerate || false);
+  const [editAutoShorts, setEditAutoShorts] = useState(project?.autoGenerateShorts || false);
   
   const [isSaving, setIsSaving] = useState(false);
   const [isPreviewingVoice, setIsPreviewingVoice] = useState(false);
@@ -126,6 +127,7 @@ export const ProjectHub: React.FC = () => {
     setEditTimeStart(project.scheduleSettings?.timeWindowStart || '13:00');
     setEditTimeEnd(project.scheduleSettings?.timeWindowEnd || '15:00');
     setEditAutoGenerate(project.scheduleSettings?.autoGenerate || false);
+    setEditAutoShorts(project.autoGenerateShorts || false);
   }, [project?.id]); // Only re-sync when project ID changes (not on every render)
 
   // New Video State
@@ -253,6 +255,7 @@ export const ProjectHub: React.FC = () => {
             defaultDuration: editDuration,
             defaultFormat: editFormat,
             description: project.description || '',
+            autoGenerateShorts: editAutoShorts,
             visualSourceMix: {
                 geminiPercentage: editGeminiPercent,
                 pexelsPercentage: editPexelsPercent
@@ -995,6 +998,34 @@ export const ProjectHub: React.FC = () => {
                                 onChange={(e) => setEditAutoGenerate(e.target.checked)}
                             />
                             <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-orange-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-orange-600"></div>
+                        </label>
+                    </div>
+
+                    {/* Auto-Shorts Toggle */}
+                    <div className="flex items-center justify-between bg-slate-800/50 p-4 rounded-xl border border-slate-700/50">
+                        <div className="flex items-center gap-3">
+                            <div className={`p-2 rounded-lg ${editAutoShorts ? 'bg-red-500/20 text-red-400' : 'bg-slate-700 text-slate-400'}`}>
+                                <span className="text-base leading-none">⚡</span>
+                            </div>
+                            <div>
+                                <div className="flex items-center gap-2">
+                                    <div className="text-sm font-bold text-white">Auto-Generate Shorts</div>
+                                    {editAutoShorts && <span className="text-[10px] font-bold px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded-full">ATIVO</span>}
+                                </div>
+                                <div className="text-xs text-slate-400">Após cada vídeo, gera e posta automaticamente um Short com o trecho mais impactante.</div>
+                                {editAutoShorts && (
+                                    <div className="text-xs text-red-400/70 mt-1">Requer canal conectado · Postado simultaneamente ao vídeo completo</div>
+                                )}
+                            </div>
+                        </div>
+                        <label className="relative inline-flex items-center cursor-pointer">
+                            <input 
+                                type="checkbox" 
+                                className="sr-only peer" 
+                                checked={editAutoShorts}
+                                onChange={(e) => setEditAutoShorts(e.target.checked)}
+                            />
+                            <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-red-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-red-600"></div>
                         </label>
                     </div>
                 </div>
