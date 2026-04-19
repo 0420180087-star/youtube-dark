@@ -401,16 +401,27 @@ export const ProjectEditor: React.FC = () => {
       const b: AudioBuffer[] = [];
       const ts = [0];
       let dur = 0;
+      const SEGMENT_PAUSE = 0.4; // natural breathing gap between segments
       const ctx = new AudioContext({ sampleRate: 24000 });
       try {
-          for (let i = 0; i < video!.script!.segments.length; i++) {
+          const segs = video!.script!.segments;
+          for (let i = 0; i < segs.length; i++) {
               setGeneratingAudioIndex(i);
-              const s = video!.script!.segments[i];
+              const s = segs[i];
+              // Pass scriptTone so voice style matches the video tone
               const buf = await generateVoiceover(s.narratorText || s.sectionTitle, selectedVoice, scriptTone);
               const ab = await decodeAudioData(buf, ctx);
               b.push(ab);
               dur += ab.duration;
-              ts.push(dur); // ts will be [start0, end0, end1, ..., endN]
+
+              // Add natural silence gap between segments (not after last)
+              if (i < segs.length - 1) {
+                  ts.push(dur);
+                  const silenceFrames = Math.ceil(SEGMENT_PAUSE * 24000);
+                  const silenceBuf = ctx.createBuffer(1, silenceFrames, 24000);
+                  b.push(silenceBuf); // already zeroed = silence
+                  dur += SEGMENT_PAUSE;
+              }
           }
           const fb = mergeAudioBuffers(b, ctx);
           updateVideo(project!.id, video!.id, { 
