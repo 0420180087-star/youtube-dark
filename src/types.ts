@@ -1,5 +1,3 @@
-
-
 export enum ProjectStatus {
   DRAFT = 'DRAFT',
   SCRIPTING = 'SCRIPTING',
@@ -11,7 +9,7 @@ export enum ProjectStatus {
 }
 
 export type AutoPilotStep = 
-  | 'idea' | 'script' | 'voice' | 'visuals' | 'studio' | 'thumbnail' | 'metadata' | 'upload';
+  | 'idea' | 'script' | 'voice' | 'visuals' | 'studio' | 'thumbnail' | 'metadata' | 'upload' | 'shorts';
 
 export interface StandbyInfo {
   failedStep: AutoPilotStep;
@@ -169,6 +167,9 @@ export interface Project {
   library?: LibraryItem[];
 
   scheduleSettings?: ScheduleSettings;
+
+  // Auto-Shorts: generate and post a Short after each full video
+  autoGenerateShorts?: boolean;
 
   videos: Video[];
   
