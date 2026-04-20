@@ -83,14 +83,23 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const storageKey = user?.email ? `darkstream_projects_${user.email}` : 'darkstream_projects_guest';
 
-  // Load projects — merges Supabase metadata (status/progress) with IndexedDB blobs (audio/images)
+  // Load projects — IndexedDB first (instant), then Supabase in background (sync)
+  // This prevents blank pages while Supabase is slow to respond
   useEffect(() => {
     const loadProjects = async () => {
       setIsLoading(true);
       try {
-        // Always load local first — it has full blobs
+        // STEP 1: Load from IndexedDB immediately — this is always fast (<50ms)
+        // The UI becomes usable right away with local data
         const localData: Project[] = (await get(storageKey)) || [];
+        if (Array.isArray(localData) && localData.length > 0) {
+          setProjects(localData);
+        }
 
+        // STEP 2: Finish loading so UI renders even if Supabase is slow
+        setIsLoading(false);
+
+        // STEP 3: Sync with Supabase in background (non-blocking)
         if (supabase && user?.email) {
           const { data, error } = await supabase
             .from("projects")
@@ -100,9 +109,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
           if (!error && data && data.length > 0) {
             const remoteProjects: Project[] = data.map((row: any) => row.data);
 
-            // Merge: Supabase has latest status/metadata, IndexedDB has blobs
-            const merged = remoteProjects.map(remote => {
-              const local = localData.find(l => l.id === remote.id);
+            const mergeBlobs = (remote: Project, local: Project | undefined): Project => {
               if (!local) return remote;
               return {
                 ...remote,
@@ -115,7 +122,9 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
                     backgroundMusicUrl: rv.backgroundMusicUrl === '__has_music__' ? lv.backgroundMusicUrl : rv.backgroundMusicUrl,
                     thumbnailUrl: rv.thumbnailUrl === '__has_thumbnail__' ? lv.thumbnailUrl : rv.thumbnailUrl,
                     visualScenes: rv.visualScenes?.map((rs: any) => {
-                      const ls = lv.visualScenes?.find((s: any) => s.startTime === rs.startTime && s.segmentIndex === rs.segmentIndex);
+                      const ls = lv.visualScenes?.find((s: any) =>
+                        s.startTime === rs.startTime && s.segmentIndex === rs.segmentIndex
+                      );
                       return {
                         ...rs,
                         imageUrl: rs.imageUrl === '__has_image__' && ls?.imageUrl ? ls.imageUrl : rs.imageUrl,
@@ -124,28 +133,27 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
                   };
                 }),
               };
-            });
+            };
 
-            // Include local-only projects not yet synced to Supabase
+            const merged = remoteProjects.map(remote =>
+              mergeBlobs(remote, localData.find(l => l.id === remote.id))
+            );
+
+            // Add local-only projects not yet on Supabase
             const remoteIds = new Set(remoteProjects.map((p: Project) => p.id));
             const localOnly = localData.filter((l: Project) => !remoteIds.has(l.id));
 
+            // Only update if remote has newer data
             setProjects([...merged, ...localOnly]);
-            return;
           }
         }
-
-        // Fallback: IndexedDB only
-        if (!Array.isArray(localData) || localData.length === 0) setProjects([]);
-        else setProjects(localData);
       } catch (e) {
         console.error('Failed to load projects', e);
+        setIsLoading(false);
         try {
           const fallback = await get(storageKey);
           setProjects(Array.isArray(fallback) ? fallback : []);
         } catch { setProjects([]); }
-      } finally {
-        setIsLoading(false);
       }
     };
     loadProjects();
