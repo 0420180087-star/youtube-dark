@@ -7,7 +7,7 @@ import { Search, Filter, Plus, Film, X, Youtube, SlidersHorizontal, Layers, Aler
 import { useNavigate } from 'react-router-dom';
 
 export const ProjectsList: React.FC = () => {
-  const { projects, addProject, deleteProject } = useProjects();
+  const { projects, addProject, deleteProject, isLoading } = useProjects();
   const navigate = useNavigate();
   
   // UI State
@@ -46,6 +46,15 @@ export const ProjectsList: React.FC = () => {
       setProjectToDelete(null);
     }
   };
+
+  if (isLoading) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-4 text-slate-500" style={{ minHeight: '60vh' }}>
+        <div className="w-8 h-8 border-2 border-orange-500 border-t-transparent rounded-full animate-spin" />
+        <span className="text-sm">Carregando projetos...</span>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-8 min-h-full flex flex-col">
