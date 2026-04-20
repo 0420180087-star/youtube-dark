@@ -394,16 +394,25 @@ async function stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, pro
 
   const tmpDir = path.join(os.tmpdir(), `autopost_${Date.now()}`);
 
-  const visuals = scenes.map((s) => ({
+  // Build per-scene visuals with duration from scene data
+  // This ensures Pexels videos are trimmed to the right length
+  const visuals = scenes.map((s, i) => ({
     url: s.videoUrl || s.imageUrl,
     effect: s.effect || 'zoom-in',
+    duration: s.duration || (script.segments[s.segmentIndex || i]?.estimatedDuration) || 5,
+    isVideo: !!s.videoUrl,
   }));
 
-  const videoPath = await renderVideo({
+  // Build per-clip segments with duration matching the scene array
+  const clipSegments = visuals.map((v) => ({
+    estimatedDuration: v.duration,
+  }));
+
+  const { videoPath } = await renderVideo({
     visuals,
-    segments: script.segments || [],
+    segments: clipSegments,
     audioBase64: audioBase64,
-    musicUrl: null, // Music is handled via Pexels ambient or skipped on server
+    musicUrl: null,
     thumbnailBase64: thumbnailBase64 || null,
     tmpDir,
   });
