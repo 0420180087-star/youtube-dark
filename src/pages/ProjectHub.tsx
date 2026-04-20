@@ -67,7 +67,7 @@ const FORMAT_OPTIONS: VideoFormat[] = [
 
 export const ProjectHub: React.FC = () => {
   const { id } = useParams<{ id: string }>();
-  const { getProject, updateProject, deleteProject, addVideo, deleteVideo, updateIdeaStatus, saveGeneratedIdeas, removeIdeaFromHistory, addLibraryItem, deleteLibraryItem } = useProjects();
+  const { getProject, updateProject, deleteProject, addVideo, deleteVideo, updateIdeaStatus, saveGeneratedIdeas, removeIdeaFromHistory, addLibraryItem, deleteLibraryItem, isLoading: isProjectsLoading } = useProjects();
   const { user, googleClientId, isLoading: isAuthLoading } = useAuth();
   
   const navigate = useNavigate();
@@ -150,7 +150,25 @@ export const ProjectHub: React.FC = () => {
   const usedIdeas = project?.ideas?.filter(i => i.status === 'used') || [];
   const dismissedIdeas = project?.ideas?.filter(i => i.status === 'dismissed') || [];
 
-  if (!project) return <div className="p-10 text-center text-slate-500">Project not found</div>;
+  // Show loading spinner while projects are being fetched from IndexedDB/Supabase
+  if (isProjectsLoading) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-4 text-slate-500">
+        <div className="w-8 h-8 border-2 border-orange-500 border-t-transparent rounded-full animate-spin" />
+        <span className="text-sm">Carregando projeto...</span>
+      </div>
+    );
+  }
+
+  if (!project) return (
+    <div className="flex flex-col items-center justify-center h-full gap-3 text-slate-500">
+      <span className="text-4xl">📂</span>
+      <span className="text-sm">Projeto não encontrado.</span>
+      <button onClick={() => navigate('/projects')} className="text-orange-400 hover:underline text-sm">
+        Voltar para Projetos
+      </button>
+    </div>
+  );
 
   const handleOpenVideoModal = () => {
       setNewVideoDuration(project.defaultDuration || 'Standard (5-8 min)');
