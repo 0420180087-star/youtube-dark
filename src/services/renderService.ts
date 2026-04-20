@@ -60,15 +60,10 @@ type LoadedScene = {
   ready: boolean;
   videoStarted: boolean;
   originalIndex: number;
+  blobUrl?: string; // for cleanup after render
 };
 
-// ─── Load scene — image only (video CORS is unreliable in canvas) ────────────
-//
-// KEY DESIGN DECISION: Pexels video URLs cannot be drawn to canvas reliably
-// because the CDN blocks crossOrigin canvas access in many browsers.
-// Instead we always use the thumbnail image (which IS accessible) and apply
-// Ken Burns animation to it. This guarantees every scene renders correctly.
-//
+// ─── Load scene — tries video (via blob URL to bypass CORS), falls back to image
 const loadSceneMedia = async (
   scene: {
     startTime: number;
@@ -79,7 +74,64 @@ const loadSceneMedia = async (
   },
   index: number
 ): Promise<LoadedScene> => {
-  // Always load as image — reliable, no CORS issues with canvas
+
+  // 1. Try to load Pexels video — fetch as blob to bypass canvas CORS taint
+  if (scene.videoUrl) {
+    try {
+      // Fetch the video as a blob — this creates a local blob:// URL
+      // that the canvas can draw without CORS taint issues
+      const response = await fetch(scene.videoUrl, {
+        mode: 'cors',
+        headers: { 'Accept': 'video/*' },
+      });
+
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+      const videoBlob = await response.blob();
+      const blobUrl = URL.createObjectURL(videoBlob);
+
+      const video = document.createElement("video");
+      video.muted = true;
+      video.playsInline = true;
+      video.preload = "auto";
+      video.src = blobUrl; // Use local blob URL — no CORS taint
+
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("video load timeout")), 20000);
+        const onReady = () => { clearTimeout(timeout); resolve(); };
+        const onError = () => { clearTimeout(timeout); reject(new Error("video load error")); };
+        video.onloadedmetadata = () => {
+          if (video.readyState >= 3) { onReady(); return; }
+          video.oncanplay = onReady;
+        };
+        video.oncanplaythrough = onReady;
+        video.onerror = onError;
+        video.load();
+      });
+
+      if (video.videoWidth === 0 || video.videoHeight === 0) {
+        throw new Error("video dimensions 0");
+      }
+
+      video.currentTime = 0;
+
+      return {
+        startTime: scene.startTime,
+        duration: scene.duration,
+        effect: scene.effect,
+        element: video,
+        isVideo: true,
+        ready: true,
+        videoStarted: false,
+        originalIndex: index,
+        blobUrl, // store to revoke later
+      } as LoadedScene;
+    } catch (e) {
+      console.warn("⚠️ Vídeo falhou (CORS/rede), usando thumbnail:", e);
+    }
+  }
+
+  // 2. Load as image (thumbnail or Gemini-generated)
   const img = new Image();
   img.crossOrigin = "anonymous";
 
@@ -89,7 +141,7 @@ const loadSceneMedia = async (
       img.onload = () => { clearTimeout(timeout); resolve(); };
       img.onerror = () => {
         clearTimeout(timeout);
-        // Try without crossOrigin as fallback
+        // Try without crossOrigin
         const img2 = new Image();
         img2.onload = () => { clearTimeout(timeout); resolve(); };
         img2.onerror = () => { clearTimeout(timeout); reject(new Error("image error")); };
@@ -161,12 +213,35 @@ const drawScene = (
   width: number,
   height: number,
   alpha: number
-) => {
+): boolean => {
   ctx.save();
   ctx.globalAlpha = Math.min(1, Math.max(0, alpha));
 
-  applyKenBurns(ctx, scene.effect, progress, width, height);
-  ctx.filter = "saturate(110%) contrast(1.03)";
+  if (scene.isVideo) {
+    const vid = scene.element as HTMLVideoElement;
+
+    // Start video playback on first draw — let it play naturally
+    if (!scene.videoStarted) {
+      vid.currentTime = 0;
+      vid.play().catch(() => {});
+      scene.videoStarted = true;
+    }
+
+    // If video isn't ready yet, signal caller to use fallback
+    if (vid.readyState < 2) {
+      ctx.restore();
+      return false;
+    }
+
+    // Videos play naturally — NO currentTime manipulation
+    // This preserves natural video motion (the whole point of using Pexels videos)
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.filter = "none";
+  } else {
+    // Images get Ken Burns + slight enhancement
+    applyKenBurns(ctx, scene.effect, progress, width, height);
+    ctx.filter = "saturate(110%) contrast(1.03)";
+  }
 
   const { w, h } = getDims(scene.element);
   const scale = Math.max(width / w, height / h);
@@ -177,6 +252,7 @@ const drawScene = (
 
   ctx.drawImage(scene.element as CanvasImageSource, dx, dy, dw, dh);
   ctx.restore();
+  return true;
 };
 
 // ─── MAIN RENDER FUNCTION ────────────────────────────────────────────────────
@@ -345,6 +421,15 @@ export const renderVideoHeadless = async (
           recorder.stop();
           try { audioSrc.stop(); } catch { /* ignore */ }
           audioCtx.close();
+          // Cleanup: revoke blob URLs and pause videos to free memory
+          loadedScenes.forEach(s => {
+            if (s.isVideo) {
+              try { (s.element as HTMLVideoElement).pause(); } catch {}
+            }
+            if (s.blobUrl) {
+              try { URL.revokeObjectURL(s.blobUrl); } catch {}
+            }
+          });
           renderPromise.then(resolve).catch(reject);
           return;
         }
@@ -388,7 +473,13 @@ export const renderVideoHeadless = async (
         const fadeOutAlpha = timeLeft < CROSSFADE ? timeLeft / CROSSFADE : 1;
         const alpha = Math.min(fadeInAlpha, fadeOutAlpha);
 
-        drawScene(ctx2d, scene, sceneProgress, width, height, alpha);
+        const drawn = drawScene(ctx2d, scene, sceneProgress, width, height, alpha);
+
+        // If video not ready (readyState < 2), draw previous scene as fallback
+        if (!drawn && sceneIdx > 0) {
+          const fallback = loadedScenes[sceneIdx - 1];
+          drawScene(ctx2d, fallback, 1, width, height, 1);
+        }
 
         // Reset transforms before scanlines
         ctx2d.globalAlpha = 1;
