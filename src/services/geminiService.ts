@@ -573,42 +573,53 @@ function validateScriptDuration(script: ScriptData, targetDuration: string): { t
 
 export const generateVideoScript = async (params: GenerateScriptParams): Promise<ScriptData> => {
   return executeGeminiRequest(async (ai) => {
-      const languagePrompt = params.language ? `IMPORTANT: Write the entire script in ${params.language}.` : "Write the script in English.";
+      const languagePrompt = params.language
+        ? `CRITICAL: Write the ENTIRE script exclusively in ${params.language}. Every word of narratorText must be in ${params.language}.`
+        : "Write the script in English.";
       const toneInstruction = getToneInstruction(params.tone);
       const spec = durationToWordCount(params.targetDuration);
-
       const minWordsPerSegment = Math.round(spec.minWords / spec.segments);
-      const systemInstruction = `You are a world-class cinematic scriptwriter for YouTube videos.
-Channel Theme: "${params.channelTheme}". Target Tone: "${params.tone}". ${languagePrompt}
+
+      // For longer videos skip responseSchema — it truncates long narratorText fields
+      const isLongVideo = spec.minWords >= 750;
+
+      const systemInstruction = `You are a world-class YouTube scriptwriter. Write complete, engaging, word-for-word narrator scripts.
+Channel Theme: "${params.channelTheme}". Target Tone: "${params.tone}".
+${languagePrompt}
 ${toneInstruction}
 
-════════════════════════════════════════
-MANDATORY DURATION REQUIREMENTS — READ CAREFULLY
-════════════════════════════════════════
-TARGET DURATION: ${params.targetDuration}
-TOTAL WORD COUNT: You MUST write between ${spec.minWords} and ${spec.maxWords} words of narrator text across ALL segments combined.
-SEGMENTS: Generate EXACTLY ${spec.segments} segments.
-WORDS PER SEGMENT: Each segment must have a minimum of ${minWordsPerSegment} words in its narratorText field.
-SPEAKING RATE: 150 words per minute. A ${spec.minMinutes}-${spec.maxMinutes} minute video needs ${spec.minWords}-${spec.maxWords} words total.
+TARGET: ${params.targetDuration}
+Total words needed: ${spec.minWords}–${spec.maxWords} words across ALL segments
+Number of segments: EXACTLY ${spec.segments}
+Words per segment: minimum ${minWordsPerSegment} words each
+Speaking rate: 150 words/minute
 
-DO NOT write short summaries. DO NOT use bullet points. WRITE THE FULL SPOKEN SCRIPT word-for-word as the narrator would read it aloud.
-Each narratorText must be multiple dense paragraphs — not a single sentence or short paragraph.
-Failure to meet the word count requirement means the generated video will be far too short.
+RULES for narratorText (MOST IMPORTANT):
+- Write the COMPLETE spoken script word for word
+- Each segment: ${minWordsPerSegment}–${Math.round(spec.maxWords / spec.segments)} words of dense narrative
+- Multiple paragraphs — NO bullet points, NO summaries
+- Full storytelling sentences like a documentary voiceover
+- estimatedDuration per segment = (word count / 150) * 60 seconds
 
-estimatedDuration for each segment = (word count of that segment's narratorText) / 150 × 60  [in seconds]
-════════════════════════════════════════`;
+OUTPUT: Valid JSON only with fields: title, description, brainstorming[], narrativeOutline[], segments[]
+Each segment: sectionTitle, visualDescriptions[], narratorText, estimatedDuration`;
 
-      let prompt = `Topic: "${params.topic}".\n`; 
-      if (params.additionalContext) { prompt += `Context: ${params.additionalContext}\n`; } 
-      if (params.libraryContext) { 
-          prompt += `\nLIBRARY CONTEXT:\n${params.libraryContext.substring(0, 20000)}\n`; 
+      let prompt = `Topic: "${params.topic}".\n`;
+      if (params.additionalContext) { prompt += `Context: ${params.additionalContext}\n`; }
+      if (params.libraryContext) {
+          prompt += `\nLIBRARY CONTEXT:\n${params.libraryContext.substring(0, 20000)}\n`;
       }
-      
-      const scriptConfig = {
-          systemInstruction: systemInstruction,
-          responseMimeType: "application/json",
+      prompt += `\nGenerate EXACTLY ${spec.segments} segments with at least ${minWordsPerSegment} words per narratorText. Total: ${spec.minWords}–${spec.maxWords} words.`;
+
+      const scriptConfig: any = {
+          systemInstruction,
           maxOutputTokens: 65536,
-          responseSchema: {
+          responseMimeType: "application/json",
+      };
+
+      // Only use responseSchema for short videos — it truncates long narratorText
+      if (!isLongVideo) {
+          scriptConfig.responseSchema = {
               type: Type.OBJECT,
               properties: {
                   title: { type: Type.STRING },
@@ -629,13 +640,12 @@ estimatedDuration for each segment = (word count of that segment's narratorText)
                   }
               },
               propertyOrdering: ["brainstorming", "narrativeOutline", "title", "description", "segments"]
-          }
-      };
+          };
+      }
 
       let fullText = '';
+      const timeoutMs = isLongVideo ? 120_000 : 90_000;
 
-      // Try streaming first — with a 90s timeout watchdog
-      // If the stream stalls (no chunks for 90s), fall back to non-streaming
       try {
           const streamResult = await Promise.race([
               (async () => {
@@ -654,14 +664,13 @@ estimatedDuration for each segment = (word count of that segment's narratorText)
                   return text;
               })(),
               new Promise<never>((_, reject) =>
-                  setTimeout(() => reject(new Error('stream_timeout')), 90_000)
+                  setTimeout(() => reject(new Error('stream_timeout')), timeoutMs)
               ),
           ]);
           fullText = streamResult as string;
       } catch (streamErr: any) {
           if (streamErr.message === 'stream_timeout' || !fullText) {
-              // Stream timed out or returned nothing — fall back to regular (non-streaming) call
-              console.warn('[DarkStream AI] Stream travou ou veio vazio. Usando fallback não-streaming...');
+              console.warn('[DarkStream AI] Stream travou. Usando fallback...');
               if (params.onProgress) params.onProgress('__fallback__');
               const fallbackResponse = await ai.models.generateContent({
                   model: "gemini-2.5-flash",
@@ -674,43 +683,75 @@ estimatedDuration for each segment = (word count of that segment's narratorText)
           }
       }
 
-      if (!fullText) throw new Error("No script generated"); 
-      let jsonString = fullText.replace(/```json/g, '').replace(/```/g, '').trim(); 
+      if (!fullText) throw new Error("No script generated");
+      let jsonString = fullText.replace(/```json/g, '').replace(/```/g, '').trim();
       let script: ScriptData;
-      try { 
-          script = JSON.parse(jsonString) as ScriptData; 
-      } catch (parseError) { 
-          console.warn("JSON Parse failed, attempting repair..."); 
-          try { 
-              const repaired = repairJson(jsonString); 
-              script = JSON.parse(repaired) as ScriptData; 
-          } catch (repairError) { 
-              throw new Error("Generated script was incomplete. Please try again."); 
-          } 
+      try {
+          script = JSON.parse(jsonString) as ScriptData;
+      } catch {
+          try {
+              script = JSON.parse(repairJson(jsonString)) as ScriptData;
+          } catch {
+              throw new Error("Generated script was incomplete. Please try again.");
+          }
       }
 
-      // Validate and annotate
+      // Recalculate estimatedDuration from real word count — never trust the model's guess
+      if (script.segments?.length > 0) {
+          script.segments = script.segments.map(seg => {
+              const wc = (seg.narratorText || '').split(/\s+/).filter(w => w.length > 0).length;
+              return { ...seg, estimatedDuration: Math.max(Math.round((wc / 150) * 60), 3) };
+          });
+      }
+
       const validation = validateScriptDuration(script, params.targetDuration);
       (script as any).estimatedDurationMinutes = validation.estimatedMinutes;
       (script as any).totalWords = validation.totalWords;
       if (validation.warning) {
-        (script as any).durationWarning = validation.warning;
+          (script as any).durationWarning = validation.warning;
+          console.warn('[DarkStream AI]', validation.warning);
       }
 
-      // If script is way too short (< 60% of min target), expand each segment
-      const spec2 = durationToWordCount(params.targetDuration);
-      if (validation.totalWords < spec2.minWords * 0.6 && script.segments?.length > 0) {
-        console.warn(`[DarkStream AI] ⚠️ Script muito curto (${validation.totalWords} palavras). Expandindo segmentos automaticamente...`);
-        const wordsNeeded = spec2.minWords - validation.totalWords;
-        const wordsPerSegment = Math.ceil(wordsNeeded / script.segments.length);
-        // Mark each segment as needing expansion (for UI feedback)
-        (script as any).needsExpansion = true;
-        (script as any).expansionNote = `Script gerado com ${validation.totalWords} palavras. Alvo: ${spec2.minWords}-${spec2.maxWords} palavras para ${params.targetDuration}.`;
+      // If script too short (<65% of target), expand with a second call
+      const specCheck = durationToWordCount(params.targetDuration);
+      if (validation.totalWords < specCheck.minWords * 0.65 && script.segments?.length > 0) {
+          console.warn(`[DarkStream AI] Script curto (${validation.totalWords}/${specCheck.minWords}w). Expandindo...`);
+          try {
+              const expandPrompt = `This YouTube script is too short (${validation.totalWords} words, need ${specCheck.minWords}). Expand EACH segment's narratorText to reach the target. Keep the same JSON structure, sectionTitle, and visualDescriptions. Only expand narratorText with more detailed storytelling. ${languagePrompt}
+
+SCRIPT TO EXPAND:
+${JSON.stringify({ segments: script.segments })}
+
+Return complete JSON with same structure but longer narratorText in each segment.`;
+
+              const expandRes = await ai.models.generateContent({
+                  model: "gemini-2.5-flash",
+                  contents: expandPrompt,
+                  config: { maxOutputTokens: 65536, responseMimeType: "application/json" },
+              });
+              const expandedJson = (expandRes.text || '').replace(/```json/g, '').replace(/```/g, '').trim();
+              const expanded = JSON.parse(repairJson(expandedJson));
+
+              const expandedSegments = expanded.segments || expanded;
+              if (Array.isArray(expandedSegments) && expandedSegments.length === script.segments.length) {
+                  script.segments = expandedSegments.map((seg: any) => {
+                      const wc = (seg.narratorText || '').split(/\s+/).filter((w: string) => w.length > 0).length;
+                      return { ...seg, estimatedDuration: Math.max(Math.round((wc / 150) * 60), 3) };
+                  });
+                  const ev = validateScriptDuration(script, params.targetDuration);
+                  (script as any).estimatedDurationMinutes = ev.estimatedMinutes;
+                  (script as any).totalWords = ev.totalWords;
+                  console.log(`[DarkStream AI] ✅ Expansão: ${validation.totalWords} → ${ev.totalWords} palavras`);
+              }
+          } catch (expandErr) {
+              console.warn('[DarkStream AI] Expansão falhou, mantendo script original');
+          }
       }
 
       return script;
   });
 };
+
 
 export const generateMissingNarratorTexts = async (topic: string, segments: ScriptSegment[], tone: string, language: string = 'English'): Promise<ScriptSegment[]> => {
     return executeGeminiRequest(async (ai) => {
