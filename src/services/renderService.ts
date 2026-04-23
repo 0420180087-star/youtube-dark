@@ -390,11 +390,19 @@ export const renderVideoHeadless = async (
   audioSrc.connect(audioDest);
   stream.addTrack(audioDest.stream.getAudioTracks()[0]);
 
-  const mimeType = MediaRecorder.isTypeSupported("video/webm; codecs=vp9")
+  // Prefer MP4/H.264 — YouTube processes it instantly vs hours for WebM/VP9
+  // WebM from MediaRecorder has irregular timestamps that cause YouTube to hang
+  const mimeType = MediaRecorder.isTypeSupported("video/mp4; codecs=avc1,mp4a.40.2")
+    ? "video/mp4; codecs=avc1,mp4a.40.2"
+    : MediaRecorder.isTypeSupported("video/mp4")
+    ? "video/mp4"
+    : MediaRecorder.isTypeSupported("video/webm; codecs=vp9")
     ? "video/webm; codecs=vp9"
     : MediaRecorder.isTypeSupported("video/webm; codecs=vp8")
     ? "video/webm; codecs=vp8"
     : "video/webm";
+
+  console.log(`[Render] Using codec: ${mimeType}`);
 
   const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 12_000_000 });
   const chunks: Blob[] = [];
