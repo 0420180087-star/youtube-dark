@@ -89,7 +89,8 @@ export const uploadVideoToYouTube = async (
                 Authorization: `Bearer ${accessToken}`,
                 "Content-Type": "application/json; charset=UTF-8",
                 "X-Upload-Content-Length": videoFile.size.toString(),
-                "X-Upload-Content-Type": videoFile.type || "video/mp4",
+                // Force mp4 content type when file is mp4 for faster YouTube processing
+                "X-Upload-Content-Type": videoFile.type?.includes('mp4') ? 'video/mp4' : (videoFile.type || "video/mp4"),
             },
             body: JSON.stringify(body),
         }
@@ -117,19 +118,10 @@ export const uploadVideoToYouTube = async (
         await uploadThumbnail(accessToken, videoId, thumbnailUrl);
     }
 
-    // ── 6. Wait for YouTube to finish processing ─────
-    if (videoId) {
-        if (onProgress) onProgress(95);
-        console.log('[YouTube] Aguardando processamento do YouTube...');
-        try {
-            await waitForProcessing(accessToken, videoId, onProgress);
-        } catch (e: any) {
-            // Non-fatal: video was uploaded, just log the processing issue
-            console.warn('[YouTube] Aviso de processamento:', e.message);
-        }
-    }
-
+    // Upload complete — YouTube processes in background (we do NOT wait)
+    // WebM/VP9 can take hours; MP4/H.264 takes minutes — handled by preferring MP4 at render time
     if (onProgress) onProgress(100);
+    console.log(`[YouTube] ✅ Upload concluído! ID: ${videoId} — YouTube processará em background.`);
     return videoId;
 };
 
