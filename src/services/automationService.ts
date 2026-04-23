@@ -290,7 +290,13 @@ export async function stepUploadToYouTube(
     callbacks.onProgress('upload', status);
   });
 
-  const file = new File([blob], 'video.webm', { type: 'video/webm' });
+  // Detect actual format from blob type — use MP4 when available (faster YouTube processing)
+  const blobType = blob.type || 'video/webm';
+  const isMP4 = blobType.includes('mp4');
+  const fileName = isMP4 ? 'video.mp4' : 'video.webm';
+  const fileType = isMP4 ? 'video/mp4' : 'video/webm';
+  const file = new File([blob], fileName, { type: fileType });
+  console.log(`[Upload] File format: ${fileType} (${(blob.size / 1024 / 1024).toFixed(1)}MB)`);
 
   callbacks.onProgress('upload', 'Enviando para YouTube...');
   const ytbId = await uploadVideoToYouTube(project.youtubeAccessToken!, file, metadata, thumbnailUrl);
@@ -584,7 +590,9 @@ export async function stepGenerateAndUploadShort(
       callbacks.onProgress('shorts', `Renderizando Short: ${status}`);
     });
 
-    const shortFile = new File([shortBlob], 'short.webm', { type: 'video/webm' });
+    const shortBlobType = shortBlob.type || 'video/webm';
+    const shortIsMP4 = shortBlobType.includes('mp4');
+    const shortFile = new File([shortBlob], shortIsMP4 ? 'short.mp4' : 'short.webm', { type: shortIsMP4 ? 'video/mp4' : 'video/webm' });
 
     // 6. Build Shorts metadata
     const shortsMetadata = {
