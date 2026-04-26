@@ -243,24 +243,19 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const project = projects.find(p => p.id === projectId);
     if (!project?.scheduleSettings?.autoGenerate) return { nextRunDate: null, isEligible: false };
     
-    // Use persisted nextScheduledRun if available
     if (project.scheduleSettings.nextScheduledRun) {
       const next = new Date(project.scheduleSettings.nextScheduledRun);
       return { nextRunDate: next, isEligible: next <= new Date() };
     }
 
-    // Calculate from last video
+    // nextScheduledRun not yet persisted — calculate on the fly.
+    // Do NOT call updateProject here: this function is used during render
+    // and a side-effect would trigger setProjects → re-render → infinite loop.
+    // scheduleNextRun() is called explicitly after each pipeline run.
     const sortedVideos = [...project.videos].sort((a, b) => 
       new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
-    const lastVideo = sortedVideos[0];
-    const next = calculateNextRunTime(project.scheduleSettings, lastVideo?.createdAt);
-    
-    // Persist it
-    updateProject(projectId, { 
-      scheduleSettings: { ...project.scheduleSettings, nextScheduledRun: next.toISOString() } 
-    });
-    
+    const next = calculateNextRunTime(project.scheduleSettings, sortedVideos[0]?.createdAt);
     return { nextRunDate: next, isEligible: next <= new Date() };
   };
 
@@ -286,19 +281,17 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   // --- AUTO-PILOT ENGINE ---
   useEffect(() => {
-    if (automationInterval.current) clearInterval(automationInterval.current);
-    
+    // Registered ONCE on mount. The callback always reads from projectsRef.current
+    // (kept in sync by a separate effect) so it never needs [projects] as a dep.
+    // Having [projects] here caused the interval to cancel+restart on every save,
+    // resetting the 60s clock and potentially preventing the auto-pilot from ever firing.
     automationInterval.current = window.setInterval(async () => {
       if (isRunningAutomation.current) return;
       
       const eligibleProject = projectsRef.current.find(p => {
         if (!p.scheduleSettings?.autoGenerate) return false;
-        // Token comes from AuthContext (userEmailRef is a proxy; the real token
-        // check is done inside runFullPipeline via accessTokenRef)
         if (!p.isYoutubeConnected || !p.youtubeChannelData) return false;
-        
-        const info = getNextAutoRunInfoFromRef(p);
-        return info.isEligible;
+        return getNextAutoRunInfoFromRef(p).isEligible;
       });
 
       if (eligibleProject) {
@@ -307,7 +300,8 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }, 60000);
 
     return () => { if (automationInterval.current) clearInterval(automationInterval.current); };
-  }, [projects]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Non-state version for interval callback
   const getNextAutoRunInfoFromRef = (project: Project) => {

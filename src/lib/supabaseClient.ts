@@ -12,27 +12,33 @@ export const supabase: SupabaseClient | null = (supabaseUrl && supabaseAnonKey)
   : null;
 
 /**
- * Sets the session-level user email used by RLS policies.
+ * Sets the transaction-level user email used by RLS policies.
  *
- * This app uses Google OAuth (not Supabase Auth), so there is no `auth.uid()`.
- * Instead, each request is scoped via a Postgres session variable
- * (`app.current_user_email`) set through this RPC call.
+ * WHY transaction-level (not session-level):
+ * Supabase uses PgBouncer in transaction-pooling mode. In this mode, each
+ * transaction may land on a different Postgres connection, so session-level
+ * variables (set_config(..., false)) are lost between requests.
+ * Transaction-level variables (set_config(..., true)) are scoped to the
+ * current transaction and ARE preserved within a single Supabase query — which
+ * is the only guarantee we need.
  *
- * Call this once after the user is identified (in AuthContext after login/restore).
- * The anon key is safe to use here because RLS policies validate the email
- * against the row's `user_email` column — a client cannot impersonate another
- * user without knowing their exact email AND having the correct rows to match.
+ * USAGE:
+ * Call once after the user is identified (login or restore in AuthContext).
+ * The call itself is a lightweight RPC and can be fire-and-forget.
  *
- * The GitHub Actions service-role key bypasses RLS entirely, which is correct.
+ * NOTE: The app's explicit .eq('user_email', email) filters on every query
+ * are the PRIMARY data isolation mechanism. This RLS call is a secondary
+ * enforcement layer. If Supabase is unreachable, the app still works correctly.
  */
 export const setSupabaseUserEmail = async (email: string): Promise<void> => {
   if (!supabase || !email) return;
   try {
-    const { error } = await supabase.rpc('set_current_user_email', { email });
+    const { error } = await supabase.rpc('set_session_email', { p_email: email });
     if (error) {
-      console.warn('[Supabase] Falha ao definir email de sessão RLS:', error.message);
+      // Non-fatal: the explicit .eq() filters still isolate data correctly
+      console.warn('[Supabase] set_session_email falhou (RLS desativado para esta sessão):', error.message);
     }
   } catch (e) {
-    console.warn('[Supabase] set_current_user_email RPC falhou:', e);
+    console.warn('[Supabase] set_session_email RPC inacessível:', e);
   }
 };

@@ -358,8 +358,8 @@ export const StudioTab: React.FC<StudioTabProps> = ({
         )}
         <canvas
           ref={studioCanvasRef}
-          width={1920}
-          height={isShort ? 1920 : (isSquare ? 1080 : 1080)}
+          width={isShort ? 1080 : 1920}
+          height={isShort ? 1920 : 1080}
           className="w-full h-full object-contain z-10"
         />
         {video.script?.segments[currentSegmentIndex] && (

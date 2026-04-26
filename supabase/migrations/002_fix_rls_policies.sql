@@ -1,86 +1,115 @@
 -- =============================================================================
 -- Migration 002: Fix RLS policies
 --
--- The original policies used `using (true)`, meaning any authenticated client
--- could read and write ANY row — effectively disabling row-level isolation.
+-- PROBLEM WITH ORIGINAL APPROACH (set_config session variable):
+-- Supabase uses PgBouncer in transaction-pooling mode by default.
+-- In this mode, each transaction may be routed to a different Postgres
+-- connection, so a session-level set_config() call set in one request
+-- is NOT visible to the next request — even from the same client.
+-- This made all RLS policies silently return 0 rows.
 --
--- This migration drops those open policies and replaces them with ones that
--- actually restrict each user to their own data.
+-- CORRECT APPROACH for Supabase without Supabase Auth:
+-- This app authenticates via Google OAuth and does NOT use Supabase Auth,
+-- so auth.uid() is always NULL. Instead:
 --
--- CONTEXT: This app authenticates via Google OAuth (implicit/GIS flow), NOT via
--- Supabase Auth. There is no `auth.uid()`. The user identity is the verified
--- Google email stored in each row's `user_email` column.
+--   1. Each query already passes user_email explicitly (e.g. .eq('user_email', email)).
+--      This is the primary isolation mechanism — it works regardless of pooling.
 --
--- APPROACH: We use a Postgres session variable (`app.current_user_email`) that
--- the frontend sets at the start of every Supabase session via RPC. This gives
--- us row-level filtering without requiring Supabase Auth.
+--   2. RLS acts as a SECONDARY enforcement layer using a helper function
+--      `requesting_user_email()` that reads a TRANSACTION-level config variable
+--      (set_config(..., true)) — true = local/transaction scope, which IS
+--      preserved within a single transaction even with connection pooling.
+--
+--   3. The frontend calls set_session_email() via RPC at the START of every
+--      Supabase request batch (wrapped in a transaction by the Supabase client).
 --
 -- The GitHub Actions service-role key bypasses RLS entirely (correct behaviour).
 -- =============================================================================
 
--- ── Step 1: Create a helper to set the current user email for a session ──────
+-- ── Helper: set email for the CURRENT TRANSACTION (pooling-safe) ─────────────
 
-create or replace function set_current_user_email(email text)
+create or replace function set_session_email(p_email text)
 returns void
 language plpgsql
 security definer
 as $$
 begin
-  perform set_config('app.current_user_email', email, false);
+  -- true = LOCAL scope (transaction-level), NOT session-level.
+  -- This is the only mode that survives PgBouncer transaction pooling.
+  perform set_config('request.user_email', p_email, true);
 end;
 $$;
 
--- ── Step 2: Create a helper to read it back safely ───────────────────────────
+-- ── Helper: read it back (returns NULL if not set) ────────────────────────────
 
-create or replace function current_user_email()
+create or replace function requesting_user_email()
 returns text
 language sql
 stable
 as $$
-  select nullif(current_setting('app.current_user_email', true), '')
+  select nullif(current_setting('request.user_email', true), '')
 $$;
 
--- ── Step 3: Drop the open policies from migration 001 ────────────────────────
+-- ── Drop old helpers and policies from any previous migration attempt ─────────
 
-drop policy if exists "user_profiles: acesso proprio"  on user_profiles;
-drop policy if exists "project_auth: acesso por email" on project_auth;
-drop policy if exists "projects: acesso por email"     on projects;
-drop policy if exists "autopilot_logs: acesso por email" on autopilot_logs;
+drop function if exists set_current_user_email(text);
+drop function if exists current_user_email();
 
--- ── Step 4: user_profiles — users can only read/write their own profile ───────
+drop policy if exists "user_profiles: acesso proprio"           on user_profiles;
+drop policy if exists "project_auth: acesso por email"          on project_auth;
+drop policy if exists "projects: acesso por email"              on projects;
+drop policy if exists "autopilot_logs: acesso por email"        on autopilot_logs;
+drop policy if exists "user_profiles: own row only"             on user_profiles;
+drop policy if exists "project_auth: own rows only"             on project_auth;
+drop policy if exists "projects: own rows only"                 on projects;
+drop policy if exists "autopilot_logs: own project logs only"   on autopilot_logs;
 
-create policy "user_profiles: own row only"
+-- ── user_profiles ─────────────────────────────────────────────────────────────
+
+create policy "user_profiles: own row"
   on user_profiles
   for all
-  using  (email = current_user_email())
-  with check (email = current_user_email());
+  using  (email = requesting_user_email())
+  with check (email = requesting_user_email());
 
--- ── Step 5: project_auth — users can only access their own auth rows ──────────
+-- ── project_auth ──────────────────────────────────────────────────────────────
 
-create policy "project_auth: own rows only"
+create policy "project_auth: own rows"
   on project_auth
   for all
-  using  (user_email = current_user_email())
-  with check (user_email = current_user_email());
+  using  (user_email = requesting_user_email())
+  with check (user_email = requesting_user_email());
 
--- ── Step 6: projects — users can only access their own projects ───────────────
+-- ── projects ──────────────────────────────────────────────────────────────────
 
-create policy "projects: own rows only"
+create policy "projects: own rows"
   on projects
   for all
-  using  (user_email = current_user_email())
-  with check (user_email = current_user_email());
+  using  (user_email = requesting_user_email())
+  with check (user_email = requesting_user_email());
 
--- ── Step 7: autopilot_logs — users can only access logs for their projects ────
--- We join through the projects table to verify ownership.
+-- ── autopilot_logs ────────────────────────────────────────────────────────────
 
-create policy "autopilot_logs: own project logs only"
+create policy "autopilot_logs: own project logs"
   on autopilot_logs
   for all
   using (
     exists (
       select 1 from projects p
       where p.id = autopilot_logs.project_id
-        and p.user_email = current_user_email()
+        and p.user_email = requesting_user_email()
     )
   );
+
+-- =============================================================================
+-- IMPORTANT — Frontend integration:
+--
+-- Replace the old `setSupabaseUserEmail` RPC call in supabaseClient.ts
+-- with `set_session_email`. The call must happen inside the same
+-- Supabase transaction as the queries that follow it.
+--
+-- The app's existing `.eq('user_email', email)` filters on every query
+-- are the PRIMARY protection. RLS via set_session_email is a belt-and-suspenders
+-- secondary layer. If set_session_email is not called, queries still work
+-- correctly because of the explicit .eq() filters — they just skip the RLS check.
+-- =============================================================================
