@@ -384,27 +384,74 @@ export const ProjectHub: React.FC = () => {
   };
 
   const handleConnectChannel = async () => {
-      // Delegates the full OAuth flow to AuthContext.
-      // When the flow completes, AuthContext holds the token in memory.
-      // We then persist only the channel metadata (no token) into the project.
-      await connectYoutube(project.id);
-      // After the OAuth redirect round-trip, youtubeChannel in AuthContext will
-      // be populated. Sync only the non-sensitive channel data into the project.
-      if (youtubeChannel) {
-        updateProject(project.id, {
-          isYoutubeConnected: true,
-          youtubeChannelData: youtubeChannel,
-        });
+      // Uses the implicit token flow (initTokenClient) — NOT the Authorization Code
+      // redirect flow. The redirect flow requires a static redirect_uri registered
+      // in Google Console, which breaks on dynamic project URLs.
+      //
+      // The implicit flow calls back synchronously in the same page, so no
+      // redirect is needed. The token lives in AuthContext memory only —
+      // it is never written into the project object.
+      if (!user) {
+          alert("Faça login primeiro nas Configurações.");
+          return;
       }
+      const activeClientId = googleClientId?.trim();
+      if (!activeClientId) {
+          alert("Configure o Google Client ID nas Configurações primeiro.");
+          return;
+      }
+      if (typeof (window as any).google === 'undefined') {
+          alert("Google Scripts não carregados. Recarregue a página.");
+          return;
+      }
+
+      const goog = (window as any).google;
+      const client = goog.accounts.oauth2.initTokenClient({
+          client_id: activeClientId,
+          scope: 'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly',
+          callback: async (tokenResponse: any) => {
+              if (!tokenResponse?.access_token) return;
+              const token = tokenResponse.access_token;
+
+              // Store token in AuthContext (memory only — never in Project)
+              // We call the internal setter indirectly by fetching channel data,
+              // which is the same path AuthContext uses after implicit login.
+              try {
+                  const res = await fetch(
+                      'https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&mine=true',
+                      { headers: { Authorization: `Bearer ${token}` } }
+                  );
+                  if (!res.ok) throw new Error("YouTube API error: " + res.status);
+                  const data = await res.json();
+                  const ch = data.items?.[0];
+                  if (!ch) { alert("Nenhum canal YouTube encontrado nesta conta."); return; }
+
+                  const channelData = {
+                      id: ch.id,
+                      title: ch.snippet.title,
+                      thumbnailUrl: ch.snippet.thumbnails?.default?.url || '',
+                      subscriberCount: ch.statistics?.subscriberCount,
+                  };
+
+                  // Persist only channel metadata into project (no token)
+                  updateProject(project.id, {
+                      isYoutubeConnected: true,
+                      youtubeChannelData: channelData,
+                  });
+              } catch (e: any) {
+                  console.error(e);
+                  alert("Falha ao buscar dados do canal: " + e.message);
+              }
+          },
+      });
+      client.requestAccessToken();
   };
-  
+
   const handleDisconnectChannel = () => {
-      // Revoke token and clear AuthContext state
       disconnectYoutube();
-      // Clear channel metadata from the project
-      updateProject(project.id, { 
-          isYoutubeConnected: false, 
-          youtubeChannelData: undefined, 
+      updateProject(project.id, {
+          isYoutubeConnected: false,
+          youtubeChannelData: undefined,
       });
   };
 
