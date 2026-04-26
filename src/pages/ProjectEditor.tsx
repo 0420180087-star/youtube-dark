@@ -9,10 +9,13 @@ import {
     generateDarkAmbience, decodeAudioData, mergeAudioBuffers, 
     audioBufferToBase64, generateThumbnail, generateVideoMetadata,
     generateSingleNarratorText, generateMissingNarratorTexts,
-    generateThumbnailHook, clearExhaustedKeys
+    generateThumbnailHook, clearExhaustedKeys, cancelGeminiSession
 } from '../services/geminiService';
 import { searchContextualMedia } from '../services/pexelsService';
 import { uploadVideoToYouTube } from '../services/youtubeService';
+import {
+  ScriptTab, AudioTab, VisualsTab, StudioTab, PublishTab,
+} from './ProjectEditorTabs';
 import { 
   FileText, Mic, Image as ImageIcon, Upload, Loader2, Play, CheckCircle, 
   Youtube, Film, ChevronRight, Wand2, RefreshCw, ArrowLeft, 
@@ -50,79 +53,43 @@ const YOUTUBE_CATEGORIES = [
     { id: '19', name: 'Travel & Events' },
 ];
 
-// Improved Easing Functions for Snappy Movements
-const easeInOutCubic = (x: number): number => x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
-const easeOutExpo = (x: number): number => x === 1 ? 1 : 1 - Math.pow(2, -10 * x);
-// Elastic for Pulse
-const easeElastic = (x: number): number => {
-    const c4 = (2 * Math.PI) / 3;
-    return x === 0 ? 0 : x === 1 ? 1 : Math.pow(2, -10 * x) * Math.sin((x * 10 - 0.75) * c4) + 1;
-};
+// easeInOutCubic, easeOutExpo, easeElastic were used only by the inline render
+// engine that has been removed. Render logic now lives exclusively in renderService.ts.
 
-// --- RENDER ENGINE HELPERS ---
+// ── STUDIO PREVIEW HELPERS (used only by the in-browser preview player) ──────
+// These are intentionally simpler than the render engine versions — the preview
+// doesn't need frame-perfect quality, only interactive responsiveness.
 
-// Applies filters like Grayscale, High Contrast, etc. for visual variety
 const applyVisualFilter = (
-    ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, 
+    ctx: CanvasRenderingContext2D,
     filterType: 'none' | 'bw' | 'high-contrast' | 'sepia' | 'saturate',
-    intensity: number = 1
+    _intensity: number = 1
 ) => {
-    if (filterType === 'none') {
-        ctx.filter = 'none';
-        return;
-    }
-    
-    // Dopamine styling: High Saturation helps retention
-    if (filterType === 'saturate') {
-        ctx.filter = `saturate(${100 + (intensity * 100)}%) contrast(1.1)`;
-    } else if (filterType === 'bw') {
-        ctx.filter = 'grayscale(100%) contrast(1.2)';
-    } else if (filterType === 'high-contrast') {
-        ctx.filter = 'contrast(1.5) saturate(1.2)';
-    } else if (filterType === 'sepia') {
-        ctx.filter = 'sepia(0.8) contrast(1.1)';
-    }
+    if (filterType === 'none') { ctx.filter = 'none'; return; }
+    if (filterType === 'saturate') { ctx.filter = 'saturate(150%) contrast(1.1)'; }
+    else if (filterType === 'bw') { ctx.filter = 'grayscale(100%) contrast(1.2)'; }
+    else if (filterType === 'high-contrast') { ctx.filter = 'contrast(1.5) saturate(1.2)'; }
+    else if (filterType === 'sepia') { ctx.filter = 'sepia(0.8) contrast(1.1)'; }
 };
 
-// Simulates Film Scanlines (Overlay)
-const drawScanlines = (ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, width: number, height: number, time: number) => {
-    const isVideo = !!(ctx as any)._isDrawingVideo;
-    if (isVideo) return; // Skip scanlines for stock videos to preserve quality
-
+const drawScanlines = (ctx: CanvasRenderingContext2D, width: number, height: number, _time: number) => {
     ctx.save();
     ctx.globalCompositeOperation = 'overlay';
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.15)'; // Subtler
-    // Moving scanline
-    const lineY = (time * 100) % height;
-    ctx.fillRect(0, lineY, width, 1); // Thinner
-    // Static Grid
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.05)'; // Subtler
-    for(let i=0; i<height; i+=8) { // Wider gap
-        ctx.fillRect(0, i, width, 1);
-    }
+    ctx.fillStyle = 'rgba(0,0,0,0.05)';
+    for (let i = 0; i < height; i += 8) ctx.fillRect(0, i, width, 1);
     ctx.restore();
 };
 
-// Helper to draw effects on canvas (Used by both Studio Player and Renderer)
 const calculateTransform = (
-    ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, 
-    effect: VisualEffect, 
-    rawProgress: number, 
-    width: number, 
-    height: number,
-    beatImpulse: number = 0,
-    elapsedTime: number = 0
+    ctx: CanvasRenderingContext2D,
+    _effect: VisualEffect,
+    _progress: number,
+    width: number,
+    height: number
 ) => {
-    ctx.setTransform(1, 0, 0, 1, 0, 0); // Reset
-    
-    const centerX = width / 2;
-    const centerY = height / 2;
-
-    // Static transform: just a slight scale to ensure full coverage, no movement
-    const scale = 1.05; 
-    ctx.translate(centerX, centerY); 
-    ctx.scale(scale, scale); 
-    ctx.translate(-centerX, -centerY);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    const cx = width / 2; const cy = height / 2;
+    ctx.translate(cx, cy); ctx.scale(1.05, 1.05); ctx.translate(-cx, -cy);
 };
 
 const VOICE_OPTIONS = [
@@ -166,7 +133,7 @@ const EmptyState: React.FC<{ icon: React.ElementType; title: string; description
 export const ProjectEditor: React.FC = () => {
   const { projectId, videoId } = useParams<{ projectId: string; videoId: string }>();
   const { getProject, getVideo, updateVideo, updateProject } = useProjects();
-  const { googleClientId } = useAuth();
+  const { googleClientId, accessToken } = useAuth();
   
   const project = getProject(projectId || '');
   const video = getVideo(projectId || '', videoId || '');
@@ -191,6 +158,16 @@ export const ProjectEditor: React.FC = () => {
   const [isPreviewingVoice, setIsPreviewingVoice] = useState(false);
   const [previewingSegmentAudio, setPreviewingSegmentAudio] = useState<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  // AbortControllers for cancellable generation operations.
+  // If the component unmounts or the user navigates away mid-generation,
+  // these are aborted in the cleanup useEffect below.
+  const audioGenAbortRef = useRef<AbortController | null>(null);
+  const visualsGenAbortRef = useRef<AbortController | null>(null);
+
+  // Stable session IDs used to cancel in-flight Gemini queue entries on unmount.
+  // We use refs so the IDs survive re-renders without triggering effects.
+  const audioSessionId = useRef(`editor-audio-${Math.random().toString(36).slice(2)}`);
+  const visualsSessionId = useRef(`editor-visuals-${Math.random().toString(36).slice(2)}`);
   const [isGeneratingVisuals, setIsGeneratingVisuals] = useState(false);
   const [generatingIndex, setGeneratingIndex] = useState<number | null>(null);
   const [generatingNarratorIndex, setGeneratingNarratorIndex] = useState<number | null>(null);
@@ -236,7 +213,18 @@ export const ProjectEditor: React.FC = () => {
     }
   }, [musicVolume, isMusicEnabled]);
 
-  useEffect(() => { return () => stopPlayback(); }, []);
+  useEffect(() => {
+    return () => {
+      stopPlayback();
+      // Cancel any in-flight generation when the component unmounts.
+      // This hits both the AbortController (stops the loop) and the Gemini
+      // queue (rejects any ops still waiting to execute).
+      audioGenAbortRef.current?.abort();
+      visualsGenAbortRef.current?.abort();
+      cancelGeminiSession(audioSessionId.current);
+      cancelGeminiSession(visualsSessionId.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (!video) return;
@@ -396,6 +384,11 @@ export const ProjectEditor: React.FC = () => {
   const handlePreviewVoice = async () => { if(isPreviewingVoice) return; setIsPreviewingVoice(true); try { const b = await generateVoiceover("Preview.", selectedVoice, scriptTone); const ctx = new AudioContext({sampleRate:24000}); const ab = await decodeAudioData(b,ctx); const s = ctx.createBufferSource(); s.buffer=ab; s.connect(ctx.destination); s.start(0); s.onended=()=>{setIsPreviewingVoice(false); ctx.close();}; } catch(e){setIsPreviewingVoice(false);} };
   const handlePreviewSegment = async (idx:number, txt:string) => { if(previewingSegmentAudio!==null) return; setPreviewingSegmentAudio(idx); try { const b = await generateVoiceover(txt, selectedVoice, scriptTone); const ctx = new AudioContext({sampleRate:24000}); const ab = await decodeAudioData(b,ctx); const s = ctx.createBufferSource(); s.buffer=ab; s.connect(ctx.destination); s.start(0); s.onended=()=>{setPreviewingSegmentAudio(null); ctx.close();}; } catch(e){setPreviewingSegmentAudio(null);} };
   const handleGenerateAudio = async () => {
+      // Cancel any previous in-flight audio generation
+      audioGenAbortRef.current?.abort();
+      const abort = new AbortController();
+      audioGenAbortRef.current = abort;
+
       setIsConfigModalOpen(false);
       setIsGeneratingAudio(true);
       const b: AudioBuffer[] = [];
@@ -406,10 +399,11 @@ export const ProjectEditor: React.FC = () => {
       try {
           const segs = video!.script!.segments;
           for (let i = 0; i < segs.length; i++) {
+              if (abort.signal.aborted) break;
               setGeneratingAudioIndex(i);
               const s = segs[i];
               // Pass scriptTone so voice style matches the video tone
-              const buf = await generateVoiceover(s.narratorText || s.sectionTitle, selectedVoice, scriptTone);
+              const buf = await generateVoiceover(s.narratorText || s.sectionTitle, selectedVoice, scriptTone, audioSessionId.current);
               const ab = await decodeAudioData(buf, ctx);
               b.push(ab);
               dur += ab.duration;
@@ -450,17 +444,22 @@ export const ProjectEditor: React.FC = () => {
       } 
   };
   
-  const handleGenerateAllVisuals = async (force: boolean = false) => { 
+  const handleGenerateAllVisuals = async (force: boolean = false) => {
+      // Cancel any previous in-flight visual generation
+      visualsGenAbortRef.current?.abort();
+      const abort = new AbortController();
+      visualsGenAbortRef.current = abort;
+
       setIsGeneratingVisuals(true); 
       let scenes = (video!.visualScenes && !force) ? [...video!.visualScenes] : []; 
       
       if (force) {
-          // Clear existing scenes if forcing
           updateVideo(project!.id, video!.id, { visualScenes: [] });
           scenes = [];
       }
 
       const pexelsUsedIds = new Set<number>();
+      let lastImageCallMs = 0; // tracks last image API call timestamp for throttling
       try { 
           const segs = video!.script!.segments; 
           let totDur = 0; 
@@ -495,6 +494,8 @@ export const ProjectEditor: React.FC = () => {
               let currentSceneStart = start;
 
               for (let j = 0; j < prompts.length; j++) {
+                  if (abort.signal.aborted) break;
+
                   const prompt = prompts[j];
                   const dur = sceneDurations[j];
 
@@ -505,8 +506,13 @@ export const ProjectEditor: React.FC = () => {
                       continue;
                   }
 
-                  // Slow down the loop significantly to prevent 429 Quota errors on Image Models
-                  if (i > 0 || j > 0) await new Promise(r => setTimeout(r, 6000));
+                  // Throttle: wait only what's needed since the last call (min 6s between image API calls)
+                  if (i > 0 || j > 0) {
+                      const MIN_INTERVAL_MS = 6_000;
+                      const since = Date.now() - lastImageCallMs;
+                      if (since < MIN_INTERVAL_MS) await new Promise(r => setTimeout(r, MIN_INTERVAL_MS - since));
+                  }
+                  lastImageCallMs = Date.now();
                   
                   let url = '';
                   let videoUrl = undefined;
@@ -531,7 +537,7 @@ export const ProjectEditor: React.FC = () => {
 
                   if (!url) {
                       // Fallback to Gemini Image Generation if no stock video found or chosen
-                      url = await generateSceneImage(prompt, scriptTone, video!.format || 'Landscape 16:9'); 
+                      url = await generateSceneImage(prompt, scriptTone, video!.format || 'Landscape 16:9', visualsSessionId.current); 
                   }
                   
                   setLastValidImage(url); 
@@ -559,223 +565,31 @@ export const ProjectEditor: React.FC = () => {
       } catch (e: any) { alert(e.message); } finally { setIsGeneratingVisuals(false); setGeneratingIndex(null); } 
   };
 
-  // --- NEW: RENDER & DOWNLOAD LOGIC ---
-  const handleRenderAndDownload = async (autoDownload: boolean = true) => {
+  // --- RENDER & DOWNLOAD ---
+  // This is the single entry point for all render operations in this component.
+  // It delegates entirely to renderService.ts — there is no second render engine here.
+  // renderService handles: codec detection, CORS-safe video loading, audio mixing,
+  // correct canvas dimensions per format, and scene timing recalculation.
+  const handleRenderAndDownload = async (autoDownload: boolean = true): Promise<Blob | undefined> => {
       if (!video || !video.audioUrl || !video.visualScenes) return;
+
       setIsRenderingVideo(true);
       setRenderProgress(0);
-      setRenderStatus('Preparing assets...');
+      setRenderStatus('Preparando assets...');
 
       try {
-          // 1. Prepare Audio (Offline Mixing)
-          setRenderStatus('Mastering Audio...');
-          const sampleRate = 24000;
-          const tempCtx = new AudioContext({sampleRate});
-          const voiceBuffer = await decodeAudioData(new Uint8Array(atob(video.audioUrl).split('').map(c => c.charCodeAt(0))).buffer, tempCtx);
-          let finalAudioBuffer = voiceBuffer;
+          const { renderVideoHeadless } = await import('../services/renderService');
 
-          // Mix Voice + Music if enabled
-          if (video.backgroundMusicUrl && isMusicEnabled) {
-              const musicBuffer = await decodeAudioData(new Uint8Array(atob(video.backgroundMusicUrl).split('').map(c => c.charCodeAt(0))).buffer, tempCtx);
-              
-              // Use OfflineAudioContext for mixing
-              const duration = voiceBuffer.duration;
-              const offlineCtx = new OfflineAudioContext(1, duration * sampleRate, sampleRate);
-              
-              // Voice Source
-              const vSrc = offlineCtx.createBufferSource(); 
-              vSrc.buffer = voiceBuffer; 
-              vSrc.connect(offlineCtx.destination); 
-              vSrc.start(0);
-              
-              // Music Source (Looped & Lower Volume)
-              const mSrc = offlineCtx.createBufferSource(); 
-              mSrc.buffer = musicBuffer; 
-              mSrc.loop = true; 
-              const mGain = offlineCtx.createGain(); 
-              mGain.gain.value = musicVolume * 0.7; // Slightly reduce background for mix
-              mSrc.connect(mGain); 
-              mGain.connect(offlineCtx.destination); 
-              mSrc.start(0);
-
-              finalAudioBuffer = await offlineCtx.startRendering();
-          }
-          tempCtx.close();
-
-          // 2. Prepare Canvas
-          setRenderStatus('Loading Visuals...');
-          const width = 1920; 
-          const height = video.format?.includes('9:16') ? 3413 : (video.format?.includes('1:1') ? 1920 : 1080);
-          const canvas = document.createElement('canvas');
-          canvas.width = width;
-          canvas.height = height;
-          const ctx2d = canvas.getContext('2d')!;
-
-          // Preload Images and Videos
-          const assetBitmaps = await Promise.all(video.visualScenes.map(async (scene) => {
-              const img = new Image();
-              img.crossOrigin = "anonymous"; 
-              img.src = scene.imageUrl;
-              await img.decode();
-              
-              let vid: HTMLVideoElement | null = null;
-              if (scene.videoUrl) {
-                  vid = document.createElement('video');
-                  vid.crossOrigin = "anonymous";
-                  vid.src = scene.videoUrl;
-                  vid.muted = true;
-                  vid.playsInline = true;
-                  await new Promise((resolve) => {
-                      if (vid) {
-                          vid.onloadeddata = resolve;
-                          vid.onerror = resolve; // Continue even if video fails
-                          vid.load();
-                      } else {
-                          resolve(null);
-                      }
-                  });
-              }
-              
-              return { ...scene, bitmap: img, videoElement: vid };
-          }));
-
-          // 3. Setup Media Recorder with REAL-TIME AudioContext
-          setRenderStatus('Rendering Video...');
-          
-          // CRITICAL: AudioContext for recording must be active
-          const audioCtx = new AudioContext({sampleRate});
-          if (audioCtx.state === 'suspended') {
-              await audioCtx.resume();
-          }
-
-          const stream = canvas.captureStream(30); // 30 FPS
-          const audioDest = audioCtx.createMediaStreamDestination();
-          const audioSrc = audioCtx.createBufferSource();
-          audioSrc.buffer = finalAudioBuffer;
-          audioSrc.connect(audioDest);
-          
-          // Add audio track to stream
-          const audioTrack = audioDest.stream.getAudioTracks()[0];
-          stream.addTrack(audioTrack);
-
-          const recorder = new MediaRecorder(stream, { 
-              mimeType: 'video/webm; codecs=vp9',
-              audioBitsPerSecond: 128000,
-              videoBitsPerSecond: 25000000 
-          });
-          
-          const chunks: Blob[] = [];
-          recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-          
-          const renderPromise = new Promise<Blob>((resolve) => {
-              recorder.onstop = () => {
-                  const blob = new Blob(chunks, { type: 'video/webm' });
-                  resolve(blob);
-              };
+          const blob = await renderVideoHeadless(video, (percent, status) => {
+              setRenderProgress(percent);
+              setRenderStatus(status);
           });
 
-          // 4. Start Real-time Render
-          recorder.start();
-          audioSrc.start(0);
-          
-          const startTime = performance.now();
-          const duration = finalAudioBuffer.duration;
-
-          const renderLoop = () => {
-              const elapsed = (performance.now() - startTime) / 1000;
-              setRenderProgress(Math.min(100, Math.round((elapsed / duration) * 100)));
-
-              if (elapsed >= duration + 0.5) { 
-                  recorder.stop();
-                  audioSrc.stop();
-                  return;
-              }
-
-              // Find active scene
-              const currentSceneIdx = assetBitmaps.findIndex(s => elapsed >= s.startTime && elapsed < (s.startTime + s.duration));
-              const currentScene = currentSceneIdx !== -1 ? assetBitmaps[currentSceneIdx] : assetBitmaps[assetBitmaps.length - 1];
-              
-              if (currentScene) {
-                  // Cross-fade logic
-                  const nextScene = assetBitmaps[currentSceneIdx + 1];
-                  const transitionDuration = 0.4; // 0.4s crossfade
-                  const timeToNext = currentScene.startTime + currentScene.duration - elapsed;
-                  
-                  const drawScene = (scene: any, alpha: number) => {
-                      const sceneTime = elapsed - scene.startTime;
-                      const sceneProgress = Math.min(1, sceneTime / scene.duration);
-                      
-                      const vid = scene.videoElement;
-                      if (vid) {
-                          const offset = scene.videoOffset || 0;
-                          vid.currentTime = (offset + sceneTime) % vid.duration;
-                      }
-
-                      let visualFilter: any = 'none';
-                      let subEffect = scene.effect;
-                      let mirror = false;
-                      
-                      ctx2d.save();
-                      (ctx2d as any)._isDrawingVideo = !!vid;
-                      ctx2d.globalAlpha = alpha;
-                      calculateTransform(ctx2d, subEffect, sceneProgress, width, height, 0, elapsed);
-                      applyVisualFilter(ctx2d, visualFilter);
-                      
-                      const source = vid || scene.bitmap;
-                      const sWidth = source.videoWidth || source.width;
-                      const sHeight = source.videoHeight || source.height;
-                      const scale = Math.max(width / sWidth, height / sHeight);
-                      const drawW = sWidth * scale;
-                      const drawH = sHeight * scale;
-                      const x = (width - drawW) / 2;
-                      const y = (height - drawH) / 2;
-                      
-                      ctx2d.drawImage(source, x, y, drawW, drawH);
-                      
-                      ctx2d.restore();
-                  };
-
-                  // Clear
-                  ctx2d.filter = 'none';
-                  ctx2d.globalCompositeOperation = 'source-over';
-                  ctx2d.fillStyle = '#000';
-                  ctx2d.fillRect(0, 0, width, height);
-
-                  if (nextScene && timeToNext < transitionDuration) {
-                      const nextAlpha = 1 - (timeToNext / transitionDuration);
-                      drawScene(currentScene, 1);
-                      drawScene(nextScene, nextAlpha);
-                  } else {
-                      drawScene(currentScene, 1);
-                  }
-                  
-                  // Post-processing
-                  const isVideoActive = !!(ctx2d as any)._isDrawingVideo;
-                  if (!isVideoActive) {
-                      drawScanlines(ctx2d, width, height, elapsed);
-                  }
-                  
-                  const vignettePulse = isVideoActive ? 0.3 : (0.6 + (Math.sin(elapsed * 4) * 0.15)); 
-                  const gradient = ctx2d.createRadialGradient(width/2, height/2, width/4, width/2, height/2, width);
-                  gradient.addColorStop(0, 'rgba(0,0,0,0)');
-                  gradient.addColorStop(1, `rgba(0,0,0,${vignettePulse})`);
-                  ctx2d.fillStyle = gradient;
-                  ctx2d.fillRect(0, 0, width, height);
-              }
-
-              requestAnimationFrame(renderLoop);
-          };
-
-          renderLoop();
-
-          // Wait for render
-          const blob = await renderPromise;
           const url = URL.createObjectURL(blob);
           setGeneratedVideoBlob(blob);
           setGeneratedVideoUrl(url);
           setVideoFile(new File([blob], `${video.title}.webm`, { type: 'video/webm' }));
-          
-          // Auto-download
+
           if (autoDownload) {
               const a = document.createElement('a');
               a.href = url;
@@ -783,20 +597,18 @@ export const ProjectEditor: React.FC = () => {
               a.click();
           }
 
-          setRenderStatus('Complete!');
-          audioCtx.close();
+          setRenderStatus('Concluído!');
           return blob;
-
       } catch (e: any) {
-          console.error("Render error", e);
-          setRenderStatus('Error: ' + e.message);
+          console.error('Render error', e);
+          setRenderStatus('Erro: ' + e.message);
       } finally {
           setIsRenderingVideo(false);
       }
   };
 
   const handleRealUpload = async () => {
-      if (!project?.youtubeChannelData || !project?.youtubeAccessToken) {
+      if (!project?.youtubeChannelData || !accessToken) {
           alert("Por favor, conecte um canal YouTube neste projeto primeiro (aba Settings).");
           return;
       }
@@ -866,7 +678,7 @@ export const ProjectEditor: React.FC = () => {
           setRenderStatus('Enviando para o YouTube…');
 
           const videoId = await uploadVideoToYouTube(
-              project.youtubeAccessToken!,
+              accessToken!,
               fileToUpload,
               currentMetadata,
               video.thumbnailUrl,
@@ -1009,7 +821,7 @@ export const ProjectEditor: React.FC = () => {
                                   
                                   ctx.save();
                                   ctx.globalAlpha = alpha;
-                                  calculateTransform(ctx, subEffect, sceneProgress, width, height, 0, elapsed);
+                                  calculateTransform(ctx, subEffect, sceneProgress, width, height);
                                   applyVisualFilter(ctx, visualFilter);
                                   
                                   const source = vid || img;
@@ -1138,7 +950,7 @@ export const ProjectEditor: React.FC = () => {
               }
 
               if (!url) {
-                  url = await generateSceneImage(prompt, scriptTone, video!.format || 'Landscape 16:9');
+                  url = await generateSceneImage(prompt, scriptTone, video!.format || 'Landscape 16:9', visualsSessionId.current);
               }
               
               newScenes.push({
@@ -1495,539 +1307,103 @@ export const ProjectEditor: React.FC = () => {
             </div>
         </div>
 
-        {/* MAIN WORKSPACE */}
+        {/* MAIN WORKSPACE — tab components */}
+        {/* Each tab is a separate component in ProjectEditorTabs.tsx */}
         <div className="w-full relative">
-            
-            {/* SCRIPT EDITOR */}
+
             {activeTab === 'script' && (
-                !video.script ? (
-                    <div className="py-20 border border-dashed border-white/10 rounded-3xl bg-white/5">
-                        <EmptyState icon={FileText} title="Blueprint Missing" description="Configure your narrative parameters to generate the video script." actionLabel="Generate Script" onClick={() => setIsConfigModalOpen(true)} />
-                    </div>
-                ) : (
-                    <div className="flex flex-col gap-6">
-                        <div className="bg-[#0F1629]/50 backdrop-blur border border-white/5 rounded-2xl p-6">
-                            <h2 className="text-xl font-bold text-white mb-2">{video.script.title}</h2>
-                            <p className="text-slate-400 leading-relaxed text-sm mb-4">{video.script.description}</p>
-                            
-                            {video.script.ambientMusicDescription && (
-                                <div className="bg-blue-500/5 border border-blue-500/10 rounded-xl p-4 flex items-start gap-3">
-                                    <div className="bg-blue-500/20 p-2 rounded-lg">
-                                        <Music className="w-4 h-4 text-blue-400" />
-                                    </div>
-                                    <div>
-                                        <h4 className="text-[10px] font-bold text-blue-400 uppercase tracking-wider mb-1">Ambient Music Direction</h4>
-                                        <p className="text-xs text-blue-200/70 italic">{video.script.ambientMusicDescription}</p>
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                        <div className="flex justify-between items-center mb-4">
-                            <div className="flex items-center gap-3">
-                                <h3 className="text-lg font-bold text-white">Storyboard & Script</h3>
-                                {video.script.estimatedDurationMinutes && (
-                                    <span className={`text-[10px] font-mono px-2 py-1 rounded ${video.script.durationWarning ? 'bg-yellow-500/20 text-yellow-400' : 'bg-green-500/20 text-green-400'}`}>
-                                        ~{video.script.estimatedDurationMinutes.toFixed(1)} min • {video.script.totalWords || '?'} palavras
-                                    </span>
-                                )}
-                            </div>
-                            <div className="flex gap-2">
-                                <button 
-                                    onClick={handleAutoFillNarrator}
-                                    disabled={isAutoFillingNarrator}
-                                    className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold rounded-xl border border-slate-700 flex items-center gap-2 transition-all"
-                                >
-                                    {isAutoFillingNarrator ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3 text-orange-400" />}
-                                    Auto-Fill Narration
-                                </button>
-                            </div>
-                        </div>
-                        <div className="relative">
-                            <div className="flex overflow-x-auto gap-4 pb-8 custom-scrollbar snap-x px-1">
-                                <div className="flex-shrink-0 w-8"></div>
-                                {video.script.segments.map((segment, idx) => {
-                                    const relatedScene = video.visualScenes?.find(s => s.segmentIndex === idx);
-                                    return (
-                                        <div key={idx} className="flex-shrink-0 w-[400px] snap-center flex flex-col group">
-                                            <div className="bg-[#0F1629] border border-white/10 rounded-2xl overflow-hidden shadow-xl hover:border-orange-500/50 transition-all hover:shadow-2xl flex flex-col h-full">
-                                                <div className="bg-white/5 p-4 flex justify-between items-center border-b border-white/5">
-                                                    <div className="flex items-center gap-3">
-                                                        <span className="text-xs font-mono text-slate-500">#{String(idx + 1).padStart(2,'0')}</span>
-                                                        <h4 className="font-bold text-white text-sm truncate max-w-[200px]">{segment.sectionTitle}</h4>
-                                                    </div>
-                                                    <span className="text-[10px] font-mono bg-black/40 px-2 py-1 rounded text-slate-400">{segment.estimatedDuration}s</span>
-                                                </div>
-                                                <div className="p-4 flex flex-col gap-4 flex-1">
-                                                    <div className="bg-orange-500/5 border border-orange-500/10 rounded-xl p-3 relative group/visual">
-                                                        <div className="flex justify-between items-start mb-2">
-                                                            <div className="flex items-center gap-2 text-[10px] font-bold text-orange-400 uppercase tracking-wider"><Eye className="w-3 h-3" /> Visual Prompt</div>
-                                                        </div>
-                                                        <div className="flex flex-col gap-2">
-                                                            {relatedScene && <img src={relatedScene.imageUrl} className="w-full h-32 rounded-lg object-cover border border-white/10" />}
-                                                            <div className="space-y-1">
-                                                                {(segment.visualDescriptions || []).map((p, pIdx) => (
-                                                                    <p key={pIdx} className="text-[10px] text-orange-200/50 leading-tight italic line-clamp-1 hover:line-clamp-none transition-all border-l border-orange-500/20 pl-2">
-                                                                        {p}
-                                                                    </p>
-                                                                ))}
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                    <div className="relative flex-1">
-                                                        <div className="flex justify-between items-center mb-1">
-                                                            <div className="flex items-center gap-2 text-[10px] font-bold text-slate-500 uppercase tracking-wider"><AlignLeft className="w-3 h-3" /> Narrator</div>
-                                                            <div className="flex items-center gap-1">
-                                                                <button 
-                                                                    onClick={() => handleGenerateSingleNarrator(idx)} 
-                                                                    disabled={generatingNarratorIndex === idx}
-                                                                    className="text-slate-500 hover:text-orange-400 p-1 transition-colors"
-                                                                    title="Generate Narrator Text"
-                                                                >
-                                                                    {generatingNarratorIndex === idx ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
-                                                                </button>
-                                                                <button onClick={() => handlePreviewSegment(idx, segment.narratorText)} disabled={previewingSegmentAudio===idx} className="text-slate-500 hover:text-orange-400 p-1">{previewingSegmentAudio === idx ? <Loader2 className="w-3 h-3 animate-spin" /> : <Volume2 className="w-3 h-3" />}</button>
-                                                            </div>
-                                                        </div>
-                                                        <textarea className="w-full h-32 bg-transparent text-slate-300 text-sm leading-relaxed border border-slate-800 rounded-lg p-3 resize-none focus:border-orange-500/50 focus:bg-slate-900/50 transition-all outline-none" value={segment.narratorText} onChange={(e) => handleUpdateScriptSegment(idx, e.target.value)} placeholder="Narrator text goes here..." />
-                                                    </div>
-
-                                                    {segment.soundEffects && segment.soundEffects.length > 0 && (
-                                                        <div className="bg-slate-800/30 rounded-xl p-3 border border-white/5">
-                                                            <div className="flex items-center gap-2 text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">
-                                                                <Volume2 className="w-3 h-3" /> Sound Effects
-                                                            </div>
-                                                            <div className="flex flex-wrap gap-2">
-                                                                {segment.soundEffects.map((sfx, sfxIdx) => (
-                                                                    <span key={sfxIdx} className="text-[9px] bg-slate-800 text-slate-400 px-2 py-1 rounded-md border border-white/5">
-                                                                        {sfx}
-                                                                    </span>
-                                                                ))}
-                                                            </div>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        </div>
-                                    );
-                                })}
-                                <div className="flex-shrink-0 w-8"></div>
-                            </div>
-                        </div>
-                    </div>
-                )
+                <ScriptTab
+                    video={video}
+                    project={project}
+                    isAutoFillingNarrator={isAutoFillingNarrator}
+                    generatingNarratorIndex={generatingNarratorIndex}
+                    previewingSegmentAudio={previewingSegmentAudio}
+                    onOpenConfig={() => setIsConfigModalOpen(true)}
+                    onAutoFillNarrator={handleAutoFillNarrator}
+                    onGenerateSingleNarrator={handleGenerateSingleNarrator}
+                    onPreviewSegment={handlePreviewSegment}
+                    onUpdateScriptSegment={handleUpdateScriptSegment}
+                />
             )}
 
-            {/* AUDIO VIEW */}
             {activeTab === 'audio' && (
-                 !video.audioUrl ? (
-                    <div className="py-20 border border-dashed border-white/10 rounded-3xl bg-white/5">
-                        <EmptyState icon={Mic} title="Audio Missing" description="Synthesize the AI narration based on your script." actionLabel="Generate Audio" onClick={() => setIsConfigModalOpen(true)} />
-                    </div>
-                 ) : (
-                    <div className="flex flex-col items-center justify-center p-12 bg-gradient-to-br from-orange-900/10 via-[#0F1629] to-[#0F1629] border border-white/5 rounded-3xl shadow-2xl">
-                        <div className="w-24 h-24 bg-orange-500/20 rounded-full flex items-center justify-center mb-6 relative"><div className="absolute inset-0 border-2 border-orange-500/30 rounded-full animate-ping opacity-20"></div><Mic className="w-10 h-10 text-orange-400" /></div>
-                        <h3 className="text-3xl font-bold text-white mb-2">Audio Mastered</h3>
-                        <p className="text-slate-400 mb-8">Voiceover track is ready.</p>
-                        <div className="bg-black/30 backdrop-blur rounded-2xl p-6 w-full max-w-xl border border-white/10 flex items-center gap-6 mb-8">
-                            <button onClick={() => isPlaying ? stopPlayback() : playAudio()} className="w-14 h-14 rounded-full bg-orange-600 hover:bg-orange-500 text-white flex items-center justify-center shadow-lg shadow-orange-600/30 transition-all hover:scale-105 active:scale-95">{isPlaying ? <Pause className="w-6 h-6 fill-current" /> : <Play className="w-6 h-6 fill-current ml-1" />}</button>
-                            <div className="flex-1 space-y-2"><div className="h-2 bg-slate-800 rounded-full overflow-hidden w-full"><div className="h-full bg-orange-500 transition-all duration-100 ease-linear" style={{ width: `${totalDurationState > 0 ? (playbackTime / totalDurationState) * 100 : 0}%` }}></div></div><div className="flex justify-between text-xs font-mono text-slate-500"><span>{formatTime(playbackTime)}</span><span>{formatTime(totalDurationState)}</span></div></div>
-                        </div>
-                        <div className="flex gap-4"><button onClick={() => setActiveTab('video')} className="px-8 py-3 bg-white text-black rounded-xl font-bold hover:bg-slate-200 transition-colors shadow-lg shadow-white/10 flex items-center gap-2">Next: Visuals <ArrowRight className="w-4 h-4" /></button><button onClick={() => setIsConfigModalOpen(true)} className="px-6 py-3 border border-white/10 text-slate-300 rounded-xl font-medium hover:bg-white/5 transition-colors">Regenerate</button></div>
-                    </div>
-                 )
+                <AudioTab
+                    video={video}
+                    isPlaying={isPlaying}
+                    playbackTime={playbackTime}
+                    totalDurationState={totalDurationState}
+                    onPlay={playAudio}
+                    onStop={stopPlayback}
+                    onOpenConfig={() => setIsConfigModalOpen(true)}
+                    onNextTab={() => setActiveTab('video')}
+                />
             )}
 
-            {/* VIDEO/VISUALS VIEW */}
             {activeTab === 'video' && (
-                !video.visualScenes || video.visualScenes.length === 0 ? (
-                    <div className="py-20 border border-dashed border-white/10 rounded-3xl bg-white/5">
-                        <EmptyState icon={ImageIcon} title="Visuals Missing" description="Generate cinematic AI scenes for each segment." actionLabel="Generate All Scenes" onClick={handleGenerateAllVisuals} isLoading={isGeneratingVisuals} />
-                    </div>
-                ) : (
-                    <div className="flex flex-col gap-6">
-                        <div className="flex justify-between items-end">
-                            <h3 className="text-xl font-bold text-white">Storyboard</h3>
-                            <div className="flex gap-3">
-                                <button onClick={() => setActiveTab('studio')} className="px-6 py-3 bg-orange-600 hover:bg-orange-500 text-white font-bold rounded-xl shadow-lg shadow-orange-600/20 flex items-center gap-2 active:scale-95">
-                                    <Play className="w-5 h-5" /> Open Studio
-                                </button>
-                            </div>
-                        </div>
-                        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
-                            {video.visualScenes.map((scene, idx) => (
-                                <div key={idx} className={`bg-slate-900 rounded-xl overflow-hidden border border-white/10 relative group hover:border-orange-500/50 transition-all ${isShort ? 'aspect-[9/16]' : 'aspect-square'}`}>
-                                    <img src={scene.imageUrl} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
-                                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-3">
-                                        <p className="text-[10px] text-white line-clamp-2">{scene.prompt}</p>
-                                    </div>
-                                    <div className="absolute top-2 left-2 bg-black/60 px-2 py-0.5 rounded text-[10px] text-white font-mono">#{idx+1}</div>
-                                </div>
-                            ))}
-                        </div>
-                    </div>
-                )
+                <VisualsTab
+                    video={video}
+                    isShort={isShort}
+                    isGeneratingVisuals={isGeneratingVisuals}
+                    onGenerateAll={handleGenerateAllVisuals}
+                    onOpenStudio={() => setActiveTab('studio')}
+                />
             )}
 
-            {/* STUDIO VIEW */}
-            {(activeTab === 'studio' || (activeTab === 'video' && video.visualScenes?.length)) && (
-                <div className="flex flex-col items-center">
-                    <div className={`${playerClass} bg-black relative rounded-t-2xl border-t border-x border-slate-700 shadow-2xl overflow-hidden group`}>
-                        <div className="absolute inset-0 flex items-center justify-center bg-black overflow-hidden isolate">
-                            <div className="absolute inset-0 pointer-events-none bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-20 z-20 mix-blend-overlay"></div>
-                            {lastValidImage && (
-                                <div className="absolute inset-0 z-10 bg-black">
-                                    <img 
-                                        src={lastValidImage} 
-                                        className="w-full h-full object-cover blur-sm opacity-50 scale-105 transition-opacity duration-700" 
-                                        onLoad={(e) => (e.currentTarget.style.opacity = "0.5")}
-                                        style={{ opacity: 0 }}
-                                    />
-                                </div>
-                            )}
-                            
-                            {/* ACTIVE SCENE WITH VIRTUAL CUTS PREVIEW (CANVAS BASED) */}
-                            <canvas 
-                                ref={studioCanvasRef}
-                                width={1920}
-                                height={isShort ? 3413 : (isSquare ? 1920 : 1080)}
-                                className="w-full h-full object-contain z-10"
-                            />
-                            
-                            {video.script?.segments[currentSegmentIndex] && (<div className={`absolute bottom-10 left-0 right-0 p-8 text-center transition-all duration-500 z-30 ${isPlaying ? 'opacity-100' : 'opacity-0'}`}><span className="bg-black/60 backdrop-blur-md px-6 py-3 rounded-xl text-white text-lg font-medium shadow-2xl inline-block border border-white/10">{video.script?.segments[currentSegmentIndex]?.narratorText}</span></div>)}
-                        </div>
-                        <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity z-40 bg-black/20">
-                            <button onClick={() => isPlaying ? stopPlayback() : playAudio()} className="w-20 h-20 bg-white/10 backdrop-blur-md rounded-full flex items-center justify-center hover:bg-white/20 hover:scale-105 transition-all">{isPlaying ? <Pause className="w-8 h-8 fill-white text-white" /> : <Play className="w-8 h-8 fill-white text-white ml-1" />}</button>
-                        </div>
-                    </div>
-                    <div className="w-full max-w-5xl bg-[#0B1121] border border-slate-700 rounded-b-2xl p-4 flex items-center justify-between shadow-xl relative z-50">
-                        <div className="flex items-center gap-4 text-slate-400"><div className="flex items-center gap-2 font-mono text-sm"><span className="text-white">{formatTime(playbackTime)}</span><span className="opacity-50">/</span><span>{formatTime(totalDurationState)}</span></div></div>
-                        <div className="flex items-center gap-4"><button onClick={() => setIsMusicEnabled(!isMusicEnabled)} className={`p-2 rounded-lg transition-colors ${isMusicEnabled ? 'text-orange-400 bg-orange-500/10' : 'text-slate-600'}`}>{isMusicEnabled ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5" />}</button><button onClick={handleGenerateMusic} className="text-xs font-bold text-slate-400 hover:text-white flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-white/5 border border-transparent hover:border-white/10 transition-all">{isGeneratingMusic ? <Loader2 className="w-3 h-3 animate-spin" /> : <Music className="w-3 h-3" />} Ambience</button></div>
-                    </div>
-                </div>
+            {(activeTab === 'studio' || (activeTab === 'video' && !!video.visualScenes?.length)) && (
+                <StudioTab
+                    video={video}
+                    isShort={isShort}
+                    isSquare={isSquare}
+                    playerClass={playerClass}
+                    isPlaying={isPlaying}
+                    playbackTime={playbackTime}
+                    totalDurationState={totalDurationState}
+                    isMusicEnabled={isMusicEnabled}
+                    musicVolume={musicVolume}
+                    isGeneratingMusic={isGeneratingMusic}
+                    currentSegmentIndex={currentSegmentIndex}
+                    lastValidImage={lastValidImage}
+                    studioCanvasRef={studioCanvasRef}
+                    onPlay={playAudio}
+                    onStop={stopPlayback}
+                    onToggleMusic={() => setIsMusicEnabled(!isMusicEnabled)}
+                    onGenerateMusic={handleGenerateMusic}
+                />
             )}
-            
-            {/* Publish View */}
+
             {activeTab === 'publish' && (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-8 py-8">
-                     {/* LEFT COLUMN: EXPORT */}
-                     <div className="bg-[#0F1629]/80 border border-white/5 rounded-3xl p-8 flex flex-col justify-between">
-                         <div>
-                             <div className="w-12 h-12 bg-orange-500/20 rounded-xl flex items-center justify-center mb-6"><Download className="w-6 h-6 text-orange-400" /></div>
-                             <h3 className="text-2xl font-bold text-white mb-2">Local Export</h3>
-                             <p className="text-slate-400 mb-6">Render the full video mix in-browser and download to your device.</p>
-                         </div>
-                         
-                         <div className="space-y-4">
-                             {video.thumbnailUrl ? (
-                                 <div className="space-y-2">
-                                     <div className="relative group rounded-xl overflow-hidden border border-slate-700 shadow-lg aspect-video">
-                                         <img src={video.thumbnailUrl} alt="Thumbnail" className="w-full h-full object-cover" />
-                                         <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-3">
-                                             <a href={video.thumbnailUrl} download={`${video.title}_thumb.jpg`} className="p-2 bg-white text-black rounded-full hover:scale-110 transition-transform" title="Download Thumbnail"><Download className="w-5 h-5" /></a>
-                                             <button onClick={handleGenerateThumbnail} disabled={isGeneratingThumbnail} className="p-2 bg-white text-black rounded-full hover:scale-110 transition-transform" title="Regenerate Thumbnail">
-                                                 {isGeneratingThumbnail ? <Loader2 className="w-5 h-5 animate-spin" /> : <RefreshCw className="w-5 h-5" />}
-                                             </button>
-                                         </div>
-                                     </div>
-                                 </div>
-                             ) : (
-                                 <div className="space-y-3">
-                                     <button onClick={handleGenerateThumbnail} disabled={isGeneratingThumbnail} className="w-full py-3 rounded-xl border border-white/10 text-slate-300 hover:bg-white/5 font-bold flex items-center justify-center gap-2">
-                                         {isGeneratingThumbnail?<Loader2 className="w-4 h-4 animate-spin"/>:<ImageIcon className="w-4 h-4"/>} Generate Thumb
-                                     </button>
-                                     
-                                     {thumbnailError && (
-                                         <div className="p-3 bg-orange-500/10 border border-orange-500/20 rounded-xl flex items-start gap-3 animate-in fade-in slide-in-from-top-2 duration-300">
-                                             <AlertCircle className="w-4 h-4 text-orange-500 flex-shrink-0 mt-0.5" />
-                                             <div className="flex-1">
-                                                 <p className="text-[10px] text-orange-400 font-medium">{thumbnailError}</p>
-                                                 <div className="flex items-center gap-3 mt-1">
-                                                     <button onClick={() => setThumbnailError(null)} className="text-[9px] text-orange-500/70 hover:text-orange-500 underline">Dispensar</button>
-                                                     <button onClick={() => setShowThumbnailTroubleshooting(true)} className="text-[9px] text-blue-400 hover:text-blue-300 font-bold flex items-center gap-1">
-                                                         <HelpCircle className="w-3 h-3" /> Guia de Solução
-                                                     </button>
-                                                 </div>
-                                             </div>
-                                         </div>
-                                     )}
-                                 </div>
-                             )}
-
-                             <button 
-                                  onClick={() => handleRenderAndDownload(true)} 
-                                 disabled={isRenderingVideo} 
-                                 className="w-full py-4 rounded-xl bg-white text-black font-bold hover:bg-slate-200 transition-colors flex flex-col items-center justify-center gap-1 shadow-lg shadow-white/5"
-                             >
-                                 <div className="flex items-center gap-2">
-                                     {isRenderingVideo ? <Loader2 className="w-5 h-5 animate-spin" /> : <Video className="w-5 h-5" />} 
-                                     <span>{isRenderingVideo ? 'Rendering Video...' : 'Download Master File'}</span>
-                                 </div>
-                                 {isRenderingVideo && <span className="text-[10px] font-mono text-slate-500">{renderStatus} ({renderProgress}%)</span>}
-                             </button>
-                         </div>
-                     </div>
-
-                     {/* RIGHT COLUMN: YOUTUBE */}
-                             <div className="bg-gradient-to-br from-red-900/10 to-[#0F1629] border border-red-500/10 rounded-3xl p-8 flex flex-col justify-between">
-                                 <div>
-                                     <div className="w-12 h-12 bg-red-600/20 rounded-xl flex items-center justify-center mb-6"><Youtube className="w-6 h-6 text-red-500" /></div>
-                                     <h3 className="text-2xl font-bold text-white mb-2">YouTube Sync</h3>
-                                     <p className="text-slate-400 mb-6">Upload diretamente para o seu canal conectado.</p>
-                                     
-                                     {/* Pre-upload Checklist */}
-                                     <div className="grid grid-cols-2 gap-2 mb-6">
-                                         {[
-                                             { label: 'Script', done: !!video.script },
-                                             { label: 'Áudio', done: !!video.audioUrl },
-                                             { label: 'Cenas', done: !!video.visualScenes?.length },
-                                             { label: 'Thumb', done: !!video.thumbnailUrl },
-                                             { label: 'SEO', done: !!video.videoMetadata },
-                                             { label: 'Canal', done: !!project?.youtubeChannelData },
-                                         ].map((item, i) => (
-                                             <div key={i} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-[10px] font-bold uppercase tracking-wider transition-colors ${item.done ? 'bg-green-500/10 border-green-500/20 text-green-500' : 'bg-slate-900/40 border-white/5 text-slate-500'}`}>
-                                                 {item.done ? <CheckCircle className="w-3 h-3" /> : <X className="w-3 h-3" />}
-                                                 {item.label}
-                                             </div>
-                                         ))}
-                                     </div>
-                                     
-                                     {project?.youtubeChannelData ? (
-                                         <div className="flex flex-col gap-3 mb-4">
-                                             <div className="flex items-center gap-3 bg-black/40 p-3 rounded-lg border border-white/10">
-                                                 <img src={project.youtubeChannelData.thumbnailUrl} className="w-8 h-8 rounded-full" />
-                                                 <div className="flex-1 min-w-0">
-                                                     <span className="text-white font-medium text-sm truncate block">{project.youtubeChannelData.title}</span>
-                                                     <span className="text-xs text-slate-500 block">{project.youtubeChannelData.subscriberCount} subs</span>
-                                                 </div>
-                                                 <div className="flex flex-col items-end gap-1">
-                                                    <CheckCircle className="w-4 h-4 text-green-500" />
-                                                 </div>
-                                             </div>
-                                             <button 
-                                                 onClick={() => setShowCorsHelp(true)}
-                                                 className="w-full py-2 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 border border-blue-500/20 rounded-xl text-[10px] font-bold flex items-center justify-center gap-2 transition-all"
-                                             >
-                                                 <Settings className="w-3 h-3" /> Configurar Google Cloud (CORS)
-                                             </button>
-                                         </div>
-                                     ) : (
-                                         <div className="flex flex-col gap-3 mb-4">
-                                             <div className="text-sm text-yellow-500 bg-yellow-500/10 p-3 rounded-lg border border-yellow-500/20">
-                                                 Nenhum canal conectado. Vá nas Settings do projeto para conectar.
-                                             </div>
-                                         </div>
-                                     )}
-                                 </div>
-                         <div className="space-y-4">
-                             <button onClick={handleGenerateMetadata} disabled={isGeneratingMetadata} className="w-full py-3 rounded-xl border border-white/10 text-slate-300 hover:bg-white/5 font-bold flex items-center justify-center gap-2 text-sm">
-                                 {isGeneratingMetadata?<Loader2 className="w-4 h-4 animate-spin"/>:<Wand2 className="w-4 h-4"/>} Generate SEO Metadata
-                             </button>
-                             
-                             {video.videoMetadata && (
-                                <div className="space-y-3 mb-2 p-4 bg-black/40 rounded-xl border border-white/5">
-                                    <div>
-                                        <div className="flex justify-between items-center mb-1">
-                                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Title</label>
-                                            <span className={`text-[10px] ${video.videoMetadata.youtubeTitle.length > 100 ? 'text-red-500' : 'text-slate-600'}`}>{video.videoMetadata.youtubeTitle.length}/100</span>
-                                        </div>
-                                        <input 
-                                            className="w-full bg-transparent text-white font-bold text-sm border-b border-white/10 pb-1 mb-1 focus:outline-none focus:border-orange-500 transition-colors" 
-                                            value={video.videoMetadata.youtubeTitle}
-                                            onChange={(e) => updateVideo(project.id, video.id, { videoMetadata: { ...video.videoMetadata!, youtubeTitle: e.target.value } })}
-                                        />
-                                    </div>
-                                    <div>
-                                        <div className="flex justify-between items-center mb-1">
-                                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Description</label>
-                                            <span className={`text-[10px] ${video.videoMetadata.youtubeDescription.length > 5000 ? 'text-red-500' : 'text-slate-600'}`}>{video.videoMetadata.youtubeDescription.length}/5000</span>
-                                        </div>
-                                        <textarea 
-                                            className="w-full bg-transparent text-slate-400 text-xs h-24 resize-none focus:outline-none custom-scrollbar border border-transparent focus:border-orange-500/30 rounded p-1"
-                                            value={video.videoMetadata.youtubeDescription}
-                                            onChange={(e) => updateVideo(project.id, video.id, { videoMetadata: { ...video.videoMetadata!, youtubeDescription: e.target.value } })}
-                                        />
-                                    </div>
-                                    <div className="grid grid-cols-2 gap-4">
-                                         <div>
-                                             <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1 flex items-center gap-1">
-                                                 <Eye className="w-3 h-3" /> Visibility
-                                             </label>
-                                             <select 
-                                                 className="w-full bg-slate-900 text-slate-300 text-xs rounded border border-white/10 p-1.5 focus:outline-none focus:border-orange-500"
-                                                 value={video.videoMetadata.visibility || 'private'}
-                                                 onChange={(e) => updateVideo(project.id, video.id, { videoMetadata: { ...video.videoMetadata!, visibility: e.target.value as any } })}
-                                             >
-                                                 <option value="public">Public</option>
-                                                 <option value="unlisted">Unlisted</option>
-                                                 <option value="private">Private</option>
-                                             </select>
-                                         </div>
-                                         <div>
-                                             <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1 flex items-center gap-1">
-                                                 <Hash className="w-3 h-3" /> Category
-                                             </label>
-                                             <select 
-                                                 className="w-full bg-slate-900 text-slate-300 text-xs rounded border border-white/10 p-1.5 focus:outline-none focus:border-orange-500"
-                                                 value={video.videoMetadata.categoryId || '24'}
-                                                 onChange={(e) => updateVideo(project.id, video.id, { videoMetadata: { ...video.videoMetadata!, categoryId: e.target.value } })}
-                                             >
-                                                 {YOUTUBE_CATEGORIES.map(cat => <option key={cat.id} value={cat.id}>{cat.name}</option>)}
-                                             </select>
-                                         </div>
-                                     </div>
-                                     <div className="grid grid-cols-1 gap-4">
-                                         <div>
-                                             <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1 flex items-center gap-1">
-                                                 <FileVideo className="w-3 h-3" /> Format
-                                             </label>
-                                             <div className="flex items-center gap-2 h-[30px]">
-                                                 <button 
-                                                     onClick={() => updateVideo(project.id, video.id, { videoMetadata: { ...video.videoMetadata!, isShorts: true } })}
-                                                     className={`flex-1 h-full rounded text-[10px] font-bold transition-colors ${video.videoMetadata?.isShorts ? 'bg-red-600 text-white' : 'bg-slate-800 text-slate-400'}`}
-                                                 >
-                                                     SHORTS
-                                                 </button>
-                                                 <button 
-                                                     onClick={() => updateVideo(project.id, video.id, { videoMetadata: { ...video.videoMetadata!, isShorts: false } })}
-                                                     className={`flex-1 h-full rounded text-[10px] font-bold transition-colors ${!video.videoMetadata?.isShorts ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400'}`}
-                                                 >
-                                                     VIDEO
-                                                 </button>
-                                             </div>
-                                         </div>
-                                     </div>
-                                    <div>
-                                        <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1 flex items-center gap-1">
-                                            <Tag className="w-3 h-3" /> Tags
-                                        </label>
-                                        <input
-                                            className="w-full bg-transparent text-slate-400 text-xs border-b border-white/10 pb-1 focus:outline-none focus:border-orange-500"
-                                            value={video.videoMetadata.tags?.join(', ') || ''}
-                                            onChange={(e) => {
-                                                const tagsArray = e.target.value.split(',').map(t => t.trim()).filter(Boolean);
-                                                updateVideo(project.id, video.id, { videoMetadata: { ...video.videoMetadata!, tags: tagsArray } });
-                                            }}
-                                            placeholder="tag1, tag2..."
-                                        />
-                                    </div>
-                                </div>
-                             )}
-
-                             {/* Upload Progress Bar */}
-                             {isUploading && (
-                                 <div className="space-y-2">
-                                     <div className="flex justify-between text-[10px] text-slate-400 font-mono">
-                                         <span className="flex items-center gap-1">
-                                             <Loader2 className="w-3 h-3 animate-spin" />
-                                             {isRenderingVideo ? 'Renderizando para Upload...' : 'Enviando para o YouTube...'}
-                                         </span>
-                                         <span>{isRenderingVideo ? renderProgress : uploadProgress}%</span>
-                                     </div>
-                                     <div className="h-2 w-full bg-slate-800 rounded-full overflow-hidden">
-                                         <div className="h-full bg-gradient-to-r from-red-600 to-red-400 transition-all duration-300 ease-out" style={{ width: `${isRenderingVideo ? renderProgress : uploadProgress}%` }}></div>
-                                     </div>
-                                 </div>
-                             )}
-
-                             {uploadError && (
-                                 <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl flex items-start gap-3 animate-in fade-in slide-in-from-top-2 duration-300">
-                                     <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
-                                     <div className="flex-1">
-                                         <p className="text-xs text-red-400 font-medium">{uploadError}</p>
-                                         <div className="flex items-center gap-3 mt-1">
-                                             <button onClick={() => setUploadError(null)} className="text-[10px] text-red-500/70 hover:text-red-500 underline">Dispensar</button>
-                                             <button onClick={() => setShowTroubleshooting(true)} className="text-[10px] text-blue-400 hover:text-blue-300 font-bold flex items-center gap-1">
-                                                 <HelpCircle className="w-3 h-3" /> Guia de Solução
-                                             </button>
-                                         </div>
-                                     </div>
-                                 </div>
-                             )}
-
-                             <div className="space-y-3">
-                                 {!isUploading && !isRenderingVideo && (
-                                     <div className="flex flex-col gap-1">
-                                         <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1">
-                                             <Calendar className="w-3 h-3" /> Agendar (Opcional)
-                                         </label>
-                                         <input 
-                                             type="datetime-local" 
-                                             value={scheduledDate} 
-                                             onChange={(e)=>setScheduledDate(e.target.value)} 
-                                             className="bg-black/40 border border-white/10 rounded-xl px-4 py-2.5 text-white text-xs w-full focus:outline-none focus:border-red-500 transition-colors" 
-                                         />
-                                     </div>
-                                 )}
-
-                                  {video.youtubeUrl ? (
-                                      <div className="space-y-3">
-                                          <div className="p-4 bg-green-500/10 border border-green-500/20 rounded-xl flex flex-col items-center gap-3">
-                                              <div className="w-10 h-10 bg-green-500/20 rounded-full flex items-center justify-center">
-                                                  <CheckCircle className="w-6 h-6 text-green-500" />
-                                              </div>
-                                              <div className="text-center">
-                                                  <p className="text-green-400 font-bold text-sm">Postado com Sucesso!</p>
-                                                  <p className="text-[10px] text-green-500/70">Seu vídeo já está no YouTube.</p>
-                                              </div>
-                                              <div className="flex gap-2 w-full">
-                                                  <a 
-                                                      href={video.youtubeUrl} 
-                                                      target="_blank" 
-                                                      rel="noopener noreferrer"
-                                                      className="flex-1 py-2 bg-white text-black rounded-lg text-xs font-bold flex items-center justify-center gap-2 hover:bg-slate-200"
-                                                  >
-                                                      <ExternalLink className="w-3 h-3" /> Ver no YouTube
-                                                  </a>
-                                                  <button 
-                                                      onClick={() => {
-                                                          navigator.clipboard.writeText(video.youtubeUrl!);
-                                                          alert("Link copiado!");
-                                                      }}
-                                                      className="p-2 bg-white/10 text-white rounded-lg hover:bg-white/20"
-                                                      title="Copiar Link"
-                                                  >
-                                                      <Copy className="w-4 h-4" />
-                                                  </button>
-                                              </div>
-                                          </div>
-                                          <div className="flex gap-2">
-                                              <button 
-                                                  onClick={handleRealUpload} 
-                                                  disabled={isUploading || isRenderingVideo} 
-                                                  className="flex-1 py-3 rounded-xl border border-white/10 text-slate-500 hover:text-slate-300 text-xs font-medium"
-                                              >
-                                                  Postar Novamente
-                                              </button>
-                                              <button 
-                                                  onClick={() => updateVideo(project.id, video.id, { youtubeUrl: undefined })}
-                                                  className="px-4 py-3 rounded-xl border border-white/10 text-slate-500 hover:text-red-400 text-xs font-medium"
-                                                  title="Limpar Status"
-                                              >
-                                                  <RotateCcw className="w-4 h-4" />
-                                              </button>
-                                          </div>
-                                      </div>
-                                  ) : (
-                                      <button 
-                                          onClick={handleRealUpload} 
-                                          disabled={!project?.youtubeChannelData || isUploading || isRenderingVideo} 
-                                          className={`w-full py-4 rounded-xl font-bold shadow-lg transition-all active:scale-95 flex flex-col items-center justify-center gap-1 ${scheduledDate ? 'bg-orange-600 hover:bg-orange-500 shadow-orange-900/20' : 'bg-red-600 hover:bg-red-500 shadow-red-900/20'} disabled:opacity-50`}
-                                      >
-                                          <div className="flex items-center gap-2">
-                                               {isUploading || isRenderingVideo ? <Loader2 className="w-5 h-5 animate-spin" /> : scheduledDate ? <Calendar className="w-5 h-5" /> : <Upload className="w-5 h-5" />} 
-                                               <span>{isUploading ? (isRenderingVideo ? 'Renderizando...' : 'Enviando...') : scheduledDate ? 'Agendar no YouTube' : 'Postar no YouTube'}</span>
-                                          </div>
-                                          {!isUploading && !isRenderingVideo && <span className="text-[10px] opacity-70 font-normal">O vídeo será renderizado automaticamente</span>}
-                                      </button>
-                                  )}
-                             </div>
-                         </div>
-                     </div>
-                </div>
+                <PublishTab
+                    video={video}
+                    project={project}
+                    isRenderingVideo={isRenderingVideo}
+                    renderStatus={renderStatus}
+                    renderProgress={renderProgress}
+                    isUploading={isUploading}
+                    uploadProgress={uploadProgress}
+                    uploadError={uploadError}
+                    thumbnailError={thumbnailError}
+                    isGeneratingThumbnail={isGeneratingThumbnail}
+                    isGeneratingMetadata={isGeneratingMetadata}
+                    scheduledDate={scheduledDate}
+                    onRenderAndDownload={() => handleRenderAndDownload(true)}
+                    onRealUpload={handleRealUpload}
+                    onGenerateThumbnail={handleGenerateThumbnail}
+                    onGenerateMetadata={handleGenerateMetadata}
+                    onScheduledDateChange={setScheduledDate}
+                    onDismissUploadError={() => setUploadError(null)}
+                    onDismissThumbnailError={() => setThumbnailError(null)}
+                    onShowTroubleshooting={() => setShowTroubleshooting(true)}
+                    onShowThumbnailTroubleshooting={() => setShowThumbnailTroubleshooting(true)}
+                    onUpdateVideoMetadata={(field, value) =>
+                        updateVideo(project.id, video.id, { videoMetadata: { ...video.videoMetadata!, [field]: value } })
+                    }
+                    onClearYoutubeUrl={() => updateVideo(project.id, video.id, { youtubeUrl: undefined })}
+                />
             )}
+
         </div>
 
-        {/* FLOATING STATUS BAR */}
+                {/* FLOATING STATUS BAR */}
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50">
             <div className="bg-[#0B1121]/80 backdrop-blur-xl border border-white/10 rounded-full shadow-2xl px-6 py-2 flex items-center gap-4">
                  <div className="flex items-center gap-2 text-xs font-mono">
@@ -2278,7 +1654,7 @@ export const ProjectEditor: React.FC = () => {
                     <div className="flex gap-3">
                         <button 
                             onClick={() => {
-                                if (project) updateProject(project.id, { isYoutubeConnected: false, youtubeChannelData: undefined, youtubeAccessToken: undefined });
+                                if (project) updateProject(project.id, { isYoutubeConnected: false, youtubeChannelData: undefined });
                                 alert("Sessão limpa. Reconecte o canal na aba Settings do projeto.");
                                 setShowTroubleshooting(false);
                             }}
@@ -2347,7 +1723,7 @@ export const ProjectEditor: React.FC = () => {
                         <div className="pt-2">
                             <button 
                                 onClick={() => {
-                                    if (project) updateProject(project.id, { isYoutubeConnected: false, youtubeChannelData: undefined, youtubeAccessToken: undefined });
+                                    if (project) updateProject(project.id, { isYoutubeConnected: false, youtubeChannelData: undefined });
                                     alert("Sessão limpa. Reconecte o canal na aba Settings do projeto.");
                                     setShowCorsHelp(false);
                                 }}

@@ -175,7 +175,9 @@ export interface Project {
   
   isYoutubeConnected?: boolean;
   youtubeChannelData?: YouTubeChannel;
-  youtubeAccessToken?: string;
+  // NOTE: youtubeAccessToken was removed from Project.
+  // OAuth tokens are NOT domain data — they live exclusively in AuthContext
+  // and are never serialized into projects or synced to Supabase.
 }
 
 export interface GenerateScriptParams {

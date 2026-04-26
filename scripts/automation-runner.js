@@ -467,6 +467,20 @@ async function processProject(projectRow) {
   const data = projectRow.data;
   const startTime = Date.now();
 
+  // Acquire distributed lock — prevents browser scheduler from running
+  // the same project at the same time as this GitHub Actions runner.
+  const { data: lockAcquired, error: lockError } = await supabase
+    .rpc('acquire_autopilot_lock', {
+      p_project_id: projectId,
+      p_locked_by: 'github-actions',
+      p_lock_minutes: 90,
+    });
+
+  if (lockError || !lockAcquired) {
+    log('⏭️', `Lock not acquired for "${data.channelTheme}" — likely running in browser. Skipping.`);
+    return false;
+  }
+
   log('🚀', `Processing project: "${data.channelTheme}" (${projectId})`);
 
   // Ensure projectId is accessible inside data for token lookup
@@ -585,6 +599,14 @@ async function processProject(projectRow) {
     });
 
     return false;
+  } finally {
+    // Always release the lock — even on crash — so the project isn't
+    // permanently blocked from future runs.
+    try {
+      await supabase.rpc('release_autopilot_lock', { p_project_id: projectId });
+    } catch (e) {
+      log('⚠️', `Failed to release autopilot lock for ${projectId}: ${e.message}`);
+    }
   }
 }
 

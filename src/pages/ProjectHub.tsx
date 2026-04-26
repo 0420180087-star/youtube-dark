@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useProjects } from '../context/ProjectContext';
@@ -68,7 +68,7 @@ const FORMAT_OPTIONS: VideoFormat[] = [
 export const ProjectHub: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const { getProject, updateProject, deleteProject, addVideo, deleteVideo, updateIdeaStatus, saveGeneratedIdeas, removeIdeaFromHistory, addLibraryItem, deleteLibraryItem, isLoading: isProjectsLoading } = useProjects();
-  const { user, googleClientId, isLoading: isAuthLoading } = useAuth();
+  const { user, googleClientId, isLoading: isAuthLoading, connectYoutube, disconnectYoutube, youtubeChannel, accessToken } = useAuth();
   
   const navigate = useNavigate();
   const project = getProject(id || '');
@@ -129,6 +129,40 @@ export const ProjectHub: React.FC = () => {
     setEditAutoGenerate(project.scheduleSettings?.autoGenerate || false);
     setEditAutoShorts(project.autoGenerateShorts || false);
   }, [project?.id]); // Only re-sync when project ID changes (not on every render)
+
+  // Detect unsaved changes: compare current edit state to what's in the project.
+  // This drives both the save-button badge and the beforeunload guard.
+  const hasUnsavedChanges =
+    project != null && (
+      editTitle !== (project.title || '') ||
+      editTheme !== (project.channelTheme || '') ||
+      editTone !== (project.defaultTone || 'Suspenseful and Dark') ||
+      editVoice !== (project.defaultVoice || 'Fenrir') ||
+      editLanguage !== (project.language || 'Portuguese (BR)') ||
+      editDuration !== (project.defaultDuration || 'Standard (5-8 min)') ||
+      editFormat !== (project.defaultFormat || 'Landscape 16:9') ||
+      editGeminiPercent !== (project.visualSourceMix?.geminiPercentage ?? 50) ||
+      editPexelsPercent !== (project.visualSourceMix?.pexelsPercentage ?? 50) ||
+      editMinImages !== (project.visualPacing?.minImagesPer5Sec ?? 1) ||
+      editMaxImages !== (project.visualPacing?.maxImagesPer5Sec ?? 2) ||
+      editStyle !== (project.visualPacing?.style ?? 'dynamic') ||
+      editFreq !== (project.scheduleSettings?.frequencyDays || 1) ||
+      editTimeStart !== (project.scheduleSettings?.timeWindowStart || '13:00') ||
+      editTimeEnd !== (project.scheduleSettings?.timeWindowEnd || '15:00') ||
+      editAutoGenerate !== (project.scheduleSettings?.autoGenerate || false) ||
+      editAutoShorts !== (project.autoGenerateShorts || false)
+    );
+
+  // Warn the user if they try to close the tab or navigate away with unsaved changes.
+  useEffect(() => {
+    if (!hasUnsavedChanges) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = ''; // Required for Chrome
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [hasUnsavedChanges]);
 
   // New Video State
   const [newVideoTopic, setNewVideoTopic] = useState('');
@@ -350,68 +384,27 @@ export const ProjectHub: React.FC = () => {
   };
 
   const handleConnectChannel = async () => {
-      if (!user) {
-          alert("Faça login primeiro nas Configurações.");
-          return;
+      // Delegates the full OAuth flow to AuthContext.
+      // When the flow completes, AuthContext holds the token in memory.
+      // We then persist only the channel metadata (no token) into the project.
+      await connectYoutube(project.id);
+      // After the OAuth redirect round-trip, youtubeChannel in AuthContext will
+      // be populated. Sync only the non-sensitive channel data into the project.
+      if (youtubeChannel) {
+        updateProject(project.id, {
+          isYoutubeConnected: true,
+          youtubeChannelData: youtubeChannel,
+        });
       }
-      const activeClientId = googleClientId?.trim();
-      if (!activeClientId) {
-          alert("Configure o Google Client ID nas Configurações primeiro.");
-          return;
-      }
-      if (typeof (window as any).google === 'undefined') {
-          alert("Google Scripts não carregados. Recarregue a página.");
-          return;
-      }
-      const goog = (window as any).google;
-      const client = goog.accounts.oauth2.initTokenClient({
-          client_id: activeClientId,
-          scope: 'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly',
-          callback: async (tokenResponse: any) => {
-              if (tokenResponse && tokenResponse.access_token) {
-                  const token = tokenResponse.access_token;
-                  try {
-                      const res = await fetch('https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&mine=true', {
-                          headers: { Authorization: `Bearer ${token}` }
-                      });
-                      if (!res.ok) throw new Error("YouTube API Error");
-                      const data = await res.json();
-                      if (data.items?.length > 0) {
-                          const ch = data.items[0];
-                          const channelData = {
-                              id: ch.id,
-                              title: ch.snippet.title,
-                              thumbnailUrl: ch.snippet.thumbnails.default.url,
-                              subscriberCount: ch.statistics.subscriberCount
-                          };
-                          updateProject(project.id, { 
-                              isYoutubeConnected: true, 
-                              youtubeChannelData: channelData,
-                              youtubeAccessToken: token
-                          });
-                      } else {
-                          alert("Nenhum canal YouTube encontrado nesta conta Google.");
-                      }
-                  } catch (e) {
-                      console.error(e);
-                      alert("Falha ao buscar dados do canal.");
-                  }
-              }
-          },
-      });
-      client.requestAccessToken();
   };
   
   const handleDisconnectChannel = () => {
-      // Revoke token if possible
-      const token = project.youtubeAccessToken;
-      if (token && typeof (window as any).google !== 'undefined') {
-          try { (window as any).google.accounts.oauth2.revoke(token, () => {}); } catch (e) {}
-      }
+      // Revoke token and clear AuthContext state
+      disconnectYoutube();
+      // Clear channel metadata from the project
       updateProject(project.id, { 
           isYoutubeConnected: false, 
           youtubeChannelData: undefined, 
-          youtubeAccessToken: undefined 
       });
   };
 
@@ -540,9 +533,12 @@ export const ProjectHub: React.FC = () => {
                 </button>
                 <button 
                     onClick={() => setActiveTab('settings')}
-                    className={`pb-3 border-b-2 font-medium text-sm transition-colors ${activeTab === 'settings' ? 'border-orange-500 text-orange-400' : 'border-transparent text-slate-500 hover:text-slate-300'}`}
+                    className={`pb-3 border-b-2 font-medium text-sm transition-colors flex items-center gap-2 ${activeTab === 'settings' ? 'border-orange-500 text-orange-400' : 'border-transparent text-slate-500 hover:text-slate-300'}`}
                 >
                     Settings
+                    {hasUnsavedChanges && (
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0" title="Alterações não salvas" />
+                    )}
                 </button>
             </div>
         </div>
@@ -1319,14 +1315,22 @@ export const ProjectHub: React.FC = () => {
                         </div>
 
                         <div className="pt-2">
-                            <button 
-                                onClick={handleSaveSettings}
-                                disabled={isSaving}
-                                className="flex items-center gap-2 bg-orange-600 hover:bg-orange-500 text-white px-6 py-2.5 rounded-lg font-bold shadow-lg shadow-orange-600/20 transition-all disabled:opacity-50 w-full justify-center md:w-auto active:scale-95"
-                            >
-                                <Save className="w-4 h-4" />
-                                {isSaving ? 'Saving...' : 'Save Changes'}
-                            </button>
+                            <div className="flex items-center gap-3">
+                                <button 
+                                    onClick={handleSaveSettings}
+                                    disabled={isSaving || !hasUnsavedChanges}
+                                    className="flex items-center gap-2 bg-orange-600 hover:bg-orange-500 text-white px-6 py-2.5 rounded-lg font-bold shadow-lg shadow-orange-600/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed w-full justify-center md:w-auto active:scale-95"
+                                >
+                                    <Save className="w-4 h-4" />
+                                    {isSaving ? 'Salvando...' : 'Salvar Alterações'}
+                                </button>
+                                {hasUnsavedChanges && !isSaving && (
+                                    <span className="flex items-center gap-1.5 text-xs font-semibold text-amber-400 bg-amber-400/10 border border-amber-400/20 px-3 py-2 rounded-lg animate-pulse">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400 inline-block" />
+                                        Alterações não salvas
+                                    </span>
+                                )}
+                            </div>
                         </div>
 
                         {/* Danger Zone */}

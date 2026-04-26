@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { UserProfile, YouTubeChannel } from '../types';
 import { encryptData, decryptData } from '../services/securityService';
-import { supabase } from '../lib/supabaseClient';
+import { supabase, setSupabaseUserEmail } from '../lib/supabaseClient';
 
 declare const google: any;
 
@@ -47,7 +47,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           try {
             const val = await decryptData(storedUser);
             const parsed = JSON.parse(val);
-            if (parsed?.email) setUser(parsed);
+            if (parsed?.email) {
+              setUser(parsed);
+              // Re-establish RLS scope for this session
+              await setSupabaseUserEmail(parsed.email);
+            }
           } catch {
             localStorage.removeItem('ds_user_profile');
           }
@@ -264,6 +268,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           // Save locally (encrypted)
           const encrypted = await encryptData(JSON.stringify(profile));
           localStorage.setItem('ds_user_profile', encrypted);
+
+          // Establish RLS session scope: all subsequent Supabase calls from
+          // this client will be filtered to this user's rows.
+          await setSupabaseUserEmail(profile.email);
 
           // Save to Supabase for cross-device persistence
           if (supabase && profile.email) {

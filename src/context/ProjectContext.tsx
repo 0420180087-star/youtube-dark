@@ -67,7 +67,7 @@ interface ProjectContextType {
 const ProjectContext = createContext<ProjectContextType | undefined>(undefined);
 
 export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { user } = useAuth();
+  const { user, accessToken } = useAuth();
   const [projects, setProjects] = useState<Project[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [autoPilotStatus, setAutoPilotStatus] = useState<string>('Idle');
@@ -80,6 +80,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const isRunningAutomation = useRef(false);
   const projectsRef = useRef(projects);
   const userEmailRef = useRef<string>('');
+  const accessTokenRef = useRef<string | null>(null);
 
   const storageKey = user?.email ? `darkstream_projects_${user.email}` : 'darkstream_projects_guest';
 
@@ -161,6 +162,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   useEffect(() => { projectsRef.current = projects; }, [projects]);
   useEffect(() => { userEmailRef.current = user?.email || ''; }, [user?.email]);
+  useEffect(() => { accessTokenRef.current = accessToken; }, [accessToken]);
 
   // Save projects — local + Supabase sync
   useEffect(() => {
@@ -291,7 +293,9 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       
       const eligibleProject = projectsRef.current.find(p => {
         if (!p.scheduleSettings?.autoGenerate) return false;
-        if (!p.isYoutubeConnected || !p.youtubeAccessToken) return false;
+        // Token comes from AuthContext (userEmailRef is a proxy; the real token
+        // check is done inside runFullPipeline via accessTokenRef)
+        if (!p.isYoutubeConnected || !p.youtubeChannelData) return false;
         
         const info = getNextAutoRunInfoFromRef(p);
         return info.isEligible;
@@ -324,9 +328,37 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const runFullPipeline = async (project: Project) => {
     if (isRunningAutomation.current) return;
-    if (!project.youtubeAccessToken || !project.youtubeChannelData) {
+
+    const currentToken = accessTokenRef.current;
+    if (!currentToken || !project.youtubeChannelData) {
       setAutoPilotStatus("Auto-Pilot Pausado: YouTube não conectado");
       return;
+    }
+
+    // Acquire distributed lock before starting.
+    // This prevents the browser and GitHub Actions from running the same
+    // project simultaneously. Only one runner wins the DB update.
+    if (supabase) {
+      try {
+        const { data: lockAcquired, error } = await supabase
+          .rpc('acquire_autopilot_lock', {
+            p_project_id: project.id,
+            p_locked_by: 'browser',
+            p_lock_minutes: 90,
+          });
+
+        if (error || !lockAcquired) {
+          console.info(
+            `[AutoPilot] Lock não obtido para "${project.title}" — provavelmente em execução pelo GitHub Actions.`
+          );
+          setAutoPilotStatus(`Auto-Pilot: "${project.title}" em execução em outro runner`);
+          return;
+        }
+      } catch (e) {
+        // If Supabase is unreachable, proceed anyway — better to risk a duplicate
+        // than to permanently block the browser pipeline.
+        console.warn('[AutoPilot] Não foi possível verificar o lock distribuído:', e);
+      }
     }
 
     isRunningAutomation.current = true;
@@ -358,7 +390,8 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       addVideo,
       updateVideo,
       updateIdeaStatus,
-      getLatestProject: (id) => projectsRef.current.find(p => p.id === id)
+      getLatestProject: (id) => projectsRef.current.find(p => p.id === id),
+      youtubeAccessToken: currentToken,
     };
 
     const result: PipelineResult = await runAutomationPipeline(project, callbacks);
@@ -385,6 +418,15 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     // Schedule next run regardless of success/failure
     scheduleNextRun(project.id);
+
+    // Release the distributed lock so GitHub Actions can pick up the next run
+    if (supabase) {
+      try {
+        await supabase.rpc('release_autopilot_lock', { p_project_id: project.id });
+      } catch (e) {
+        console.warn('[AutoPilot] Não foi possível liberar o lock distribuído:', e);
+      }
+    }
 
     setAutoPilotProgress({
       isRunning: false, currentStep: null, stepMessage: '', stepStartTime: null, pipelineStartTime: null
@@ -475,8 +517,26 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }));
   };
 
-  const markIdeaAsUsed = (id: string, idea: string) => {}; 
-  const removeIdeaFromHistory = (id: string, idea: string) => {};
+  // Marks an idea as 'used' by matching its topic string.
+  // Used by legacy callers that pass topic text instead of an idea ID.
+  const markIdeaAsUsed = (projectId: string, topic: string) => {
+    setProjects(prev => prev.map(p => {
+      if (p.id !== projectId || !p.ideas) return p;
+      return {
+        ...p,
+        ideas: p.ideas.map(i => i.topic === topic ? { ...i, status: 'used' as const } : i),
+      };
+    }));
+  };
+
+  // Permanently removes an idea by topic string (legacy interface).
+  // Prefer updateIdeaStatus with 'dismissed' for reversible dismissal.
+  const removeIdeaFromHistory = (projectId: string, topic: string) => {
+    setProjects(prev => prev.map(p => {
+      if (p.id !== projectId || !p.ideas) return p;
+      return { ...p, ideas: p.ideas.filter(i => i.topic !== topic) };
+    }));
+  };
 
   const addLibraryItem = (projectId: string, title: string, type: LibraryItemType, content: string) => {
     setProjects(prev => prev.map(p => {

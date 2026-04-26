@@ -31,6 +31,8 @@ export interface PipelineCallbacks {
   updateVideo: (projectId: string, videoId: string, updates: Partial<Video>) => void;
   updateIdeaStatus: (projectId: string, ideaId: string, status: 'used' | 'dismissed' | 'new') => void;
   getLatestProject: (projectId: string) => Project | undefined;
+  // Token comes from AuthContext, never from Project data
+  youtubeAccessToken: string;
 }
 
 export interface PipelineResult {
@@ -143,6 +145,10 @@ export async function stepGenerateVoice(
   const finalAudio = mergeAudioBuffers(audioBuffers, ctx);
   const audioUrl = audioBufferToBase64(finalAudio);
 
+  // Release AudioContext resources — this context is only needed for decoding,
+  // not for playback. Closing it prevents accumulation across pipeline runs.
+  await ctx.close();
+
   callbacks.updateVideo(project.id, video.id, { audioUrl, segmentTimestamps: timestamps, status: ProjectStatus.AUDIO_GENERATED });
   callbacks.onStepComplete('voice');
   return { audioUrl, timestamps, totalDuration: totalDur };
@@ -159,6 +165,8 @@ export async function stepGenerateVisuals(
   callbacks.onStepStart('visuals', 'Buscando imagens e vídeos...');
   const scenes: VisualScene[] = [];
   const pexelsUsedIds = new Set<number>();
+  // Tracks when the last image generation call was made for rate-limit throttling
+  let lastImageCallTime = 0;
 
   for (let i = 0; i < script.segments.length; i++) {
     const start = timestamps[i];
@@ -178,7 +186,20 @@ export async function stepGenerateVisuals(
       const prompt = prompts[j];
       const dur = sceneDurations[j];
 
-      if (i > 0 || j > 0) await new Promise(r => setTimeout(r, 6000));
+      // Throttle between image requests to respect Gemini rate limits.
+      // We track the timestamp of the last call and wait only as long as
+      // necessary, instead of using a fixed blind delay.
+      // Target: no more than 10 image requests per minute (6s apart).
+      // The geminiService's key-rotation engine handles 429s independently;
+      // this pre-throttle reduces how often we hit them in the first place.
+      if (i > 0 || j > 0) {
+        const MIN_INTERVAL_MS = 6_000;
+        const sinceLastCall = Date.now() - lastImageCallTime;
+        if (sinceLastCall < MIN_INTERVAL_MS) {
+          await new Promise(r => setTimeout(r, MIN_INTERVAL_MS - sinceLastCall));
+        }
+      }
+      lastImageCallTime = Date.now();
 
       let imgUrl = '';
       let videoUrl = undefined;
@@ -299,7 +320,7 @@ export async function stepUploadToYouTube(
   console.log(`[Upload] File format: ${fileType} (${(blob.size / 1024 / 1024).toFixed(1)}MB)`);
 
   callbacks.onProgress('upload', 'Enviando para YouTube...');
-  const ytbId = await uploadVideoToYouTube(project.youtubeAccessToken!, file, metadata, thumbnailUrl);
+  const ytbId = await uploadVideoToYouTube(callbacks.youtubeAccessToken, file, metadata, thumbnailUrl);
 
   callbacks.updateVideo(project.id, video.id, {
     status: ProjectStatus.PUBLISHED,
@@ -613,7 +634,7 @@ ${segment.narratorText?.substring(0, 300) || ''}
     // 7. Upload Short
     const { uploadVideoToYouTube } = await import('./youtubeService');
     const shortYtbId = await uploadVideoToYouTube(
-      project.youtubeAccessToken!,
+      callbacks.youtubeAccessToken,
       shortFile,
       shortsMetadata,
       latestVideo?.thumbnailUrl

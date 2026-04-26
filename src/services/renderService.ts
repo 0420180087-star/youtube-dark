@@ -369,8 +369,16 @@ export const renderVideoHeadless = async (
   onProgress(20, "Rendering video...");
 
   // ── CANVAS + RECORDER ──────────────────────────────────────────────────────
-  const width = 1920;
-  const height = video.format?.includes("9:16") ? 3413 : video.format?.includes("1:1") ? 1920 : 1080;
+  // Canvas dimensions by format:
+  //   Landscape 16:9  → 1920 × 1080  (standard HD)
+  //   Portrait  9:16  → 1080 × 1920  (YouTube Shorts — NOT 1920×3413)
+  //   Square    1:1   → 1080 × 1080
+  // Using 1920×3413 for portrait was a bug: it's 3× heavier than needed
+  // and exceeds what YouTube Shorts requires (max 1080×1920).
+  const isPortrait = video.format?.includes('9:16');
+  const isSquare   = video.format?.includes('1:1');
+  const width  = isPortrait ? 1080 : 1920;
+  const height = isPortrait ? 1920 : isSquare ? 1080 : 1080;
 
   const canvas = document.createElement("canvas");
   canvas.width = width;

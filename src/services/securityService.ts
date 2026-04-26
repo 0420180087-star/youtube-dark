@@ -1,5 +1,29 @@
 
-// AES-GCM Encryption Service using Web Crypto API
+// =============================================================================
+// LOCAL OBFUSCATION SERVICE
+// =============================================================================
+//
+// IMPORTANT — SECURITY LIMITATIONS (read before using):
+//
+// This module uses AES-GCM (Web Crypto API) to obfuscate values stored in
+// localStorage. It is NOT true security. The encryption key is generated once
+// and stored in the SAME localStorage as the encrypted values. Any script that
+// can read localStorage (XSS attack, malicious browser extension) can trivially
+// obtain both the key and the ciphertext.
+//
+// What this DOES provide:
+//   - Obfuscation against casual inspection (DevTools, shoulder surfing)
+//   - A small barrier against naive localStorage scraping tools
+//
+// What this does NOT provide:
+//   - Protection against XSS or malicious extensions
+//   - Meaningful security for truly sensitive values (e.g. OAuth tokens)
+//
+// For OAuth tokens specifically: they are kept in React state (AuthContext)
+// and only persisted to localStorage as a convenience cache. The real source
+// of truth for long-lived tokens is the Supabase `project_auth` table, which
+// is accessed exclusively from server-side Edge Functions with the service key.
+// =============================================================================
 
 const KEY_STORAGE_NAME = 'ds_master_key_v1';
 
