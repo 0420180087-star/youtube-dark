@@ -60,14 +60,14 @@ interface ProjectContextType {
   autoPilotStatus: string;
   autoPilotLog: AutoPilotLogEntry[];
   autoPilotProgress: AutoPilotProgress;
-  triggerAutoPilotNow: (projectId: string) => void;
+  triggerAutoPilotNow: (projectId: string) => Promise<void>;
   getNextAutoRunInfo: (projectId: string) => { nextRunDate: Date | null; isEligible: boolean };
 }
 
 const ProjectContext = createContext<ProjectContextType | undefined>(undefined);
 
 export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { user, accessToken } = useAuth();
+  const { user, accessToken, refreshYouTubeToken } = useAuth();
   const [projects, setProjects] = useState<Project[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [autoPilotStatus, setAutoPilotStatus] = useState<string>('Idle');
@@ -269,13 +269,39 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     });
   };
 
-  const triggerAutoPilotNow = (projectId: string) => {
+  const triggerAutoPilotNow = async (projectId: string) => {
     const project = projects.find(p => p.id === projectId);
     if (!project) return;
     if (isRunningAutomation.current) {
       setAutoPilotStatus("Já está em execução...");
       return;
     }
+
+    // If the project has a connected channel but we have no token in memory,
+    // attempt a refresh before giving up. This handles the case where the
+    // token expired since the last page load.
+    if (project.isYoutubeConnected && project.youtubeChannelData && !accessTokenRef.current) {
+      setAutoPilotStatus("Renovando token do YouTube...");
+      try {
+        const freshToken = await refreshYouTubeToken(projectId);
+        if (!freshToken) {
+          setAutoPilotStatus(
+            "Auto-Pilot Pausado: token do YouTube expirou. Vá em Configurações → desconecte e reconecte o canal."
+          );
+          return;
+        }
+        // refreshYouTubeToken already calls setAccessToken internally,
+        // so accessTokenRef will be updated via the useEffect sync.
+        // Give it one tick to propagate before proceeding.
+        await new Promise(r => setTimeout(r, 50));
+      } catch {
+        setAutoPilotStatus(
+          "Auto-Pilot Pausado: não foi possível renovar o token. Reconecte o canal YouTube."
+        );
+        return;
+      }
+    }
+
     runFullPipeline(project);
   };
 
@@ -325,7 +351,10 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     const currentToken = accessTokenRef.current;
     if (!currentToken || !project.youtubeChannelData) {
-      setAutoPilotStatus("Auto-Pilot Pausado: YouTube não conectado");
+      const reason = !project.youtubeChannelData
+        ? "canal YouTube não configurado neste projeto"
+        : "token do YouTube expirou — reconecte o canal em Configurações";
+      setAutoPilotStatus(`Auto-Pilot Pausado: ${reason}`);
       return;
     }
 

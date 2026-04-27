@@ -12,11 +12,31 @@
  *   geminiThumbnail.ts  — clickbait thumbnail generation engine
  *   geminiAudio.ts      — AudioBuffer helpers (decode, merge, serialise)
  *
+ * INTERNAL SYMBOLS NOT RE-EXPORTED:
+ *   executeGeminiRequest — internal queue entry point, not part of the public API.
+ *                          Only gemini* sibling modules should call it directly.
+ *   delay                — internal timing helper, not meant for external use.
+ *
  * To add new Gemini functionality: create a new gemini*.ts module and
- * add its exports here. Do not add implementation code to this file.
+ * add its public exports here. Do not add implementation code to this file.
  */
 
-export * from './geminiCore';
+// geminiCore — export everything EXCEPT internal infrastructure symbols
+export {
+  clearExhaustedKeys,
+  getKeysStatusSummary,
+  getKeyStatus,
+  cancelGeminiSession,
+  generateVideoIdeas,
+  generateVideoScript,
+  generateMissingNarratorTexts,
+  generateSingleNarratorText,
+  generateVideoMetadata,
+  generateVoiceover,
+} from './geminiCore';
+export type { VideoIdea } from './geminiCore';
+
+// Domain modules — full re-export (all their exports are public by design)
 export * from './geminiMusic';
 export * from './geminiPexels';
 export * from './geminiThumbnail';
