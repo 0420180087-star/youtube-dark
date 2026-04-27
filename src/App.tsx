@@ -11,6 +11,7 @@ const ProjectHub = React.lazy(() => import('./pages/ProjectHub').then(module => 
 const Scheduler = React.lazy(() => import('./pages/Scheduler').then(module => ({ default: module.Scheduler })));
 const ProjectsList = React.lazy(() => import('./pages/ProjectsList').then(module => ({ default: module.ProjectsList })));
 const Settings = React.lazy(() => import('./pages/Settings').then(module => ({ default: module.Settings })));
+const OAuthCallback = React.lazy(() => import('./pages/OAuthCallback').then(module => ({ default: module.OAuthCallback })));
 
 const PageLoader = () => (
   <div className="h-full w-full flex items-center justify-center text-slate-500">
@@ -32,6 +33,7 @@ const App: React.FC = () => {
                 <Route path="/projects" element={<ProjectsList />} />
                 <Route path="/scheduler" element={<Scheduler />} />
                 <Route path="/settings" element={<Settings />} />
+                <Route path="/oauth/callback" element={<OAuthCallback />} />
               </Routes>
             </Suspense>
           </Layout>

@@ -18,6 +18,9 @@ interface AuthContextType {
   connectYoutube: (projectId?: string) => Promise<void>;
   disconnectYoutube: () => void;
   refreshYouTubeToken: (projectId: string) => Promise<string | null>;
+  // Allows external components (e.g. ProjectHub) to save a token obtained
+  // via initTokenClient into AuthContext memory + localStorage.
+  setYoutubeToken: (token: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -315,40 +318,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const connectYoutube = async (projectId?: string) => {
     if (!user) { await login(); return; }
-    setIsLoading(true);
 
     const activeClientId = googleClientId?.trim();
     if (!activeClientId) {
       alert('Por favor, configure o Google Client ID nas Configurações primeiro.');
-      setIsLoading(false);
       return;
     }
 
-    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-    if (!supabaseUrl) {
-      // Fallback to implicit flow if Supabase not configured
-      console.warn('[Auth] Supabase não configurado. Usando fluxo implícito (sem refresh_token).');
-      if (typeof google !== 'undefined') {
-        const client = google.accounts.oauth2.initTokenClient({
-          client_id: activeClientId,
-          scope: 'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly',
-          callback: async (tokenResponse: any) => {
-            if (tokenResponse && tokenResponse.access_token) {
-              setAccessToken(tokenResponse.access_token);
-              const encToken = await encryptData(tokenResponse.access_token);
-              localStorage.setItem('ds_youtube_access_token', encToken);
-              await fetchChannelData(tokenResponse.access_token);
-            }
-            setIsLoading(false);
-          },
-        });
-        client.requestAccessToken();
-      }
-      return;
-    }
+    // Always use Authorization Code Flow with a STATIC redirect_uri.
+    // Register this URI in Google Console → Credentials → OAuth → Authorized redirect URIs:
+    //   Production:  https://your-domain.com/oauth/callback
+    //   Local dev:   http://localhost:5173/oauth/callback
+    //
+    // This URI never changes — no project ID, no dynamic path.
+    // Benefits over initTokenClient (implicit flow):
+    //   - Returns a refresh_token saved server-side via the exchange-code edge function
+    //   - Auto-refreshes silently on every page load — indefinite session
+    const redirectUri = window.location.origin + '/oauth/callback';
 
-    // Authorization Code Flow (redirect-based, returns refresh_token)
-    const redirectUri = window.location.origin + window.location.pathname;
+    const state = crypto.randomUUID();
+    sessionStorage.setItem('yt_oauth_pending', JSON.stringify({
+      state,
+      projectId: projectId || 'default',
+      userEmail: user.email,
+      redirectUri,
+    }));
 
     const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     authUrl.searchParams.set('client_id', activeClientId);
@@ -360,15 +354,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     ].join(' '));
     authUrl.searchParams.set('access_type', 'offline');
     authUrl.searchParams.set('prompt', 'consent');
-    authUrl.searchParams.set('include_granted_scopes', 'true');
-
-    const state = crypto.randomUUID();
-    sessionStorage.setItem('yt_oauth_pending', JSON.stringify({
-      state,
-      projectId: projectId || 'default',
-      userEmail: user.email,
-      redirectUri,
-    }));
     authUrl.searchParams.set('state', state);
 
     window.location.href = authUrl.toString();
@@ -470,10 +455,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     localStorage.removeItem('ds_user_profile');
   };
 
+  // Saves a token obtained outside of AuthContext (e.g. via initTokenClient in ProjectHub)
+  // into AuthContext state and localStorage so the rest of the app can use it.
+  const setYoutubeToken = async (token: string) => {
+    setAccessToken(token);
+    try {
+      const encToken = await encryptData(token);
+      localStorage.setItem('ds_youtube_access_token', encToken);
+    } catch (e) {
+      console.warn('[Auth] Não foi possível salvar token localmente:', e);
+    }
+  };
+
   return (
     <AuthContext.Provider value={{ 
       user, isLoading, googleClientId, youtubeChannel, accessToken,
-      setGoogleClientId, login, logout, connectYoutube, disconnectYoutube, refreshYouTubeToken
+      setGoogleClientId, login, logout, connectYoutube, disconnectYoutube,
+      refreshYouTubeToken, setYoutubeToken
     }}>
       {children}
     </AuthContext.Provider>
