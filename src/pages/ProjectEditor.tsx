@@ -608,6 +608,11 @@ export const ProjectEditor: React.FC = () => {
   };
 
   const handleRealUpload = async () => {
+      // Guard against double-invocation — the button is disabled via props
+      // but React state updates are async, so a fast double-click can still
+      // enter this function twice before the disabled prop re-renders.
+      if (isUploading || isRenderingVideo) return;
+
       if (!project?.youtubeChannelData || !accessToken) {
           alert("Por favor, conecte um canal YouTube neste projeto primeiro (aba Settings).");
           return;
@@ -623,8 +628,12 @@ export const ProjectEditor: React.FC = () => {
           fileToUpload = new File([generatedVideoBlob], `${video.title || 'video'}.webm`, { type: 'video/webm' });
       }
 
-      // If no file, trigger render automatically
+      // If no file, trigger render automatically.
+      // Set isUploading=true BEFORE entering render so the button is disabled
+      // for the full duration — render + upload — not just the upload phase.
       if (!fileToUpload) {
+          setIsUploading(true);
+          setUploadError(null);
           setRenderStatus('Renderizando vídeo automaticamente…');
           try {
               const blob = await handleRenderAndDownload(false);
@@ -632,24 +641,28 @@ export const ProjectEditor: React.FC = () => {
                   fileToUpload = new File([blob], `${video.title || 'video'}.webm`, { type: 'video/webm' });
               }
           } catch (renderErr: any) {
+              setIsUploading(false);
               alert(`Erro ao renderizar vídeo: ${renderErr.message}`);
               return;
           }
+      } else {
+          setIsUploading(true);
+          setUploadError(null);
       }
 
       if (!fileToUpload) {
+          setIsUploading(false);
           alert("Não foi possível gerar o vídeo para upload. Verifique se o roteiro e áudio estão prontos.");
           return;
       }
 
       if (fileToUpload.size === 0) {
+          setIsUploading(false);
           alert("O arquivo de vídeo está vazio. Tente renderizar novamente.");
           return;
       }
       
-      setIsUploading(true);
       setUploadProgress(0);
-      setUploadError(null);
       setRenderStatus('Preparando upload…');
 
       try {

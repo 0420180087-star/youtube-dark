@@ -68,7 +68,7 @@ const FORMAT_OPTIONS: VideoFormat[] = [
 export const ProjectHub: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const { getProject, updateProject, deleteProject, addVideo, deleteVideo, updateIdeaStatus, saveGeneratedIdeas, removeIdeaFromHistory, addLibraryItem, deleteLibraryItem, isLoading: isProjectsLoading } = useProjects();
-  const { user, googleClientId, isLoading: isAuthLoading, connectYoutube, disconnectYoutube, youtubeChannel, accessToken } = useAuth();
+  const { user, googleClientId, isLoading: isAuthLoading, disconnectYoutube } = useAuth();
   
   const navigate = useNavigate();
   const project = getProject(id || '');

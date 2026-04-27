@@ -69,22 +69,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
 
         const storedToken = localStorage.getItem('ds_youtube_access_token');
-        if (storedToken) {
-          try {
-            const val = await decryptData(storedToken);
-            if (val) setAccessToken(val);
-          } catch {
-            localStorage.removeItem('ds_youtube_access_token');
-          }
-        }
 
-        // Auto-refresh YouTube token on app load if Supabase is configured
-        // This keeps the session alive permanently without requiring re-login
+        // Auto-refresh via Supabase Edge Function FIRST (before restoring cached token).
+        // Strategy:
+        //   1. If Supabase is configured and we have a user email, try to get a fresh token.
+        //   2. If that succeeds, use the fresh token — discard whatever is cached.
+        //   3. If refresh fails (network, edge fn down, no refresh_token), fall back to
+        //      the cached token and validate it with a lightweight Google API call.
+        //   4. If validation fails (token expired, 401), clear it — don't set a bad token.
+        let freshTokenSet = false;
+
         const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
         const supabaseAnon = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
         if (supabaseUrl && supabaseAnon) {
           try {
-            // Find the most recent project_id to use for token refresh
             const storedEmail = localStorage.getItem('ds_user_profile');
             let userEmail = '';
             if (storedEmail) {
@@ -107,6 +106,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 const data = await res.json();
                 if (data.access_token) {
                   setAccessToken(data.access_token);
+                  freshTokenSet = true;
                   const encToken = await encryptData(data.access_token);
                   localStorage.setItem('ds_youtube_access_token', encToken);
                   console.log('[Auth] ✅ Token renovado automaticamente na inicialização');
@@ -114,7 +114,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               }
             }
           } catch {
-            // Silent fail — app still works with cached token or no token
+            // Silent fail — fall through to cached token below
+          }
+        }
+
+        // Fallback: restore cached token only if refresh didn't produce a fresh one.
+        // Validate with Google before setting — a 401 means the token is expired.
+        if (!freshTokenSet && storedToken) {
+          try {
+            const val = await decryptData(storedToken);
+            if (val) {
+              // Lightweight validation: userinfo endpoint returns 401 for expired tokens
+              const check = await fetch('https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=' + val);
+              if (check.ok) {
+                setAccessToken(val);
+                console.log('[Auth] Cached token válido — restaurado.');
+              } else {
+                // Token expired — remove silently so UI shows "not connected"
+                localStorage.removeItem('ds_youtube_access_token');
+                console.log('[Auth] Cached token expirado — descartado.');
+              }
+            }
+          } catch {
+            localStorage.removeItem('ds_youtube_access_token');
           }
         }
       } catch (e) {
