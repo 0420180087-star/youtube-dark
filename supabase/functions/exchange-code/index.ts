@@ -1,7 +1,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 
 const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Origin': Deno.env.get('ALLOWED_ORIGIN') ?? 'https://yourdomain.com',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
@@ -59,7 +59,7 @@ serve(async (req) => {
       youtube_refresh_token: tokens.refresh_token,
       token_expires_at: expiresAt,
       updated_at: new Date().toISOString(),
-    }, { onConflict: 'project_id' })
+    }, { onConflict: 'project_id,user_email' })
 
     return new Response(
       JSON.stringify({
