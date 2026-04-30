@@ -417,45 +417,59 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       youtubeAccessToken: currentToken,
     };
 
-    const result: PipelineResult = await runAutomationPipeline(project, callbacks);
+    // Wrap pipeline in try/finally so isRunningAutomation is ALWAYS released.
+    // Without this, any uncaught exception from runAutomationPipeline permanently
+    // sets the lock to true — the Auto-Pilot becomes unresponsive until page reload.
+    try {
+      const result: PipelineResult = await runAutomationPipeline(project, callbacks);
 
-    if (result.success) {
-      setAutoPilotStatus("Auto-Pilot Completo!");
-      addLogEntry({ 
-        projectId: project.id, projectTitle: project.title, 
-        videoTitle: result.videoTitle, status: 'success', 
-        message: `Vídeo publicado: ${result.videoTitle}`,
-        elapsedMs: Date.now() - pipelineStart
-      });
-    } else {
-      const stepLabel = result.failedStep ? STEP_LABELS[result.failedStep] : 'desconhecido';
-      setAutoPilotStatus(`STANDBY: Falha em ${stepLabel}`);
-      addLogEntry({ 
-        projectId: project.id, projectTitle: project.title,
-        videoTitle: result.videoTitle, status: 'error',
-        message: `Falha em ${stepLabel}: ${result.errorMessage}`,
-        step: result.failedStep,
-        elapsedMs: Date.now() - pipelineStart
-      });
-    }
-
-    // Schedule next run regardless of success/failure
-    scheduleNextRun(project.id);
-
-    // Release the distributed lock so GitHub Actions can pick up the next run
-    if (supabase) {
-      try {
-        await supabase.rpc('release_autopilot_lock', { p_project_id: project.id });
-      } catch (e) {
-        console.warn('[AutoPilot] Não foi possível liberar o lock distribuído:', e);
+      if (result.success) {
+        setAutoPilotStatus("Auto-Pilot Completo!");
+        addLogEntry({ 
+          projectId: project.id, projectTitle: project.title, 
+          videoTitle: result.videoTitle, status: 'success', 
+          message: `Vídeo publicado: ${result.videoTitle}`,
+          elapsedMs: Date.now() - pipelineStart
+        });
+      } else {
+        const stepLabel = result.failedStep ? STEP_LABELS[result.failedStep] : 'desconhecido';
+        setAutoPilotStatus(`STANDBY: Falha em ${stepLabel}`);
+        addLogEntry({ 
+          projectId: project.id, projectTitle: project.title,
+          videoTitle: result.videoTitle, status: 'error',
+          message: `Falha em ${stepLabel}: ${result.errorMessage}`,
+          step: result.failedStep,
+          elapsedMs: Date.now() - pipelineStart
+        });
       }
-    }
 
-    setAutoPilotProgress({
-      isRunning: false, currentStep: null, stepMessage: '', stepStartTime: null, pipelineStartTime: null
-    });
-    isRunningAutomation.current = false;
-    setTimeout(() => setAutoPilotStatus("Idle"), 5000);
+      // Schedule next run regardless of success/failure
+      scheduleNextRun(project.id);
+    } catch (fatalErr: any) {
+      // Unexpected pipeline crash — log it and surface to the user
+      console.error('[AutoPilot] Pipeline crash:', fatalErr);
+      setAutoPilotStatus('STANDBY: Erro inesperado no pipeline');
+      addLogEntry({
+        projectId: project.id, projectTitle: project.title,
+        status: 'error',
+        message: `Erro inesperado: ${fatalErr?.message || 'Desconhecido'}`,
+        elapsedMs: Date.now() - pipelineStart
+      });
+    } finally {
+      // ALWAYS release, even on crash — without this the bot freezes until reload
+      if (supabase) {
+        try {
+          await supabase.rpc('release_autopilot_lock', { p_project_id: project.id });
+        } catch (e) {
+          console.warn('[AutoPilot] Não foi possível liberar o lock distribuído:', e);
+        }
+      }
+      setAutoPilotProgress({
+        isRunning: false, currentStep: null, stepMessage: '', stepStartTime: null, pipelineStartTime: null
+      });
+      isRunningAutomation.current = false;
+      setTimeout(() => setAutoPilotStatus("Idle"), 5000);
+    }
   };
 
 
@@ -478,13 +492,17 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setProjects(prev => {
       const updated = prev.map(p => p.id === id ? { ...p, ...updates } : p);
 
-      // Immediately persist to Supabase on settings changes (non-blob fields)
-      // This avoids waiting for the debounced useEffect which may miss rapid changes
-      const hasBlob = updates.videos?.some(v =>
-        v.audioUrl?.length > 100 || v.backgroundMusicUrl?.length > 100 ||
+      // Immediately persist to Supabase on settings changes (non-blob fields).
+      // Check the MERGED project videos (not just 'updates') because updates.videos
+      // is often undefined when only settings change, making the old check always
+      // return false and allowing blob-heavy syncs that exceed Supabase's 5 MB limit.
+      const mergedProject = updated.find(p => p.id === id);
+      const hasBlob = mergedProject?.videos.some(v =>
+        (v.audioUrl?.length ?? 0) > 100 ||
+        (v.backgroundMusicUrl?.length ?? 0) > 100 ||
         v.thumbnailUrl?.startsWith('data:') ||
         v.visualScenes?.some(s => s.imageUrl?.startsWith('data:'))
-      );
+      ) ?? false;
 
       if (!hasBlob && supabase && userEmailRef.current) {
         const project = updated.find(p => p.id === id);

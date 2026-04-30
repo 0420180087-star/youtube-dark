@@ -400,7 +400,11 @@ const runWithRotation = async <T>(op: (ai: GoogleGenAI) => Promise<T>, isRetry =
             const ai = new GoogleGenAI({ apiKey: key });
             const result = await op(ai);
             // Success — advance round-robin globally
-            roundRobinIndex = roundRobinIndex + i + 1;
+            // Mod by allKeys.length (not readyKeys.length) so the index stays
+            // bounded and cycles correctly across calls with varying ready-key counts.
+            // Without the mod, roundRobinIndex grows unboundedly and eventually exceeds
+            // Number.MAX_SAFE_INTEGER after millions of requests.
+            roundRobinIndex = (roundRobinIndex + i + 1) % allKeys.length;
             console.log(`[DarkStream AI] ✅ Sucesso com chave ${masked}`);
             return result;
         } catch (err: any) {

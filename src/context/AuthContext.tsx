@@ -150,77 +150,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     initAuth();
   }, []);
 
-  // Capture ?code= after Google OAuth redirect and exchange via Edge Function
-  useEffect(() => {
-    const urlParams = new URLSearchParams(window.location.search);
-    const code = urlParams.get('code');
-    const state = urlParams.get('state');
-
-    if (!code) return;
-
-    const pendingRaw = sessionStorage.getItem('yt_oauth_pending');
-    if (!pendingRaw) return;
-
-    let pending: { state: string; projectId: string; userEmail: string; redirectUri: string };
-    try {
-      pending = JSON.parse(pendingRaw);
-    } catch {
-      sessionStorage.removeItem('yt_oauth_pending');
-      return;
-    }
-
-    if (pending.state !== state) {
-      console.error('[Auth] State mismatch — possível CSRF');
-      sessionStorage.removeItem('yt_oauth_pending');
-      return;
-    }
-
-    sessionStorage.removeItem('yt_oauth_pending');
-    window.history.replaceState({}, '', window.location.pathname);
-
-    const exchangeCode = async () => {
-      setIsLoading(true);
-      try {
-        const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-        if (!supabaseUrl) {
-          throw new Error('VITE_SUPABASE_URL não configurada. Configure o Supabase nas variáveis de ambiente.');
-        }
-
-        const res = await fetch(`${supabaseUrl}/functions/v1/exchange-code`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-          },
-          body: JSON.stringify({
-            code,
-            redirect_uri: pending.redirectUri,
-            project_id: pending.projectId,
-            user_email: pending.userEmail,
-          }),
-        });
-
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Falha na troca de código');
-
-        setAccessToken(data.access_token);
-        const encToken = await encryptData(data.access_token);
-        localStorage.setItem('ds_youtube_access_token', encToken);
-
-        await fetchChannelData(data.access_token);
-
-        console.log('[Auth] ✅ YouTube conectado e refresh_token salvo no Supabase');
-      } catch (err: any) {
-        console.error('[Auth] Erro ao trocar code:', err);
-        alert(`Erro ao conectar YouTube: ${err.message}`);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    exchangeCode();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // NOTE: OAuth ?code= handling was intentionally removed from AuthContext.
+  // The dedicated OAuthCallback page (/oauth/callback) is the sole handler.
+  // Having two handlers caused a race condition: both would consume the
+  // sessionStorage state and attempt to exchange the same code, with the
+  // second call always failing (code already used) and potentially clearing
+  // auth state mid-session.
 
   const setGoogleClientId = async (id: string) => {
     const cleanId = id.trim();
@@ -359,7 +294,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     window.location.href = authUrl.toString();
   };
 
-  const fetchChannelData = async (token: string) => {
+  // userEmail is passed explicitly — sessionStorage is already cleared by this point
+  const fetchChannelData = async (token: string, userEmail?: string) => {
       try {
           const res = await fetch('https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&mine=true', {
               headers: { Authorization: `Bearer ${token}` }
@@ -383,15 +319,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               localStorage.setItem('ds_youtube_channel', encChannel);
 
               // Update channel info in project_auth table if Supabase available
-              const pendingRaw = sessionStorage.getItem('yt_oauth_pending');
-              const pending = pendingRaw ? JSON.parse(pendingRaw) : null;
-              if (supabase && pending?.userEmail) {
+              // Use the explicitly passed email — sessionStorage is already cleared
+              const emailToUse = userEmail || user?.email;
+              if (supabase && emailToUse) {
                   try {
                       await supabase.from('project_auth').update({
                           youtube_channel_id: ch.id,
                           youtube_channel_title: ch.snippet.title,
                           updated_at: new Date().toISOString(),
-                      }).eq('user_email', pending.userEmail);
+                      }).eq('user_email', emailToUse);
                   } catch (e) {
                       console.warn('[Supabase] Falha ao salvar canal:', e);
                   }

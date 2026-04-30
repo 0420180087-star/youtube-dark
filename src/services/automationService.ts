@@ -120,38 +120,40 @@ export async function stepGenerateVoice(
   // Natural pause between segments (0.4s = realistic breath/transition)
   const SEGMENT_PAUSE = 0.4;
 
-  for (let i = 0; i < script.segments.length; i++) {
-    callbacks.onProgress('voice', `Gerando voz: segmento ${i + 1}/${script.segments.length}...`);
-    const seg = script.segments[i];
+  try {
+    for (let i = 0; i < script.segments.length; i++) {
+      callbacks.onProgress('voice', `Gerando voz: segmento ${i + 1}/${script.segments.length}...`);
+      const seg = script.segments[i];
 
-    // Pass tone for style-aware narration
-    const tone = project.defaultTone || 'Cinematic';
-    const ab = await decodeAudioData(
-      await generateVoiceover(seg.narratorText, project.defaultVoice || 'Fenrir', tone),
-      ctx
-    );
-    audioBuffers.push(ab);
-    totalDur += ab.duration;
+      // Pass tone for style-aware narration
+      const tone = project.defaultTone || 'Cinematic';
+      const ab = await decodeAudioData(
+        await generateVoiceover(seg.narratorText, project.defaultVoice || 'Fenrir', tone),
+        ctx
+      );
+      audioBuffers.push(ab);
+      totalDur += ab.duration;
 
-    // Add natural pause between segments (not after the last one)
-    if (i < script.segments.length - 1) {
-      timestamps.push(totalDur);
-      const silence = createSilence(ctx, SEGMENT_PAUSE);
-      audioBuffers.push(silence);
-      totalDur += SEGMENT_PAUSE;
+      // Add natural pause between segments (not after the last one)
+      if (i < script.segments.length - 1) {
+        timestamps.push(totalDur);
+        const silence = createSilence(ctx, SEGMENT_PAUSE);
+        audioBuffers.push(silence);
+        totalDur += SEGMENT_PAUSE;
+      }
     }
+
+    const finalAudio = mergeAudioBuffers(audioBuffers, ctx);
+    const audioUrl = audioBufferToBase64(finalAudio);
+
+    callbacks.updateVideo(project.id, video.id, { audioUrl, segmentTimestamps: timestamps, status: ProjectStatus.AUDIO_GENERATED });
+    callbacks.onStepComplete('voice');
+    return { audioUrl, timestamps, totalDuration: totalDur };
+  } finally {
+    // Always release AudioContext — prevents accumulation of Web Audio nodes
+    // across pipeline runs, including on error paths.
+    await ctx.close();
   }
-
-  const finalAudio = mergeAudioBuffers(audioBuffers, ctx);
-  const audioUrl = audioBufferToBase64(finalAudio);
-
-  // Release AudioContext resources — this context is only needed for decoding,
-  // not for playback. Closing it prevents accumulation across pipeline runs.
-  await ctx.close();
-
-  callbacks.updateVideo(project.id, video.id, { audioUrl, segmentTimestamps: timestamps, status: ProjectStatus.AUDIO_GENERATED });
-  callbacks.onStepComplete('voice');
-  return { audioUrl, timestamps, totalDuration: totalDur };
 }
 
 export async function stepGenerateVisuals(
@@ -452,10 +454,18 @@ export function calculateNextRunTime(settings: { frequencyDays: number; timeWind
   const startMinutes = startH * 60 + startM;
   const endMinutes = endH * 60 + endM;
 
-  // Random time within window
-  const randomMinutes = startMinutes + Math.floor(Math.random() * (endMinutes - startMinutes));
-  const randomH = Math.floor(randomMinutes / 60);
-  const randomM = randomMinutes % 60;
+  // Guard: if window is inverted or zero-length, use start time as a fixed point
+  // to avoid Math.random() receiving a negative or zero range, which produces
+  // NaN/corrupt dates.
+  const windowSize = endMinutes > startMinutes ? endMinutes - startMinutes : 0;
+
+  const pickRandom = () => {
+    const offset = windowSize > 0 ? Math.floor(Math.random() * windowSize) : 0;
+    const total = startMinutes + offset;
+    return { h: Math.floor(total / 60), m: total % 60 };
+  };
+
+  const { h: randomH, m: randomM } = pickRandom();
 
   let nextDate: Date;
   
@@ -472,9 +482,8 @@ export function calculateNextRunTime(settings: { frequencyDays: number; timeWind
   // If the calculated time is in the past, move to next eligible day
   if (nextDate <= now) {
     nextDate.setDate(now.getDate() + 1);
-    // Re-randomize time for next day
-    const newRandom = startMinutes + Math.floor(Math.random() * (endMinutes - startMinutes));
-    nextDate.setHours(Math.floor(newRandom / 60), newRandom % 60, 0, 0);
+    const { h: newH, m: newM } = pickRandom();
+    nextDate.setHours(newH, newM, 0, 0);
   }
 
   return nextDate;
