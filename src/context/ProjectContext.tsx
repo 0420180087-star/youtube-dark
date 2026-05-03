@@ -164,40 +164,46 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   useEffect(() => { userEmailRef.current = user?.email || ''; }, [user?.email]);
   useEffect(() => { accessTokenRef.current = accessToken; }, [accessToken]);
 
-  // Save projects — local + Supabase sync
+  // Save projects — local immediately; Supabase debounced + diffed to avoid request floods
+  const lastSyncSnapshotRef = useRef<Map<string, string>>(new Map());
+  const supabaseSyncTimerRef = useRef<number | null>(null);
+
   useEffect(() => {
     if (isLoading) return;
 
     // 1. Always save locally via IndexedDB (full data, no size limit)
     set(storageKey, projects).catch(e => console.error('Failed to save projects locally', e));
 
-    // 2. Sync lightweight metadata to Supabase (strips heavy base64 blobs)
-    // Supabase has a ~5MB row limit — audio/images would exceed it silently
+    // 2. Debounced Supabase sync — only upserts projects whose lightweight
+    //    representation actually changed since the last sync. Prevents
+    //    bursts of upserts when many small state changes happen rapidly.
     if (!supabase || !user?.email) return;
 
-    const syncToSupabase = async () => {
+    if (supabaseSyncTimerRef.current) {
+      clearTimeout(supabaseSyncTimerRef.current);
+    }
+
+    supabaseSyncTimerRef.current = window.setTimeout(async () => {
+      const buildLight = (project: Project) => ({
+        ...project,
+        videos: project.videos.map(v => ({
+          ...v,
+          audioUrl: v.audioUrl ? '__has_audio__' : undefined,
+          backgroundMusicUrl: v.backgroundMusicUrl ? '__has_music__' : undefined,
+          visualScenes: v.visualScenes?.map(scene => ({
+            ...scene,
+            imageUrl: scene.imageUrl?.startsWith('data:') ? '__has_image__' : scene.imageUrl,
+          })),
+          thumbnailUrl: v.thumbnailUrl?.startsWith('data:') ? '__has_thumbnail__' : v.thumbnailUrl,
+        })),
+      });
+
       for (const project of projects) {
         try {
-          // Strip base64 blobs from videos before sending to Supabase
-          // Full data stays in IndexedDB; Supabase stores progress + metadata only
-          const lightProject = {
-            ...project,
-            videos: project.videos.map(v => ({
-              ...v,
-              audioUrl: v.audioUrl ? '__has_audio__' : undefined,
-              backgroundMusicUrl: v.backgroundMusicUrl ? '__has_music__' : undefined,
-              visualScenes: v.visualScenes?.map(scene => ({
-                ...scene,
-                // Keep videoUrl (external URL, small) but strip base64 imageUrls
-                imageUrl: scene.imageUrl?.startsWith('data:')
-                  ? '__has_image__'
-                  : scene.imageUrl,
-              })),
-              thumbnailUrl: v.thumbnailUrl?.startsWith('data:')
-                ? '__has_thumbnail__'
-                : v.thumbnailUrl,
-            })),
-          };
+          const lightProject = buildLight(project);
+          const signature = JSON.stringify(lightProject);
+          const previous = lastSyncSnapshotRef.current.get(project.id);
+          if (previous === signature) continue; // unchanged — skip
 
           await supabase.from('projects').upsert({
             id: project.id,
@@ -205,13 +211,20 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
             data: lightProject,
             updated_at: new Date().toISOString(),
           }, { onConflict: 'id' });
+
+          lastSyncSnapshotRef.current.set(project.id, signature);
         } catch (err) {
           console.warn('[Supabase] Falha ao sincronizar projeto:', project.id, err);
         }
       }
-    };
+    }, 1500);
 
-    syncToSupabase();
+    return () => {
+      if (supabaseSyncTimerRef.current) {
+        clearTimeout(supabaseSyncTimerRef.current);
+        supabaseSyncTimerRef.current = null;
+      }
+    };
   }, [projects, isLoading, storageKey, user?.email]);
 
   // Load persisted log
@@ -414,6 +427,10 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       updateVideo,
       updateIdeaStatus,
       getLatestProject: (id) => projectsRef.current.find(p => p.id === id),
+      saveGeneratedIdeas,
+      // Live token getter — guarantees the most recently refreshed token is used,
+      // even if the pipeline has been running for many minutes.
+      getYoutubeAccessToken: () => accessTokenRef.current,
       youtubeAccessToken: currentToken,
     };
 

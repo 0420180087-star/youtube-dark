@@ -31,8 +31,12 @@ export interface PipelineCallbacks {
   updateVideo: (projectId: string, videoId: string, updates: Partial<Video>) => void;
   updateIdeaStatus: (projectId: string, ideaId: string, status: 'used' | 'dismissed' | 'new') => void;
   getLatestProject: (projectId: string) => Project | undefined;
-  // Token comes from AuthContext, never from Project data
-  youtubeAccessToken: string;
+  // Persist freshly generated ideas immediately so concurrent runners don't repeat them.
+  saveGeneratedIdeas?: (projectId: string, ideas: GeminiVideoIdea[]) => void;
+  // Live token getter — read fresh on every use so long pipelines pick up refreshed tokens.
+  // Falls back to legacy `youtubeAccessToken` field if provided.
+  getYoutubeAccessToken?: () => string | null;
+  youtubeAccessToken?: string;
 }
 
 export interface PipelineResult {
@@ -65,10 +69,23 @@ export async function stepGenerateIdea(
   const excludeList = project.videos.map(v => v.title);
   const libraryContext = project.library?.map(item => `[${item.type?.toUpperCase() || 'INFO'}] ${item.title}: ${item.content}`).join('\n') || '';
   const ideas = await generateVideoIdeas(project.channelTheme, project.description || '', project.defaultTone, project.language, excludeList, libraryContext);
-  
+
   if (!ideas || ideas.length === 0) throw new Error('Nenhuma ideia gerada pela IA');
-  
+
+  // Persist ALL generated ideas immediately so a parallel runner won't regenerate them
+  // and so the chosen one is marked 'used' atomically (prevents duplicate videos).
+  callbacks.saveGeneratedIdeas?.(project.id, ideas);
+
   const best = ideas[0];
+
+  // Try to mark the freshly-saved idea as used (best-effort, by topic match).
+  // The real ID lives inside ProjectContext; we re-read the latest project state.
+  try {
+    const latest = callbacks.getLatestProject(project.id);
+    const matched = latest?.ideas?.find(i => i.topic === best.topic && i.status === 'new');
+    if (matched) callbacks.updateIdeaStatus(project.id, matched.id, 'used');
+  } catch { /* non-fatal */ }
+
   callbacks.onStepComplete('idea');
   return { topic: best.topic, context: best.context, specificContext: best.specificContext };
 }
@@ -322,7 +339,9 @@ export async function stepUploadToYouTube(
   console.log(`[Upload] File format: ${fileType} (${(blob.size / 1024 / 1024).toFixed(1)}MB)`);
 
   callbacks.onProgress('upload', 'Enviando para YouTube...');
-  const ytbId = await uploadVideoToYouTube(callbacks.youtubeAccessToken, file, metadata, thumbnailUrl);
+  const liveToken = callbacks.getYoutubeAccessToken?.() || callbacks.youtubeAccessToken || '';
+  if (!liveToken) throw new Error('Token YouTube ausente no momento do upload (expirou durante o pipeline)');
+  const ytbId = await uploadVideoToYouTube(liveToken, file, metadata, thumbnailUrl);
 
   callbacks.updateVideo(project.id, video.id, {
     status: ProjectStatus.PUBLISHED,
@@ -338,7 +357,7 @@ export async function runAutomationPipeline(
   project: Project,
   callbacks: PipelineCallbacks
 ): Promise<PipelineResult> {
-  const steps: { name: AutoPilotStep; fn: () => Promise<void> }[] = [];
+  // (removed legacy `steps` placeholder — pipeline is orchestrated explicitly below)
   
   let idea: any;
   let video: Video;
@@ -642,8 +661,10 @@ ${segment.narratorText?.substring(0, 300) || ''}
 
     // 7. Upload Short
     const { uploadVideoToYouTube } = await import('./youtubeService');
+    const shortLiveToken = callbacks.getYoutubeAccessToken?.() || callbacks.youtubeAccessToken || '';
+    if (!shortLiveToken) throw new Error('Token YouTube ausente para upload do Short');
     const shortYtbId = await uploadVideoToYouTube(
-      callbacks.youtubeAccessToken,
+      shortLiveToken,
       shortFile,
       shortsMetadata,
       latestVideo?.thumbnailUrl

@@ -28,7 +28,7 @@ const formatElapsed = (ms: number): string => {
   return `${Math.floor(secs / 60)}m ${secs % 60}s`;
 };
 
-const ALL_STEPS = ['idea', 'script', 'voice', 'visuals', 'studio', 'thumbnail', 'metadata', 'upload'] as const;
+const ALL_STEPS = ['idea', 'script', 'voice', 'visuals', 'studio', 'thumbnail', 'metadata', 'upload', 'shorts'] as const;
 
 const ProgressPanel: React.FC = () => {
   const { autoPilotProgress } = useProjects();

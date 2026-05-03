@@ -89,7 +89,7 @@ const keyCooldowns = new Map<string, KeyCooldown>();
 let roundRobinIndex = 0;
 
 /** Check if an error is a rate/quota limit */
-const isQuotaError = (err: any): boolean => {
+export const isQuotaError = (err: any): boolean => {
     if (!err) return false;
 
     // 1. Check direct status fields
