@@ -31,8 +31,10 @@ export interface PipelineCallbacks {
   updateVideo: (projectId: string, videoId: string, updates: Partial<Video>) => void;
   updateIdeaStatus: (projectId: string, ideaId: string, status: 'used' | 'dismissed' | 'new') => void;
   getLatestProject: (projectId: string) => Project | undefined;
-  // Token comes from AuthContext, never from Project data
-  youtubeAccessToken: string;
+  // Token getter — read fresh on every use so long pipelines pick up refreshed tokens.
+  // Falls back to legacy `youtubeAccessToken` field if provided.
+  getYoutubeAccessToken?: () => string | null;
+  youtubeAccessToken?: string;
 }
 
 export interface PipelineResult {
@@ -322,7 +324,9 @@ export async function stepUploadToYouTube(
   console.log(`[Upload] File format: ${fileType} (${(blob.size / 1024 / 1024).toFixed(1)}MB)`);
 
   callbacks.onProgress('upload', 'Enviando para YouTube...');
-  const ytbId = await uploadVideoToYouTube(callbacks.youtubeAccessToken, file, metadata, thumbnailUrl);
+  const liveToken = callbacks.getYoutubeAccessToken?.() || callbacks.youtubeAccessToken || '';
+  if (!liveToken) throw new Error('Token YouTube ausente no momento do upload (expirou durante o pipeline)');
+  const ytbId = await uploadVideoToYouTube(liveToken, file, metadata, thumbnailUrl);
 
   callbacks.updateVideo(project.id, video.id, {
     status: ProjectStatus.PUBLISHED,
@@ -338,7 +342,7 @@ export async function runAutomationPipeline(
   project: Project,
   callbacks: PipelineCallbacks
 ): Promise<PipelineResult> {
-  const steps: { name: AutoPilotStep; fn: () => Promise<void> }[] = [];
+  // (removed legacy `steps` placeholder — pipeline is orchestrated explicitly below)
   
   let idea: any;
   let video: Video;
@@ -642,8 +646,10 @@ ${segment.narratorText?.substring(0, 300) || ''}
 
     // 7. Upload Short
     const { uploadVideoToYouTube } = await import('./youtubeService');
+    const shortLiveToken = callbacks.getYoutubeAccessToken?.() || callbacks.youtubeAccessToken || '';
+    if (!shortLiveToken) throw new Error('Token YouTube ausente para upload do Short');
     const shortYtbId = await uploadVideoToYouTube(
-      callbacks.youtubeAccessToken,
+      shortLiveToken,
       shortFile,
       shortsMetadata,
       latestVideo?.thumbnailUrl
