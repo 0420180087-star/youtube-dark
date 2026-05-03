@@ -1,11 +1,21 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': Deno.env.get('ALLOWED_ORIGIN') ?? 'https://yourdomain.com',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+const getAllowedOrigin = (req: Request): string => {
+  const origin = req.headers.get('origin') ?? ''
+  const allowed = Deno.env.get('ALLOWED_ORIGIN') ?? ''
+  if (!allowed || allowed === '*') return '*'
+  return origin === allowed ? origin : allowed
 }
 
+const getCorsHeaders = (req: Request) => ({
+  'Access-Control-Allow-Origin': getAllowedOrigin(req),
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+})
+
 serve(async (req) => {
+  const CORS_HEADERS = getCorsHeaders(req)
+
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: CORS_HEADERS })
   }
@@ -73,7 +83,7 @@ serve(async (req) => {
     console.error('Edge function error:', err)
     return new Response(
       JSON.stringify({ error: 'Erro interno do servidor' }),
-      { status: 500, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+      { status: 500, headers: { ...getCorsHeaders(req), 'Content-Type': 'application/json' } }
     )
   }
 })
