@@ -1,8 +1,8 @@
 // Clickbait thumbnail generation engine.
 // Extracted from geminiService.ts (phase 5 refactor).
 
-import { GoogleGenAI } from '@google/genai';
-import { executeGeminiRequest } from './geminiCore';
+import { GoogleGenAI, Modality, HarmCategory, HarmBlockThreshold } from '@google/genai';
+import { executeGeminiRequest, isQuotaError } from './geminiCore';
 import { ScriptData } from '../types';
 
 // --- THUMBNAIL (Clickbait Engine) ---

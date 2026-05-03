@@ -2,6 +2,7 @@
 // Extracted from geminiService.ts (phase 5 refactor).
 
 import { delay } from './geminiCore';
+import { audioBufferToBase64 } from './geminiAudio';
 
 // --- MUSIC GENERATION (Procedural) ---
 type TextureType = 'none' | 'wind' | 'rain' | 'hum' | 'crackle';
