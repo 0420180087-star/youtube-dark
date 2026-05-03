@@ -269,7 +269,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // Benefits over initTokenClient (implicit flow):
     //   - Returns a refresh_token saved server-side via the exchange-code edge function
     //   - Auto-refreshes silently on every page load — indefinite session
-    const redirectUri = window.location.origin + '/oauth/callback';
+    const base = (import.meta.env.BASE_URL ?? '/').replace(/\/$/, '');
+    const redirectUri = window.location.origin + base + '/oauth/callback';
 
     const state = crypto.randomUUID();
     sessionStorage.setItem('yt_oauth_pending', JSON.stringify({
