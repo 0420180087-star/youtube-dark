@@ -427,6 +427,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       updateVideo,
       updateIdeaStatus,
       getLatestProject: (id) => projectsRef.current.find(p => p.id === id),
+      saveGeneratedIdeas,
       // Live token getter — guarantees the most recently refreshed token is used,
       // even if the pipeline has been running for many minutes.
       getYoutubeAccessToken: () => accessTokenRef.current,
