@@ -148,7 +148,7 @@ const EMOTION_VISUAL_MAP: Record<string, string[]> = {
 // PEXELS KEY LOADER
 // =============================================
 
-const getPexelsKey = async (): Promise<string | null> => {
+export const getPexelsKey = async (): Promise<string | null> => {
   const stored = localStorage.getItem('ds_pexels_api_key');
   if (stored) {
     try { return await decryptData(stored); } catch {}
@@ -383,23 +383,24 @@ const executePexelsSearch = async (
       `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&per_page=15&orientation=${orientation}&min_duration=5&max_duration=30&size=medium`,
       { headers: { Authorization: apiKey } }
     );
-    
+
     if (!response.ok) {
       console.warn(`[Pexels] API returned ${response.status} for "${query}"`);
-      return [];
+      // Try photos fallback on hard errors
+      return await executePexelsPhotoSearch(apiKey, query, orientation, minWidth, usedIds);
     }
-    
+
     const data = await response.json();
     const results: PexelsMedia[] = [];
-    
+
     for (const video of (data.videos || [])) {
       // RULE 3: Skip already-used IDs
       if (usedIds.has(video.id)) continue;
-      
+
       const validFiles = (video.video_files || [])
         .filter((f: any) => f.width >= minWidth && f.quality === 'hd')
         .sort((a: any, b: any) => (a.width || 0) - (b.width || 0));
-      
+
       const file = validFiles[0] || video.video_files?.[0];
       if (file) {
         results.push({
@@ -410,10 +411,56 @@ const executePexelsSearch = async (
         });
       }
     }
-    
+
+    // If no videos found, fallback to photos so the visual mix never breaks
+    if (results.length === 0) {
+      const photos = await executePexelsPhotoSearch(apiKey, query, orientation, minWidth, usedIds);
+      return photos;
+    }
+
     return results;
   } catch (err) {
     console.error(`[Pexels] Search failed for "${query}":`, err);
+    try {
+      return await executePexelsPhotoSearch(apiKey, query, orientation, minWidth, usedIds);
+    } catch {
+      return [];
+    }
+  }
+};
+
+// Photo fallback — when video search fails or returns 0 results.
+// Pexels photos still give a valid visual; videoUrl is empty so the renderer
+// will treat the entry as a still image (imageUrl only).
+const executePexelsPhotoSearch = async (
+  apiKey: string,
+  query: string,
+  orientation: string,
+  minWidth: number,
+  usedIds: Set<number>,
+): Promise<PexelsMedia[]> => {
+  try {
+    const response = await fetch(
+      `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=15&orientation=${orientation}&size=medium`,
+      { headers: { Authorization: apiKey } }
+    );
+    if (!response.ok) return [];
+    const data = await response.json();
+    const results: PexelsMedia[] = [];
+    for (const photo of (data.photos || [])) {
+      if (usedIds.has(photo.id)) continue;
+      const url = photo.src?.large2x || photo.src?.large || photo.src?.original;
+      if (!url) continue;
+      results.push({
+        id: photo.id,
+        videoUrl: '', // signals "still image only" to consumer
+        thumbnailUrl: url,
+        source: 'pexels',
+      });
+    }
+    return results;
+  } catch (err) {
+    console.warn(`[Pexels] Photo fallback failed for "${query}":`, err);
     return [];
   }
 };

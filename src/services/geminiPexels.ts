@@ -3,6 +3,9 @@
 
 import { GoogleGenAI } from '@google/genai';
 import { executeGeminiRequest, delay } from './geminiCore';
+// Single source of truth for the Pexels API key — defined in pexelsService.
+// Re-exported here so legacy callers importing from geminiService keep working.
+import { getPexelsKey } from './pexelsService';
 
 // --- PEXELS / STOCK VIDEO ---
 export interface StockVideo {
@@ -10,15 +13,7 @@ export interface StockVideo {
     thumbnailUrl: string;
 }
 
-export const getPexelsKey = async (): Promise<string | null> => {
-    const stored = localStorage.getItem('ds_pexels_api_key');
-    if (stored) {
-        try { return await decryptData(stored); } catch (e) {}
-    }
-    const envKey = import.meta.env?.VITE_PEXELS_API_KEY;
-    if (envKey && envKey.length > 10) return envKey;
-    return null;
-};
+export { getPexelsKey };
 
 export const generatePexelsKeywords = async (visualDescription: string, videoTopic?: string, channelTheme?: string): Promise<string[]> => {
     return executeGeminiRequest(async (ai) => {
