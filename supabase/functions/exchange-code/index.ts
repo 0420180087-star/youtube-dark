@@ -1,23 +1,24 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 
-const getAllowedOrigin = (req: Request): string => {
+const getCorsHeaders = (req: Request) => {
   const origin = req.headers.get('origin') ?? ''
   const allowed = Deno.env.get('ALLOWED_ORIGIN') ?? ''
-  if (!allowed || allowed === '*') return '*'
-  return origin === allowed ? origin : allowed
+  const allowOrigin = !allowed || allowed === '*' ? '*'
+    : origin === allowed ? origin
+    : allowed
+
+  return {
+    'Access-Control-Allow-Origin': allowOrigin,
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  }
 }
 
-const getCorsHeaders = (req: Request) => ({
-  'Access-Control-Allow-Origin': getAllowedOrigin(req),
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-})
-
 serve(async (req) => {
-  const CORS_HEADERS = getCorsHeaders(req)
+  const CORS = getCorsHeaders(req)
 
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: CORS_HEADERS })
+    return new Response('ok', { status: 200, headers: CORS })
   }
 
   try {
@@ -26,11 +27,10 @@ serve(async (req) => {
     if (!code || !redirect_uri || !project_id || !user_email) {
       return new Response(
         JSON.stringify({ error: 'Parâmetros obrigatórios ausentes' }),
-        { status: 400, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } }
       )
     }
 
-    // Trocar o code por tokens usando o client_secret (seguro aqui no servidor)
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -49,11 +49,10 @@ serve(async (req) => {
       console.error('Token exchange failed:', tokens)
       return new Response(
         JSON.stringify({ error: tokens.error_description || 'Falha na troca de tokens' }),
-        { status: 400, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } }
       )
     }
 
-    // Salvar no Supabase usando service role
     const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2')
     const supabaseAdmin = createClient(
       Deno.env.get('SUPABASE_URL')!,
@@ -72,11 +71,8 @@ serve(async (req) => {
     }, { onConflict: 'project_id,user_email' })
 
     return new Response(
-      JSON.stringify({
-        access_token: tokens.access_token,
-        expires_at: expiresAt,
-      }),
-      { headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+      JSON.stringify({ access_token: tokens.access_token, expires_at: expiresAt }),
+      { headers: { ...CORS, 'Content-Type': 'application/json' } }
     )
 
   } catch (err) {
