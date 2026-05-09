@@ -525,6 +525,14 @@ async function processProject(projectRow) {
 
   log('🚀', `Processing project: "${data.channelTheme}" (${projectId})`);
 
+  // Load per-user API keys (Gemini/Pexels) — owner of this project
+  await loadUserKeys(projectRow.user_email);
+  if (!GEMINI_API_KEY) {
+    log('❌', `No Gemini key configured for user ${projectRow.user_email}. Skipping.`);
+    try { await supabase.rpc('release_autopilot_lock', { p_project_id: projectId }); } catch {}
+    return false;
+  }
+
   // Ensure projectId is accessible inside data for token lookup
   data.id = projectId;
 
