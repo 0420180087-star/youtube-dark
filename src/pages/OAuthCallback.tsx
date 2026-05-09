@@ -101,9 +101,12 @@ export const OAuthCallback: React.FC = () => {
       }
 
       try {
+        const edgeFunctionUrl = `${supabaseUrl}/functions/v1/exchange-code`;
+        setMessage(`Conectando ao servidor...\n→ ${edgeFunctionUrl}`);
+
         let res: Response;
         try {
-          res = await fetch(`${supabaseUrl}/functions/v1/exchange-code`, {
+          res = await fetch(edgeFunctionUrl, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -116,25 +119,60 @@ export const OAuthCallback: React.FC = () => {
               user_email: pending.userEmail,
             }),
           });
-        } catch (netErr: any) {
-          // Network-level failure — usually means the function isn't deployed
-          // or CORS is blocking, since DNS/TLS to *.supabase.co is normally fine.
-          throw new Error(
-            `Não consegui chamar a Edge Function "exchange-code". ` +
-            `Verifique se ela foi deployada no Supabase (supabase functions deploy exchange-code) ` +
-            `e se ALLOWED_ORIGIN inclui ${window.location.origin}. Detalhe: ${netErr.message}`
-          );
+        } catch (networkErr: any) {
+          // "Failed to fetch" = CORS bloqueou o preflight OU função não existe/não deployada
+          const diagnosis = [
+            `Falha de rede ao chamar a Edge Function.`,
+            ``,
+            `URL chamada: ${edgeFunctionUrl}`,
+            ``,
+            `Causas mais prováveis:`,
+            `1. A Edge Function não foi deployada no Supabase`,
+            `   → Rode: supabase functions deploy exchange-code`,
+            ``,
+            `2. CORS bloqueado (ALLOWED_ORIGIN errado)`,
+            `   → Verifique o secret ALLOWED_ORIGIN no Supabase`,
+            `   → Deve ser: https://0420180087-star.github.io`,
+            ``,
+            `3. VITE_SUPABASE_URL inválido`,
+            `   → URL atual: ${supabaseUrl}`,
+            ``,
+            `Erro original: ${networkErr?.message ?? String(networkErr)}`,
+          ].join('\n');
+
+          console.error('[OAuthCallback] Network/CORS error:\n' + diagnosis);
+          setStatus('error');
+          setMessage(diagnosis);
+          setTimeout(() => navigate('/'), 15000);
+          return;
         }
 
-        if (res.status === 404) {
-          throw new Error(
-            'Edge Function "exchange-code" não encontrada (404). ' +
-            'Faça o deploy: supabase functions deploy exchange-code --no-verify-jwt'
-          );
+        // Função respondeu — captura corpo mesmo em erro HTTP
+        let data: any = {};
+        try {
+          data = await res.json();
+        } catch {
+          data = { error: `Resposta inválida (HTTP ${res.status} ${res.statusText}) — a função pode ter crashado` };
         }
 
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || `Falha na troca de código (HTTP ${res.status})`);
+        if (!res.ok) {
+          const diagnosis = [
+            `Edge Function retornou erro HTTP ${res.status}`,
+            ``,
+            `Mensagem: ${data.error || data.message || JSON.stringify(data)}`,
+            ``,
+            res.status === 404
+              ? `→ Função "exchange-code" não encontrada no Supabase. Deploy necessário.`
+              : res.status === 401 || res.status === 403
+              ? `→ SUPABASE_ANON_KEY inválida ou função requer autenticação.`
+              : res.status === 500
+              ? `→ Erro interno da função. Verifique os logs no Supabase Dashboard.`
+              : `→ Verifique os logs da Edge Function no Supabase Dashboard.`,
+          ].join('\n');
+
+          console.error('[OAuthCallback] Edge Function HTTP error:\n' + diagnosis);
+          throw new Error(diagnosis);
+        }
 
         // Save access_token into AuthContext + localStorage
         await setYoutubeToken(data.access_token);
@@ -211,7 +249,13 @@ export const OAuthCallback: React.FC = () => {
             {status === 'success' && 'Conectado!'}
             {status === 'error' && 'Erro na conexão'}
           </h2>
-          <p className="text-slate-400 text-sm">{message}</p>
+          {status === 'error' ? (
+            <pre className="text-left text-xs text-slate-300 bg-slate-900 border border-slate-700 rounded-lg p-4 mt-2 whitespace-pre-wrap break-words max-h-80 overflow-y-auto">
+              {message}
+            </pre>
+          ) : (
+            <p className="text-slate-400 text-sm">{message}</p>
+          )}
           {status !== 'loading' && (
             <p className="text-slate-600 text-xs mt-3">Redirecionando em instantes...</p>
           )}
