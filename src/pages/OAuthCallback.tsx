@@ -101,22 +101,40 @@ export const OAuthCallback: React.FC = () => {
       }
 
       try {
-        const res = await fetch(`${supabaseUrl}/functions/v1/exchange-code`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${supabaseAnon}`,
-          },
-          body: JSON.stringify({
-            code,
-            redirect_uri: pending.redirectUri,
-            project_id: pending.projectId,
-            user_email: pending.userEmail,
-          }),
-        });
+        let res: Response;
+        try {
+          res = await fetch(`${supabaseUrl}/functions/v1/exchange-code`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${supabaseAnon}`,
+            },
+            body: JSON.stringify({
+              code,
+              redirect_uri: pending.redirectUri,
+              project_id: pending.projectId,
+              user_email: pending.userEmail,
+            }),
+          });
+        } catch (netErr: any) {
+          // Network-level failure — usually means the function isn't deployed
+          // or CORS is blocking, since DNS/TLS to *.supabase.co is normally fine.
+          throw new Error(
+            `Não consegui chamar a Edge Function "exchange-code". ` +
+            `Verifique se ela foi deployada no Supabase (supabase functions deploy exchange-code) ` +
+            `e se ALLOWED_ORIGIN inclui ${window.location.origin}. Detalhe: ${netErr.message}`
+          );
+        }
+
+        if (res.status === 404) {
+          throw new Error(
+            'Edge Function "exchange-code" não encontrada (404). ' +
+            'Faça o deploy: supabase functions deploy exchange-code --no-verify-jwt'
+          );
+        }
 
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Falha na troca de código');
+        if (!res.ok) throw new Error(data.error || `Falha na troca de código (HTTP ${res.status})`);
 
         // Save access_token into AuthContext + localStorage
         await setYoutubeToken(data.access_token);

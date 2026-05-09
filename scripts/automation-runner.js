@@ -16,19 +16,61 @@ import { refreshAccessToken, uploadVideoFile, uploadThumbnail } from './youtubeU
 const {
   SUPABASE_URL,
   SUPABASE_SERVICE_KEY,
-  GEMINI_API_KEY,
-  PEXELS_API_KEY,
+  GEMINI_API_KEY: ENV_GEMINI_API_KEY,
+  PEXELS_API_KEY: ENV_PEXELS_API_KEY,
   YOUTUBE_CLIENT_ID,
   YOUTUBE_CLIENT_SECRET,
   PROJECT_ID,
 } = process.env;
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || !GEMINI_API_KEY) {
-  console.error('❌ Missing required environment variables');
+if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+  console.error('❌ Missing required environment variables (SUPABASE_URL, SUPABASE_SERVICE_KEY)');
   process.exit(1);
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+
+// Per-run mutable keys — populated from user_settings before each project runs.
+// Falls back to ENV if no per-user key is configured.
+let GEMINI_API_KEY = ENV_GEMINI_API_KEY || '';
+let GEMINI_API_KEYS = ENV_GEMINI_API_KEY ? [ENV_GEMINI_API_KEY] : [];
+let GEMINI_KEY_INDEX = 0;
+let PEXELS_API_KEY = ENV_PEXELS_API_KEY || '';
+
+function rotateGeminiKey() {
+  if (GEMINI_API_KEYS.length <= 1) return;
+  GEMINI_KEY_INDEX = (GEMINI_KEY_INDEX + 1) % GEMINI_API_KEYS.length;
+  GEMINI_API_KEY = GEMINI_API_KEYS[GEMINI_KEY_INDEX];
+  log('🔁', `Rotated to Gemini key #${GEMINI_KEY_INDEX + 1}/${GEMINI_API_KEYS.length}`);
+}
+
+async function loadUserKeys(userEmail) {
+  if (!userEmail) return;
+  try {
+    const { data } = await supabase
+      .from('user_settings')
+      .select('gemini_api_keys, pexels_api_key')
+      .eq('user_email', userEmail)
+      .maybeSingle();
+    if (data?.gemini_api_keys?.length) {
+      GEMINI_API_KEYS = data.gemini_api_keys.filter(Boolean);
+      GEMINI_KEY_INDEX = 0;
+      GEMINI_API_KEY = GEMINI_API_KEYS[0];
+      log('🔑', `Loaded ${GEMINI_API_KEYS.length} Gemini key(s) for ${userEmail}`);
+    } else if (ENV_GEMINI_API_KEY) {
+      GEMINI_API_KEYS = [ENV_GEMINI_API_KEY];
+      GEMINI_API_KEY = ENV_GEMINI_API_KEY;
+    }
+    if (data?.pexels_api_key) {
+      PEXELS_API_KEY = data.pexels_api_key;
+      log('🔑', `Loaded Pexels key for ${userEmail}`);
+    } else if (ENV_PEXELS_API_KEY) {
+      PEXELS_API_KEY = ENV_PEXELS_API_KEY;
+    }
+  } catch (e) {
+    log('⚠️', `Failed to load user_settings for ${userEmail}: ${e.message}`);
+  }
+}
 
 // --- HELPERS ---
 
@@ -482,6 +524,14 @@ async function processProject(projectRow) {
   }
 
   log('🚀', `Processing project: "${data.channelTheme}" (${projectId})`);
+
+  // Load per-user API keys (Gemini/Pexels) — owner of this project
+  await loadUserKeys(projectRow.user_email);
+  if (!GEMINI_API_KEY) {
+    log('❌', `No Gemini key configured for user ${projectRow.user_email}. Skipping.`);
+    try { await supabase.rpc('release_autopilot_lock', { p_project_id: projectId }); } catch {}
+    return false;
+  }
 
   // Ensure projectId is accessible inside data for token lookup
   data.id = projectId;
