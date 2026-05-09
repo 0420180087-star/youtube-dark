@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { encryptData, decryptData } from '../services/securityService';
+import { supabase } from '../lib/supabaseClient';
 import { Settings as SettingsIcon, User, Key, Shield, LogOut, Save, CheckCircle, RefreshCw, AlertTriangle, Trash2, Youtube, LogIn, Copy, ExternalLink, Plus, X, Link2, Activity } from 'lucide-react';
 import { getKeyStatus, clearExhaustedKeys } from '../services/geminiService';
 
@@ -69,6 +70,27 @@ export const Settings: React.FC = () => {
         };
         loadPexels();
 
+        // Pull cloud copy (overrides local if found) so chaves seguem o usuário entre dispositivos
+        // e ficam disponíveis para o runner do GitHub Actions.
+        const loadFromCloud = async () => {
+            if (!supabase || !user?.email) return;
+            try {
+                const { data, error } = await supabase
+                    .from('user_settings')
+                    .select('gemini_api_keys, pexels_api_key')
+                    .eq('user_email', user.email)
+                    .maybeSingle();
+                if (error || !data) return;
+                if (Array.isArray(data.gemini_api_keys) && data.gemini_api_keys.length) {
+                    setApiKeys(data.gemini_api_keys);
+                }
+                if (data.pexels_api_key) setPexelsKey(data.pexels_api_key);
+            } catch (e) {
+                console.warn('[Settings] cloud load failed:', e);
+            }
+        };
+        loadFromCloud();
+
         setClientIdInput(googleClientId);
     }, [googleClientId, user, singleKeyStorageKey, multiKeyStorageKey]);
 
@@ -130,7 +152,22 @@ export const Settings: React.FC = () => {
             }
 
             setGoogleClientId(cleanClientId);
-            
+
+            // 4. Sync to Supabase so the GitHub Actions runner can read these keys
+            //    per user (no need to set workspace-wide env vars).
+            if (supabase && user?.email) {
+                try {
+                    await supabase.from('user_settings').upsert({
+                        user_email: user.email,
+                        gemini_api_keys: apiKeys,
+                        pexels_api_key: pexelsKey.trim() || null,
+                        updated_at: new Date().toISOString(),
+                    }, { onConflict: 'user_email' });
+                } catch (e) {
+                    console.warn('[Settings] cloud sync failed:', e);
+                }
+            }
+
             setTimeout(() => {
                 setIsSaving(false);
                 setSaveSuccess(true);
