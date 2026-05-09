@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Film, Calendar, Settings, Youtube, Zap, Menu, X, Bot } from 'lucide-react';
+import { LayoutDashboard, Film, Calendar, Settings, Youtube, Zap, Menu, X, Bot, AlertTriangle } from 'lucide-react';
 import { useProjects } from '../context/ProjectContext';
+import { supabase } from '../lib/supabaseClient';
 
 export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const location = useLocation();
