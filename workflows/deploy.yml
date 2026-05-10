@@ -40,7 +40,7 @@ jobs:
         run: |
           supabase secrets set \
             GOOGLE_CLIENT_ID=${{ secrets.VITE_GOOGLE_CLIENT_ID }} \
-            YOUTUBE_CLIENT_SECRET=${{ secrets.YOUTUBE_CLIENT_SECRET }} \
+            GOOGLE_CLIENT_SECRET=${{ secrets.YOUTUBE_CLIENT_SECRET }} \
             ALLOWED_ORIGIN=https://0420180087-star.github.io
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
@@ -52,6 +52,8 @@ jobs:
 
       - name: Deploy Edge Function refresh-token
         run: supabase functions deploy refresh-token --no-verify-jwt
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
 
       - name: Deploy Edge Function get-youtube-config
         run: supabase functions deploy get-youtube-config --no-verify-jwt
