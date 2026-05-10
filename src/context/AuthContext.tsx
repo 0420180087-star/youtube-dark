@@ -1,7 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { UserProfile, YouTubeChannel } from '../types';
 import {
-  encryptData,
   loadEncryptedJSON,
   loadEncryptedString,
   saveEncryptedJSON,
