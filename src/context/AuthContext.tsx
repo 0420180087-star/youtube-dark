@@ -241,52 +241,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     window.location.href = authUrl.toString();
   };
 
-  // userEmail is passed explicitly — sessionStorage is already cleared by this point
-  const fetchChannelData = async (token: string, userEmail?: string) => {
-      try {
-          const res = await fetch('https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&mine=true', {
-              headers: { Authorization: `Bearer ${token}` }
-          });
-          
-          if (!res.ok) throw new Error("YouTube API Error");
-          const data = await res.json();
-          
-          if (data.items?.length > 0) {
-              const ch = data.items[0];
-              const channel: YouTubeChannel = {
-                  id: ch.id,
-                  title: ch.snippet.title,
-                  thumbnailUrl: ch.snippet.thumbnails.default.url,
-                  subscriberCount: ch.statistics.subscriberCount
-              };
-              setYoutubeChannel(channel);
-
-              // Save locally (encrypted)
-              await saveEncryptedJSON('ds_youtube_channel', channel);
-
-              // Update channel info in project_auth table if Supabase available
-              // Use the explicitly passed email — sessionStorage is already cleared
-              const emailToUse = userEmail || user?.email;
-              if (supabase && emailToUse) {
-                  try {
-                      await supabase.from('project_auth').update({
-                          youtube_channel_id: ch.id,
-                          youtube_channel_title: ch.snippet.title,
-                          updated_at: new Date().toISOString(),
-                      }).eq('user_email', emailToUse);
-                  } catch (e) {
-                      console.warn('[Supabase] Falha ao salvar canal:', e);
-                  }
-              }
-          } else {
-              alert("No YouTube channel found associated with this Google Account.");
-          }
-      } catch (e) {
-          console.error(e);
-          alert("Failed to fetch channel info. Check your connection.");
-      }
-  };
-
   const refreshYouTubeToken = async (projectId: string): Promise<string | null> => {
     const fresh = await callRefreshToken(projectId, user?.email);
     if (fresh) {
