@@ -22,11 +22,18 @@ serve(async (req) => {
   }
 
   try {
-    const { code, redirect_uri, project_id, user_email } = await req.json()
+    const { code, redirect_uri, project_id, user_email, client_id, client_secret } = await req.json()
 
     if (!code || !redirect_uri || !project_id || !user_email) {
       return new Response(
         JSON.stringify({ error: 'Parâmetros obrigatórios ausentes' }),
+        { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    if (!client_id || !client_secret) {
+      return new Response(
+        JSON.stringify({ error: 'client_id ou client_secret ausentes. Configure as secrets no Supabase.' }),
         { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } }
       )
     }
@@ -36,8 +43,8 @@ serve(async (req) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         code,
-        client_id: Deno.env.get('GOOGLE_CLIENT_ID'),
-        client_secret: Deno.env.get('YOUTUBE_CLIENT_SECRET'),
+        client_id,
+        client_secret,
         redirect_uri,
         grant_type: 'authorization_code',
       }),

@@ -22,11 +22,21 @@ serve(async (req) => {
   }
 
   try {
-    const { project_id, user_email } = await req.json()
+    const { project_id, user_email, client_id, client_secret } = await req.json()
 
     if (!user_email) {
       return new Response(
         JSON.stringify({ error: 'user_email é obrigatório' }),
+        { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    const activeClientId = client_id || Deno.env.get('GOOGLE_CLIENT_ID')
+    const activeClientSecret = client_secret || Deno.env.get('YOUTUBE_CLIENT_SECRET')
+
+    if (!activeClientId || !activeClientSecret) {
+      return new Response(
+        JSON.stringify({ error: 'client_id ou client_secret ausentes' }),
         { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } }
       )
     }
@@ -84,8 +94,8 @@ serve(async (req) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         refresh_token: data.youtube_refresh_token,
-        client_id: Deno.env.get('GOOGLE_CLIENT_ID'),
-        client_secret: Deno.env.get('YOUTUBE_CLIENT_SECRET'),
+        client_id: activeClientId,
+        client_secret: activeClientSecret,
         grant_type: 'refresh_token',
       }),
     })
