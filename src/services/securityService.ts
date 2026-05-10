@@ -139,3 +139,51 @@ export const decryptData = async (encryptedData: string): Promise<string> => {
         return encryptedData;
     }
 };
+
+// =============================================================================
+// HELPERS — encrypted localStorage convenience wrappers
+// =============================================================================
+
+/**
+ * Loads + decrypts + JSON.parses a value from localStorage. Returns null on any
+ * failure (missing, decrypt error, parse error) and removes the corrupt key.
+ */
+export const loadEncryptedJSON = async <T>(key: string): Promise<T | null> => {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    try {
+        const decrypted = await decryptData(raw);
+        return JSON.parse(decrypted) as T;
+    } catch {
+        localStorage.removeItem(key);
+        return null;
+    }
+};
+
+/**
+ * Loads + decrypts a raw string from localStorage. Returns null on failure
+ * and removes the corrupt key.
+ */
+export const loadEncryptedString = async (key: string): Promise<string | null> => {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    try {
+        const val = await decryptData(raw);
+        return val && val.length > 0 ? val : null;
+    } catch {
+        localStorage.removeItem(key);
+        return null;
+    }
+};
+
+/** Encrypts + persists a JSON value to localStorage. */
+export const saveEncryptedJSON = async (key: string, value: unknown): Promise<void> => {
+    const enc = await encryptData(JSON.stringify(value));
+    localStorage.setItem(key, enc);
+};
+
+/** Encrypts + persists a raw string to localStorage. */
+export const saveEncryptedString = async (key: string, value: string): Promise<void> => {
+    const enc = await encryptData(value);
+    localStorage.setItem(key, enc);
+};
