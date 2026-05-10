@@ -108,8 +108,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const setGoogleClientId = async (id: string) => {
     const cleanId = id.trim();
-    const encrypted = await encryptData(cleanId);
-    localStorage.setItem('ds_google_client_id', encrypted);
+    await saveEncryptedString('ds_google_client_id', cleanId);
     setGoogleClientIdState(cleanId);
   };
 
@@ -175,8 +174,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setUser(profile);
 
           // Save locally (encrypted)
-          const encrypted = await encryptData(JSON.stringify(profile));
-          localStorage.setItem('ds_user_profile', encrypted);
+          await saveEncryptedJSON('ds_user_profile', profile);
 
           // Establish RLS session scope: all subsequent Supabase calls from
           // this client will be filtered to this user's rows.
@@ -265,8 +263,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               setYoutubeChannel(channel);
 
               // Save locally (encrypted)
-              const encChannel = await encryptData(JSON.stringify(channel));
-              localStorage.setItem('ds_youtube_channel', encChannel);
+              await saveEncryptedJSON('ds_youtube_channel', channel);
 
               // Update channel info in project_auth table if Supabase available
               // Use the explicitly passed email — sessionStorage is already cleared
@@ -292,35 +289,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const refreshYouTubeToken = async (projectId: string): Promise<string | null> => {
-    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-
-    if (!supabase || !supabaseUrl) {
-      return accessToken;
+    const fresh = await callRefreshToken(projectId, user?.email);
+    if (fresh) {
+      await persistAccessToken(fresh);
+      return fresh;
     }
-
-    try {
-      const res = await fetch(`${supabaseUrl}/functions/v1/refresh-token`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-        },
-        body: JSON.stringify({ project_id: projectId, user_email: user?.email }),
-      });
-
-      if (!res.ok) return accessToken;
-
-      const data = await res.json();
-      if (data.access_token) {
-        setAccessToken(data.access_token);
-        const encToken = await encryptData(data.access_token);
-        localStorage.setItem('ds_youtube_access_token', encToken);
-        return data.access_token;
-      }
-    } catch (err) {
-      console.warn('[Auth] Falha ao renovar token:', err);
-    }
-
     return accessToken;
   };
 
@@ -328,7 +301,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setYoutubeChannel(null);
       setAccessToken(null);
       localStorage.removeItem('ds_youtube_channel');
-      localStorage.removeItem('ds_youtube_access_token');
+      localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
       
       if (accessToken && typeof google !== 'undefined') {
         try { google.accounts.oauth2.revoke(accessToken, () => {}); } catch (e) {}
@@ -344,13 +317,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // Saves a token obtained outside of AuthContext (e.g. via initTokenClient in ProjectHub)
   // into AuthContext state and localStorage so the rest of the app can use it.
   const setYoutubeToken = async (token: string) => {
-    setAccessToken(token);
-    try {
-      const encToken = await encryptData(token);
-      localStorage.setItem('ds_youtube_access_token', encToken);
-    } catch (e) {
-      console.warn('[Auth] Não foi possível salvar token localmente:', e);
-    }
+    await persistAccessToken(token);
   };
 
   return (
