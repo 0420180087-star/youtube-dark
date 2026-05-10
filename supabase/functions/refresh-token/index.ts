@@ -85,7 +85,7 @@ serve(async (req) => {
       body: JSON.stringify({
         refresh_token: data.youtube_refresh_token,
         client_id: Deno.env.get('GOOGLE_CLIENT_ID'),
-        client_secret: Deno.env.get('GOOGLE_CLIENT_SECRET'),
+        client_secret: Deno.env.get('YOUTUBE_CLIENT_SECRET'),
         grant_type: 'refresh_token',
       }),
     })
