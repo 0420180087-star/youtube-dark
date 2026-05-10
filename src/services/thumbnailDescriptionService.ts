@@ -1079,20 +1079,3 @@ export const buildTimestamps = (segments: ScriptSegment[]): string => {
   return lines.join('\n');
 };
 
-// =============================================
-// COMBINED: Full metadata generation
-// =============================================
-
-export interface FullMetadataResult {
-  thumbnail: ThumbnailResult;
-  description: DescriptionResult;
-  timestamps: string;
-}
-
-export const generateFullMetadata = (params: ThumbnailDescriptionParams): FullMetadataResult => {
-  const thumbnail = buildThumbnailPrompt(params);
-  const description = buildVideoDescription(params);
-  const timestamps = buildTimestamps(params.script.segments);
-  
-  return { thumbnail, description, timestamps };
-};
