@@ -43,121 +43,59 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isLoading, setIsLoading] = useState(false);
   const [googleClientId, setGoogleClientIdState] = useState('');
 
+  // Persist a fresh access_token to state + localStorage in one place.
+  const persistAccessToken = async (token: string) => {
+    setAccessToken(token);
+    try {
+      await saveEncryptedString(ACCESS_TOKEN_STORAGE_KEY, token);
+    } catch (e) {
+      console.warn('[Auth] Não foi possível salvar token localmente:', e);
+    }
+  };
+
   useEffect(() => {
     const initAuth = async () => {
       try {
-        const storedClientId = localStorage.getItem('ds_google_client_id');
-        if (storedClientId) {
-          try {
-            const val = await decryptData(storedClientId);
-            if (val && val.length > 0) setGoogleClientIdState(val);
-          } catch {
-            localStorage.removeItem('ds_google_client_id');
-          }
+        const clientId = await loadEncryptedString('ds_google_client_id');
+        if (clientId) setGoogleClientIdState(clientId);
+
+        const profile = await loadEncryptedJSON<UserProfile>('ds_user_profile');
+        if (profile?.email) {
+          setUser(profile);
+          await setSupabaseUserEmail(profile.email);
         }
 
-        const storedUser = localStorage.getItem('ds_user_profile');
-        if (storedUser) {
-          try {
-            const val = await decryptData(storedUser);
-            const parsed = JSON.parse(val);
-            if (parsed?.email) {
-              setUser(parsed);
-              // Re-establish RLS scope for this session
-              await setSupabaseUserEmail(parsed.email);
-            }
-          } catch {
-            localStorage.removeItem('ds_user_profile');
-          }
-        }
-
-        const storedChannel = localStorage.getItem('ds_youtube_channel');
-        if (storedChannel) {
-          try {
-            const val = await decryptData(storedChannel);
-            const parsed = JSON.parse(val);
-            if (parsed?.id) setYoutubeChannel(parsed);
-          } catch {
-            localStorage.removeItem('ds_youtube_channel');
-          }
-        }
-
-        const storedToken = localStorage.getItem('ds_youtube_access_token');
+        const channel = await loadEncryptedJSON<YouTubeChannel>('ds_youtube_channel');
+        if (channel?.id) setYoutubeChannel(channel);
 
         // Auto-refresh via Supabase Edge Function FIRST (before restoring cached token).
-        // Strategy:
-        //   1. If Supabase is configured and we have a user email, try to get a fresh token.
-        //   2. If that succeeds, use the fresh token — discard whatever is cached.
-        //   3. If refresh fails (network, edge fn down, no refresh_token), fall back to
-        //      the cached token and validate it with a lightweight Google API call.
-        //   4. If validation fails (token expired, 401), clear it — don't set a bad token.
+        //   1. Try to get a fresh token. If it works, use it and discard cache.
+        //   2. Otherwise, restore the cached token only if Google says it's still valid.
         let freshTokenSet = false;
-
-        const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-        const supabaseAnon = import.meta.env.VITE_SUPABASE_ANON_KEY;
-
-        if (supabaseUrl && supabaseAnon) {
-          try {
-            const storedEmail = localStorage.getItem('ds_user_profile');
-            let userEmail = '';
-            if (storedEmail) {
-              try {
-                const dec = await decryptData(storedEmail);
-                userEmail = JSON.parse(dec)?.email || '';
-              } catch { /* ignore */ }
-            }
-
-            if (userEmail) {
-              const res = await fetch(`${supabaseUrl}/functions/v1/refresh-token`, {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Authorization': `Bearer ${supabaseAnon}`,
-                },
-                body: JSON.stringify({ project_id: 'default', user_email: userEmail }),
-              });
-              if (res.ok) {
-                const data = await res.json();
-                if (data.access_token) {
-                  setAccessToken(data.access_token);
-                  freshTokenSet = true;
-                  const encToken = await encryptData(data.access_token);
-                  localStorage.setItem('ds_youtube_access_token', encToken);
-                  console.log('[Auth] ✅ Token renovado automaticamente na inicialização');
-                }
-              }
-            }
-          } catch {
-            // Silent fail — fall through to cached token below
+        if (profile?.email) {
+          const fresh = await callRefreshToken('default', profile.email);
+          if (fresh) {
+            await persistAccessToken(fresh);
+            freshTokenSet = true;
+            console.log('[Auth] ✅ Token renovado automaticamente na inicialização');
           }
         }
 
-        // Fallback: restore cached token only if refresh didn't produce a fresh one.
-        // Validate with Google before setting — a 401 means the token is expired.
-        if (!freshTokenSet && storedToken) {
-          try {
-            const val = await decryptData(storedToken);
-            if (val) {
-              // Lightweight validation: userinfo endpoint returns 401 for expired tokens
-              const check = await fetch('https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=' + val);
-              if (check.ok) {
-                setAccessToken(val);
-                console.log('[Auth] Cached token válido — restaurado.');
-              } else {
-                // Token expired — remove silently so UI shows "not connected"
-                localStorage.removeItem('ds_youtube_access_token');
-                console.log('[Auth] Cached token expirado — descartado.');
-              }
-            }
-          } catch {
-            localStorage.removeItem('ds_youtube_access_token');
+        if (!freshTokenSet) {
+          const cached = await loadEncryptedString(ACCESS_TOKEN_STORAGE_KEY);
+          if (cached && (await isAccessTokenValid(cached))) {
+            setAccessToken(cached);
+            console.log('[Auth] Cached token válido — restaurado.');
+          } else if (cached) {
+            localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
+            console.log('[Auth] Cached token expirado — descartado.');
           }
         }
       } catch (e) {
         console.error('Auth init failed:', e);
       }
     };
-    
+
     initAuth();
   }, []);
 
