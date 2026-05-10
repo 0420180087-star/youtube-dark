@@ -1,6 +1,17 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { UserProfile, YouTubeChannel } from '../types';
-import { encryptData, decryptData } from '../services/securityService';
+import {
+  encryptData,
+  loadEncryptedJSON,
+  loadEncryptedString,
+  saveEncryptedJSON,
+  saveEncryptedString,
+} from '../services/securityService';
+import {
+  callRefreshToken,
+  isAccessTokenValid,
+  ACCESS_TOKEN_STORAGE_KEY,
+} from '../services/youtubeAuthService';
 import { supabase, setSupabaseUserEmail } from '../lib/supabaseClient';
 
 declare const google: any;
