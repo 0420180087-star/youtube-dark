@@ -22,7 +22,8 @@ serve(async (req) => {
   }
 
   try {
-    const { code, redirect_uri, project_id, user_email, client_id, client_secret } = await req.json()
+    const body = await req.json()
+    const { code, redirect_uri, project_id, user_email } = body
 
     if (!code || !redirect_uri || !project_id || !user_email) {
       return new Response(
@@ -31,9 +32,12 @@ serve(async (req) => {
       )
     }
 
+    const client_id = body.client_id || Deno.env.get('GOOGLE_CLIENT_ID')
+    const client_secret = body.client_secret || Deno.env.get('YOUTUBE_CLIENT_SECRET') || Deno.env.get('GOOGLE_CLIENT_SECRET')
+
     if (!client_id || !client_secret) {
       return new Response(
-        JSON.stringify({ error: 'client_id ou client_secret ausentes. Configure as secrets no Supabase.' }),
+        JSON.stringify({ error: 'client_id ou client_secret ausentes. Configure GOOGLE_CLIENT_ID e YOUTUBE_CLIENT_SECRET nas secrets do Supabase.' }),
         { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } }
       )
     }
