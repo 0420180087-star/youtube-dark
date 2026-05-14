@@ -5,7 +5,6 @@
  */
 
 import { createClient } from '@supabase/supabase-js';
-import ws from 'ws';
 import axios from 'axios';
 import path from 'path';
 import os from 'os';
@@ -29,8 +28,11 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   process.exit(1);
 }
 
+// Realtime is not used in this script (queries only).
+// Disabling it avoids the Node.js 20 WebSocket initialisation error
+// that fires even before the transport option is read.
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-  realtime: { transport: ws },
+  realtime: false,
 });
 
 // Per-run mutable keys — populated from user_settings before each project runs.
