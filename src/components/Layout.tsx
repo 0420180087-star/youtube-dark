@@ -3,11 +3,12 @@ import { Link, useLocation } from 'react-router-dom';
 import { LayoutDashboard, Film, Calendar, Settings, Youtube, Zap, Menu, X, Bot, AlertTriangle } from 'lucide-react';
 import { useProjects } from '../context/ProjectContext';
 import { supabase } from '../lib/supabaseClient';
+import { YoutubeReconnectBanner } from './YoutubeReconnectBanner';
 
 export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const location = useLocation();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const { autoPilotStatus } = useProjects(); // Get auto pilot status
+  const { autoPilotStatus } = useProjects();
 
   const navItems = [
     { label: 'Dashboard', path: '/', icon: LayoutDashboard },
@@ -17,6 +18,11 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
 
   const toggleMenu = () => setIsMobileMenuOpen(!isMobileMenuOpen);
   const isAutoPilotActive = autoPilotStatus !== 'Idle';
+
+  // Extract current project ID from URL if inside a project route
+  // e.g. /project/abc-123 → "abc-123"
+  const projectIdMatch = location.pathname.match(/\/project\/([^/]+)/);
+  const currentProjectId = projectIdMatch?.[1];
 
   return (
     <div className="flex h-screen bg-[#020617] text-slate-200 overflow-hidden font-sans selection:bg-orange-500/30 selection:text-orange-200">
@@ -111,6 +117,7 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
       </aside>
 
       <main className="flex-1 overflow-y-auto relative scroll-smooth pt-16 md:pt-0">
+        {/* Banner: Supabase não configurado */}
         {!supabase && (
           <div className="bg-amber-500/10 border-b border-amber-500/30 text-amber-300 text-xs md:text-sm px-4 md:px-8 py-2.5 flex items-center gap-2">
             <AlertTriangle className="w-4 h-4 flex-shrink-0" />
@@ -119,6 +126,10 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
             </span>
           </div>
         )}
+
+        {/* Banner: YouTube precisa reconectar (refresh_token revogado) */}
+        <YoutubeReconnectBanner projectId={currentProjectId} />
+
         <div className="max-w-7xl mx-auto p-4 md:p-8 lg:p-10 pb-24 md:pb-8">
             {children}
         </div>
