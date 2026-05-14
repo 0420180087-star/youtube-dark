@@ -5,7 +5,20 @@
  */
 
 import { createClient } from '@supabase/supabase-js';
+import ws from 'ws';
 import axios from 'axios';
+
+// ── WebSocket polyfill ────────────────────────────────────────────────────────
+// @supabase/realtime-js 2.x chama WebSocketFactory.getWebSocketConstructor()
+// INCONDICIONALMENTE no construtor do RealtimeClient, antes de ler qualquer
+// opção passada (incluindo `realtime: false` ou `transport: ws`).
+// No Node 20 não existe WebSocket nativo, então a biblioteca lança o erro.
+// Solução: injetar o `ws` no globalThis antes de qualquer import do Supabase.
+// No Node 22 (usado no workflow) o WebSocket já é nativo — este bloco é no-op.
+if (typeof globalThis.WebSocket === 'undefined') {
+  globalThis.WebSocket = ws;
+}
+// ─────────────────────────────────────────────────────────────────────────────
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -28,12 +41,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   process.exit(1);
 }
 
-// Realtime is not used in this script (queries only).
-// Disabling it avoids the Node.js 20 WebSocket initialisation error
-// that fires even before the transport option is read.
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-  realtime: false,
-});
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 // Per-run mutable keys — populated from user_settings before each project runs.
 // Falls back to ENV if no per-user key is configured.
