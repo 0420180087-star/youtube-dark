@@ -1,24 +1,40 @@
 /**
- * youtubeAuthService — small wrapper around the Supabase Edge Function
- * `refresh-token`. Centralises the fetch + headers + error swallowing
- * that was previously duplicated in AuthContext.
+ * youtubeAuthService — wrapper around the Supabase Edge Function `refresh-token`.
+ * Centralises the fetch + headers + error handling used by AuthContext.
  */
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 export const ACCESS_TOKEN_STORAGE_KEY = 'ds_youtube_access_token';
+export const NEEDS_RECONNECT_KEY = 'ds_yt_needs_reconnect';
+
+export interface RefreshResult {
+  accessToken: string | null;
+  /** true quando o Google retornou invalid_grant — refresh_token foi revogado */
+  needsReconnect: boolean;
+}
 
 /**
- * Calls the refresh-token edge function. Returns a fresh access_token, or
- * null if anything fails (network, missing env, no refresh_token saved).
- * Never throws — callers can fall back to whatever they had cached.
+ * Chama a edge function refresh-token.
+ * Retorna { accessToken, needsReconnect }.
+ * Nunca lança exceção — erros de rede viram accessToken: null.
  */
 export const callRefreshToken = async (
     projectId: string,
     userEmail: string | null | undefined,
 ): Promise<string | null> => {
-    if (!SUPABASE_URL || !SUPABASE_ANON || !userEmail) return null;
+    const result = await callRefreshTokenFull(projectId, userEmail);
+    return result.accessToken;
+};
+
+export const callRefreshTokenFull = async (
+    projectId: string,
+    userEmail: string | null | undefined,
+): Promise<RefreshResult> => {
+    if (!SUPABASE_URL || !SUPABASE_ANON || !userEmail) {
+        return { accessToken: null, needsReconnect: false };
+    }
     try {
         const res = await fetch(`${SUPABASE_URL}/functions/v1/refresh-token`, {
             method: 'POST',
@@ -28,11 +44,23 @@ export const callRefreshToken = async (
             },
             body: JSON.stringify({ project_id: projectId, user_email: userEmail }),
         });
-        if (!res.ok) return null;
-        const data = await res.json();
-        return data?.access_token ?? null;
+
+        const data = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+            const needsReconnect = data?.needsReconnect === true;
+            if (needsReconnect) {
+                // Marca no localStorage para a UI mostrar o aviso
+                localStorage.setItem(NEEDS_RECONNECT_KEY, '1');
+            }
+            return { accessToken: null, needsReconnect };
+        }
+
+        // Sucesso — limpa flag caso estivesse marcado
+        localStorage.removeItem(NEEDS_RECONNECT_KEY);
+        return { accessToken: data?.access_token ?? null, needsReconnect: false };
     } catch {
-        return null;
+        return { accessToken: null, needsReconnect: false };
     }
 };
 
