@@ -7,9 +7,10 @@ import {
   saveEncryptedString,
 } from '../services/securityService';
 import {
-  callRefreshToken,
+  callRefreshTokenFull,
   isAccessTokenValid,
   ACCESS_TOKEN_STORAGE_KEY,
+  NEEDS_RECONNECT_KEY,
 } from '../services/youtubeAuthService';
 import { supabase, setSupabaseUserEmail } from '../lib/supabaseClient';
 
@@ -21,16 +22,17 @@ interface AuthContextType {
   googleClientId: string;
   youtubeChannel: YouTubeChannel | null;
   accessToken: string | null;
-  
+  /** true quando o Google revogou o refresh_token — app precisa reconectar */
+  needsYoutubeReconnect: boolean;
+
   setGoogleClientId: (id: string) => void;
   login: () => Promise<void>;
   logout: () => void;
   connectYoutube: (projectId?: string) => Promise<void>;
   disconnectYoutube: () => void;
   refreshYouTubeToken: (projectId: string) => Promise<string | null>;
-  // Allows external components (e.g. ProjectHub) to save a token obtained
-  // via initTokenClient into AuthContext memory + localStorage.
   setYoutubeToken: (token: string) => Promise<void>;
+  clearReconnectFlag: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -41,10 +43,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [googleClientId, setGoogleClientIdState] = useState('');
+  const [needsYoutubeReconnect, setNeedsYoutubeReconnect] = useState(
+    () => localStorage.getItem(NEEDS_RECONNECT_KEY) === '1'
+  );
 
-  // Persist a fresh access_token to state + localStorage in one place.
   const persistAccessToken = async (token: string) => {
     setAccessToken(token);
+    setNeedsYoutubeReconnect(false);
+    localStorage.removeItem(NEEDS_RECONNECT_KEY);
     try {
       await saveEncryptedString(ACCESS_TOKEN_STORAGE_KEY, token);
     } catch (e) {
@@ -67,16 +73,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const channel = await loadEncryptedJSON<YouTubeChannel>('ds_youtube_channel');
         if (channel?.id) setYoutubeChannel(channel);
 
-        // Auto-refresh via Supabase Edge Function FIRST (before restoring cached token).
-        //   1. Try to get a fresh token. If it works, use it and discard cache.
-        //   2. Otherwise, restore the cached token only if Google says it's still valid.
+        // ── Auto-refresh na inicialização ────────────────────────────────────
+        //
+        // Passa project_id vazio ('') para que a edge function use a camada B
+        // (busca o refresh_token mais recente do usuário), independente de qual
+        // projeto foi autenticado. Isso resolve o problema de reconexão diária.
+        //
+        // Fluxo:
+        //   1. Tenta renovar via Supabase Edge Function (usa refresh_token salvo)
+        //   2. Se a edge function retornar needsReconnect=true (invalid_grant),
+        //      marca a flag para a UI exibir o aviso uma única vez
+        //   3. Se falhar por rede, restaura o token cacheado se ainda for válido
+        //
         let freshTokenSet = false;
         if (profile?.email) {
-          const fresh = await callRefreshToken('default', profile.email);
-          if (fresh) {
-            await persistAccessToken(fresh);
+          const result = await callRefreshTokenFull('', profile.email);
+
+          if (result.accessToken) {
+            await persistAccessToken(result.accessToken);
             freshTokenSet = true;
             console.log('[Auth] ✅ Token renovado automaticamente na inicialização');
+          } else if (result.needsReconnect) {
+            // refresh_token foi revogado pelo Google (invalid_grant)
+            // Acontece se: usuário removeu permissão no Google Account settings,
+            // ou o token ficou sem uso por 6 meses (muito raro com o cron ativo)
+            setNeedsYoutubeReconnect(true);
+            localStorage.setItem(NEEDS_RECONNECT_KEY, '1');
+            console.warn('[Auth] ⚠️ refresh_token revogado — usuário precisa reconectar o YouTube');
           }
         }
 
@@ -98,13 +121,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     initAuth();
   }, []);
 
-  // NOTE: OAuth ?code= handling was intentionally removed from AuthContext.
-  // The dedicated OAuthCallback page (/oauth/callback) is the sole handler.
-  // Having two handlers caused a race condition: both would consume the
-  // sessionStorage state and attempt to exchange the same code, with the
-  // second call always failing (code already used) and potentially clearing
-  // auth state mid-session.
-
   const setGoogleClientId = async (id: string) => {
     const cleanId = id.trim();
     await saveEncryptedString('ds_google_client_id', cleanId);
@@ -115,86 +131,81 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsLoading(true);
 
     const activeClientId = googleClientId ? googleClientId.trim() : '';
-    
+
     if (!activeClientId) {
-        alert("Configuration Missing: Please go to Settings and enter your Google Client ID.");
-        setIsLoading(false);
-        return;
+      alert('Configuration Missing: Please go to Settings and enter your Google Client ID.');
+      setIsLoading(false);
+      return;
     }
 
     if (typeof google === 'undefined') {
-        let loaded = false;
-        for (let i = 0; i < 10; i++) {
-            await new Promise(r => setTimeout(r, 500));
-            if (typeof google !== 'undefined') { loaded = true; break; }
-        }
-        if (!loaded) {
-            alert("Google Scripts not loaded. Verifique sua conexão e recarregue a página.");
-            setIsLoading(false);
-            return;
-        }
+      let loaded = false;
+      for (let i = 0; i < 10; i++) {
+        await new Promise(r => setTimeout(r, 500));
+        if (typeof google !== 'undefined') { loaded = true; break; }
+      }
+      if (!loaded) {
+        alert('Google Scripts not loaded. Verifique sua conexão e recarregue a página.');
+        setIsLoading(false);
+        return;
+      }
     }
 
     try {
-        const client = google.accounts.oauth2.initTokenClient({
-            client_id: activeClientId,
-            scope: 'https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email',
-            callback: async (tokenResponse: any) => {
-                if (tokenResponse && tokenResponse.access_token) {
-                    await fetchUserProfile(tokenResponse.access_token);
-                }
-                setIsLoading(false);
-            },
-            error_callback: (err: any) => {
-                console.error("GIS Error:", err);
-                setIsLoading(false);
-            }
-        });
-        
-        client.requestAccessToken();
+      const client = google.accounts.oauth2.initTokenClient({
+        client_id: activeClientId,
+        scope: 'https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email',
+        callback: async (tokenResponse: any) => {
+          if (tokenResponse && tokenResponse.access_token) {
+            await fetchUserProfile(tokenResponse.access_token);
+          }
+          setIsLoading(false);
+        },
+        error_callback: (err: any) => {
+          console.error('GIS Error:', err);
+          setIsLoading(false);
+        },
+      });
+
+      client.requestAccessToken();
     } catch (e: any) {
-        console.error("Auth Crash", e);
-        setIsLoading(false);
+      console.error('Auth Crash', e);
+      setIsLoading(false);
     }
   };
 
   const fetchUserProfile = async (token: string) => {
-      try {
-          const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-              headers: { Authorization: `Bearer ${token}` }
-          });
-          if (!res.ok) throw new Error("Failed to fetch profile");
-          const data = await res.json();
-          const profile: UserProfile = {
-              name: data.name,
-              email: data.email,
-              picture: data.picture
-          };
-          setUser(profile);
+    try {
+      const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error('Failed to fetch profile');
+      const data = await res.json();
+      const profile: UserProfile = {
+        name: data.name,
+        email: data.email,
+        picture: data.picture,
+      };
+      setUser(profile);
 
-          // Save locally (encrypted)
-          await saveEncryptedJSON('ds_user_profile', profile);
+      await saveEncryptedJSON('ds_user_profile', profile);
+      await setSupabaseUserEmail(profile.email);
 
-          // Establish RLS session scope: all subsequent Supabase calls from
-          // this client will be filtered to this user's rows.
-          await setSupabaseUserEmail(profile.email);
-
-          // Save to Supabase for cross-device persistence
-          if (supabase && profile.email) {
-              try {
-                  await supabase.from('user_profiles').upsert({
-                      email: profile.email,
-                      name: profile.name,
-                      picture: profile.picture,
-                      updated_at: new Date().toISOString(),
-                  }, { onConflict: 'email' });
-              } catch (e) {
-                  console.warn('[Supabase] Falha ao salvar perfil:', e);
-              }
-          }
-      } catch (e) {
-          console.error(e);
+      if (supabase && profile.email) {
+        try {
+          await supabase.from('user_profiles').upsert({
+            email: profile.email,
+            name: profile.name,
+            picture: profile.picture,
+            updated_at: new Date().toISOString(),
+          }, { onConflict: 'email' });
+        } catch (e) {
+          console.warn('[Supabase] Falha ao salvar perfil:', e);
+        }
       }
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   const connectYoutube = async (projectId?: string) => {
@@ -206,15 +217,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return;
     }
 
-    // Always use Authorization Code Flow with a STATIC redirect_uri.
-    // Register this URI in Google Console → Credentials → OAuth → Authorized redirect URIs:
-    //   Production:  https://your-domain.com/oauth/callback
-    //   Local dev:   http://localhost:5173/oauth/callback
-    //
-    // This URI never changes — no project ID, no dynamic path.
-    // Benefits over initTokenClient (implicit flow):
-    //   - Returns a refresh_token saved server-side via the exchange-code edge function
-    //   - Auto-refreshes silently on every page load — indefinite session
     const base = (import.meta.env.BASE_URL ?? '/').replace(/\/$/, '');
     const redirectUri = window.location.origin + base + '/oauth/callback';
 
@@ -242,23 +244,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const refreshYouTubeToken = async (projectId: string): Promise<string | null> => {
-    const fresh = await callRefreshToken(projectId, user?.email);
-    if (fresh) {
-      await persistAccessToken(fresh);
-      return fresh;
+    const result = await callRefreshTokenFull(projectId, user?.email);
+    if (result.accessToken) {
+      await persistAccessToken(result.accessToken);
+      return result.accessToken;
+    }
+    if (result.needsReconnect) {
+      setNeedsYoutubeReconnect(true);
+      localStorage.setItem(NEEDS_RECONNECT_KEY, '1');
     }
     return accessToken;
   };
 
   const disconnectYoutube = () => {
-      setYoutubeChannel(null);
-      setAccessToken(null);
-      localStorage.removeItem('ds_youtube_channel');
-      localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
-      
-      if (accessToken && typeof google !== 'undefined') {
-        try { google.accounts.oauth2.revoke(accessToken, () => {}); } catch (e) {}
-      }
+    setYoutubeChannel(null);
+    setAccessToken(null);
+    setNeedsYoutubeReconnect(false);
+    localStorage.removeItem('ds_youtube_channel');
+    localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
+    localStorage.removeItem(NEEDS_RECONNECT_KEY);
+
+    if (accessToken && typeof google !== 'undefined') {
+      try { google.accounts.oauth2.revoke(accessToken, () => {}); } catch (e) {}
+    }
   };
 
   const logout = () => {
@@ -267,17 +275,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     localStorage.removeItem('ds_user_profile');
   };
 
-  // Saves a token obtained outside of AuthContext (e.g. via initTokenClient in ProjectHub)
-  // into AuthContext state and localStorage so the rest of the app can use it.
   const setYoutubeToken = async (token: string) => {
     await persistAccessToken(token);
   };
 
+  const clearReconnectFlag = () => {
+    setNeedsYoutubeReconnect(false);
+    localStorage.removeItem(NEEDS_RECONNECT_KEY);
+  };
+
   return (
-    <AuthContext.Provider value={{ 
+    <AuthContext.Provider value={{
       user, isLoading, googleClientId, youtubeChannel, accessToken,
+      needsYoutubeReconnect,
       setGoogleClientId, login, logout, connectYoutube, disconnectYoutube,
-      refreshYouTubeToken, setYoutubeToken
+      refreshYouTubeToken, setYoutubeToken, clearReconnectFlag,
     }}>
       {children}
     </AuthContext.Provider>
@@ -286,6 +298,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
 export const useAuth = () => {
   const context = useContext(AuthContext);
-  if (!context) throw new Error("useAuth must be used within an AuthProvider");
+  if (!context) throw new Error('useAuth must be used within an AuthProvider');
   return context;
 };
