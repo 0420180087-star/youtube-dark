@@ -1,50 +1,84 @@
-# Limpeza & Refatoração
+## Resultado da auditoria
 
-Análise feita em `src/`, `scripts/` e `supabase/functions/` (≈13.8k linhas). Encontrei código morto concreto e várias oportunidades de refatoração de baixo risco.
+Sintaxe dos 3 scripts (`automation-runner.js`, `videoRenderer.js`, `youtubeUploader.js`) está OK (`node --check` passa). Mas encontrei **4 bugs reais** que vão derrubar o pipeline antes do upload — em especial o nº 1, que impede qualquer projeto de ser processado.
 
-## 1. Arquivos / símbolos para REMOVER
+### Bugs encontrados
 
-| Caminho | Motivo |
-|---|---|
-| `src/pages/Index.tsx` | Não importado em lugar algum, não está nas rotas de `App.tsx`. |
-| `src/pages/NotFound.tsx` | Sem rota catch-all `*` — nunca é renderizado. |
-| `src/test/example.test.ts` | Teste placeholder (`expect(true).toBe(true)`). |
-| `playwright.config.ts` + `playwright-fixture.ts` + dep `@playwright/test` | Nenhum teste Playwright existe em `src/`. |
-| `generateFullMetadata` + `FullMetadataResult` em `thumbnailDescriptionService.ts` (linhas 1086‑1098) | Exportados mas nunca importados; `geminiCore` chama as 3 funções base diretamente. |
-| `getPexelsKey` re‑export em `geminiPexels.ts` | Comentário diz "legacy callers" — nenhum chamador legado restante; importam de `pexelsService` direto. |
+**1. Lock RPC com tipo errado (BLOQUEADOR)** — `supabase/migrations/003_autopilot_lock.sql` define `acquire_autopilot_lock(p_project_id uuid, …)` e `release_autopilot_lock(p_project_id uuid)`, mas:
+- `projects.id` é **TEXT** (não uuid)
+- O runner passa `String(projectId)` (linha 519 de `automation-runner.js`)
+- Resultado: Postgres rejeita o cast → `lockError` → `processProject` retorna `false` para **todo projeto** → nada é postado.
 
-Decisão a tomar: adicionar uma rota catch‑all `<Route path="*" element={<NotFound/>} />` **ou** deletar `NotFound.tsx`. Recomendo manter (UX melhor) adicionando a rota.
+**2. Upload de thumbnail com encoding errado** — `scripts/youtubeUploader.js` (linhas 83-101) envia a thumbnail como `multipart/form-data`, mas o endpoint `youtube/v3/thumbnails/set` espera o **corpo bruto** com `Content-Type: image/jpeg`. Sempre falha silenciosamente (sem checar `res.ok`). A thumbnail nunca é aplicada no vídeo automático.
 
-## 2. Refatorações de funções (sem mudar comportamento)
+**3. Workflows duplicados** — Existem dois arquivos `auto-post.yml`: `.github/workflows/` (Node 22, correto) e `workflows/` (Node 20, sem o fix do `ws`). O segundo é dead code, mas confunde — se alguém mover, quebra. Apagar.
 
-### 2a. `AuthContext.tsx` (422 linhas)
-- O bloco `useEffect` de inicialização tem 4 padrões repetidos `localStorage.getItem` → `decryptData` → `JSON.parse` → `try/catch removeItem`. Extrair helper `loadEncryptedJSON<T>(key)` em `securityService.ts`.
-- Lógica de "tentar refresh-token + fallback para token cacheado validado" (linhas ~70‑130) e `refreshYouTubeToken` duplicam a chamada `fetch /functions/v1/refresh-token`. Extrair `callRefreshToken(projectId, email)` num módulo `services/youtubeAuthService.ts`.
-- `setYoutubeToken` e o trecho de refresh repetem `encryptData` + `localStorage.setItem('ds_youtube_access_token', ...)`. Extrair `persistAccessToken(token)`.
+**4. `.single()` em `project_auth`** — Linha 483 de `automation-runner.js` usa `.single()` na busca do refresh token. Se não houver linha (projeto recém-criado), lança exceção genérica em vez da mensagem clara "reconecte YouTube". Trocar por `.maybeSingle()`.
 
-### 2b. `geminiService.ts` barrel
-- Já é um barrel limpo, mas `geminiPexels.ts` re‑exporta `getPexelsKey` redundantemente. Simplificar.
+### Outros pontos verificados (OK)
 
-### 2c. Arquivos gigantes (não dividir agora, apenas marcar)
-`ProjectEditor.tsx` (1921), `ProjectHub.tsx` (1626), `thumbnailDescriptionService.ts` (1098), `geminiCore.ts` (1093), `automationService.ts` (681). Refatoração em larga escala fica fora deste passo — proponho fazer em PRs futuros, um por vez, para evitar regressões. **Posso fazer um deles agora se você priorizar.**
+- ENV vars do workflow alinhadas com o runner (`SUPABASE_SERVICE_KEY`, `YOUTUBE_CLIENT_SECRET`, etc.)
+- Node 22 já tem WebSocket nativo + fallback `ws` configurado
+- Pipeline 8 steps presente: idea → script → voice (TTS) → visuals → thumbnail → metadata → render → upload
+- Fluxo de refresh token via `project_auth` está correto (com fallback p/ legacy `projectData.youtubeRefreshToken`)
+- `release_autopilot_lock` no `finally` — não fica travado em crash
 
-### 2d. `ProjectContext.tsx` (679 linhas)
-- Verificar (no próximo passo) se há listeners/subscriptions duplicadas. Não toquei agora pra manter o escopo enxuto.
+### Plano de correção
 
-## 3. O que NÃO vou mexer
+**Arquivo: nova migration `supabase/migrations/004_fix_autopilot_lock_types.sql`**
+```sql
+-- Recria os RPCs com p_project_id TEXT (compatível com projects.id)
+drop function if exists acquire_autopilot_lock(uuid, text, int);
+drop function if exists release_autopilot_lock(uuid);
 
-- Edge Functions (`exchange-code`, `refresh-token`) — funcionando, fora de escopo.
-- `scripts/automation-runner.js` — recém‑refatorado.
-- Componentes shadcn/ui — gerados, mantém.
+create or replace function acquire_autopilot_lock(
+    p_project_id text,
+    p_locked_by  text,
+    p_lock_minutes int default 90
+) returns boolean language plpgsql security definer as $$
+declare v_updated int;
+begin
+    update projects
+    set autopilot_locked_until = now() + (p_lock_minutes || ' minutes')::interval,
+        autopilot_locked_by    = p_locked_by,
+        updated_at             = now()
+    where id = p_project_id
+      and (autopilot_locked_until is null or autopilot_locked_until < now());
+    get diagnostics v_updated = row_count;
+    return v_updated > 0;
+end; $$;
 
-## 4. Validação
+create or replace function release_autopilot_lock(p_project_id text)
+returns void language plpgsql security definer as $$
+begin
+    update projects set autopilot_locked_until = null, autopilot_locked_by = null,
+        updated_at = now() where id = p_project_id;
+end; $$;
+```
+Você precisará rodar esse SQL no **SQL Editor do Supabase Dashboard** (igual fizemos com `project_auth`).
 
-Após cada bloco: build do Vite + checagem de imports quebrados via `tsc --noEmit` automático do harness.
+**Arquivo: `scripts/youtubeUploader.js`** — reescrever `uploadThumbnail` para enviar o buffer bruto + checar `res.ok`:
+```js
+const res = await fetch(
+  `https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=${videoId}&uploadType=media`,
+  { method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'image/jpeg' },
+    body: buffer });
+if (!res.ok) { const t = await res.text(); console.warn('thumbnail falhou:', res.status, t); }
+```
+Remover import `form-data` (deixa de ser usado).
 
----
+**Arquivo: `scripts/automation-runner.js`** — linha 483: `.single()` → `.maybeSingle()`.
 
-## Confirmações antes de executar
+**Apagar:** `workflows/auto-post.yml` e `workflows/deploy.yml` (diretório `workflows/` na raiz — duplicata).
 
-1. Deleto `playwright*` + dep, ou você usa em CI externa?
-2. Adiciono rota catch‑all com `NotFound`, ou deleto `NotFound.tsx`?
-3. Quer que eu já comece a quebrar **um** dos arquivos gigantes (qual: `ProjectEditor`, `ProjectHub`, `thumbnailDescriptionService`, `geminiCore`)?
+### Como validar depois
+
+1. Aprovar este plano → eu aplico as 3 edições + crio a migration.
+2. Você roda o SQL da migration 004 no Supabase.
+3. GitHub → Actions → "Auto Post Video" → **Run workflow** (pode deixar `project_id` vazio ou preencher com um ID específico).
+4. Me cola o log. Com os 4 bugs corrigidos, o fluxo deve chegar até o upload + thumbnail aplicada.
+
+### Observação sobre auditoria estática vs teste real
+
+Não consigo executar o runner aqui (sem `SUPABASE_SERVICE_KEY`, `YOUTUBE_CLIENT_SECRET`, sem `ffmpeg` rodando no contexto do projeto, e sem permissão de fazer upload real para o seu canal). A parte de "ambos" será: agora eu corrijo → você dispara no GitHub Actions → log volta pra mim.

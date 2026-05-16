@@ -480,7 +480,7 @@ async function stepUploadYouTube(projectData, metadata, renderResult, thumbnailB
       .from('project_auth')
       .select('youtube_refresh_token')
       .eq('project_id', projectData.id || projectData.projectId || '')
-      .single();
+      .maybeSingle();
     refreshToken = authRow?.youtube_refresh_token;
   }
 
