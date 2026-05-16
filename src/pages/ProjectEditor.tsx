@@ -133,7 +133,7 @@ const EmptyState: React.FC<{ icon: React.ElementType; title: string; description
 export const ProjectEditor: React.FC = () => {
   const { projectId, videoId } = useParams<{ projectId: string; videoId: string }>();
   const { getProject, getVideo, updateVideo, updateProject } = useProjects();
-  const { googleClientId, accessToken } = useAuth();
+  const { googleClientId, accessToken, refreshYouTubeToken } = useAuth();
   
   const project = getProject(projectId || '');
   const video = getVideo(projectId || '', videoId || '');
@@ -613,8 +613,20 @@ export const ProjectEditor: React.FC = () => {
       // enter this function twice before the disabled prop re-renders.
       if (isUploading || isRenderingVideo) return;
 
-      if (!project?.youtubeChannelData || !accessToken) {
+      // If accessToken is null (e.g. page was reloaded), try to refresh silently before alerting.
+      // This is the most common cause of the "connect YouTube" alert showing unnecessarily.
+      let currentToken = accessToken;
+      if (!currentToken && project?.youtubeChannelData) {
+          setRenderStatus('Renovando sessão do YouTube…');
+          currentToken = await refreshYouTubeToken(projectId || '');
+      }
+
+      if (!project?.youtubeChannelData) {
           alert("Por favor, conecte um canal YouTube neste projeto primeiro (aba Settings).");
+          return;
+      }
+      if (!currentToken) {
+          alert("Sessão do YouTube expirada. Reconecte seu canal na aba Settings.");
           return;
       }
 
@@ -691,7 +703,7 @@ export const ProjectEditor: React.FC = () => {
           setRenderStatus('Enviando para o YouTube…');
 
           const videoId = await uploadVideoToYouTube(
-              accessToken!,
+              currentToken,
               fileToUpload,
               currentMetadata,
               video.thumbnailUrl,
