@@ -136,16 +136,35 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
               };
             };
 
-            const merged = remoteProjects.map(remote =>
-              mergeBlobs(remote, localData.find(l => l.id === remote.id))
-            );
+            const merged = remoteProjects.map(remote => {
+              const local = localData.find(l => l.id === remote.id);
+              const mergedProject = mergeBlobs(remote, local);
+
+              // Bug fix: include videos that exist on Supabase (created by GitHub Actions runner)
+              // but don't exist in local IndexedDB. Without this, runner-created videos
+              // never appear in the UI — the user sees no new videos despite the workflow succeeding.
+              if (local) {
+                const localVideoIds = new Set(local.videos?.map((v: Video) => v.id) || []);
+                const runnerVideos = remote.videos.filter((rv: Video) => !localVideoIds.has(rv.id));
+                if (runnerVideos.length > 0) {
+                  mergedProject.videos = [...runnerVideos, ...(mergedProject.videos || [])];
+                }
+              }
+
+              return mergedProject;
+            });
 
             // Add local-only projects not yet on Supabase
             const remoteIds = new Set(remoteProjects.map((p: Project) => p.id));
             const localOnly = localData.filter((l: Project) => !remoteIds.has(l.id));
 
-            // Only update if remote has newer data
-            setProjects([...merged, ...localOnly]);
+            const finalProjects = [...merged, ...localOnly];
+
+            // Persist merged result to IndexedDB immediately so runner-created videos
+            // survive a page reload without needing another Supabase round-trip
+            set(storageKey, finalProjects).catch(() => {});
+
+            setProjects(finalProjects);
           }
         }
       } catch (e) {
