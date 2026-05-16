@@ -7,18 +7,6 @@
 import { createClient } from '@supabase/supabase-js';
 import ws from 'ws';
 import axios from 'axios';
-
-// ── WebSocket polyfill ────────────────────────────────────────────────────────
-// @supabase/realtime-js 2.x chama WebSocketFactory.getWebSocketConstructor()
-// INCONDICIONALMENTE no construtor do RealtimeClient, antes de ler qualquer
-// opção passada (incluindo `realtime: false` ou `transport: ws`).
-// No Node 20 não existe WebSocket nativo, então a biblioteca lança o erro.
-// Solução: injetar o `ws` no globalThis antes de qualquer import do Supabase.
-// No Node 22 (usado no workflow) o WebSocket já é nativo — este bloco é no-op.
-if (typeof globalThis.WebSocket === 'undefined') {
-  globalThis.WebSocket = ws;
-}
-// ─────────────────────────────────────────────────────────────────────────────
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -41,7 +29,9 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   process.exit(1);
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+  realtime: { transport: ws },
+});
 
 // Per-run mutable keys — populated from user_settings before each project runs.
 // Falls back to ENV if no per-user key is configured.
@@ -526,13 +516,17 @@ async function processProject(projectRow) {
   // the same project at the same time as this GitHub Actions runner.
   const { data: lockAcquired, error: lockError } = await supabase
     .rpc('acquire_autopilot_lock', {
-      p_project_id: projectId,
+      p_project_id: String(projectId), // cast explícito: projects.id é TEXT, não UUID
       p_locked_by: 'github-actions',
       p_lock_minutes: 90,
     });
 
-  if (lockError || !lockAcquired) {
-    log('⏭️', `Lock not acquired for "${data.channelTheme}" — likely running in browser. Skipping.`);
+  if (lockError) {
+    log('❌', `Lock RPC error for "${data.channelTheme}": ${lockError.message}`);
+    return false;
+  }
+  if (!lockAcquired) {
+    log('⏭️', `Lock not acquired for "${data.channelTheme}" — already running elsewhere. Skipping.`);
     return false;
   }
 
@@ -633,9 +627,10 @@ async function processProject(projectRow) {
     await supabase.from('autopilot_logs').insert({
       project_id: projectId,
       status: 'success',
+      message: `Vídeo publicado: ${uploadResult?.videoUrl || 'sem URL'}`,
+      step: 'upload',
       video_title: metadata.title || idea.topic,
-      video_url: uploadResult?.videoUrl || null,
-      duration_seconds: duration,
+      elapsed_ms: duration * 1000,
     });
 
     log('🎉', `Project complete! Duration: ${duration}s. Next run: ${nextRun.toISOString()}`);
@@ -656,9 +651,9 @@ async function processProject(projectRow) {
     await supabase.from('autopilot_logs').insert({
       project_id: projectId,
       status: 'error',
-      failed_step: currentStep,
-      error_message: err.message,
-      duration_seconds: duration,
+      message: err.message,
+      step: currentStep,
+      elapsed_ms: duration * 1000,
     });
 
     return false;
@@ -700,17 +695,31 @@ async function main() {
 
   // Filter eligible projects
   const now = new Date();
+
+  // Debug: log schedule state of every project to help diagnose "0 eligible" runs
+  for (const p of projects) {
+    const d = p.data;
+    const autoGen = d?.scheduleSettings?.autoGenerate;
+    const nextRun = d?.scheduleSettings?.nextScheduledRun;
+    log('🔍', `Project "${d?.channelTheme || p.id}": autoGenerate=${autoGen}, nextRun=${nextRun || 'not set'}`);
+  }
+
   const eligible = projects.filter((p) => {
     const d = p.data;
-    if (!d?.scheduleSettings?.autoGenerate) return false;
 
-    // If specific project requested, skip schedule check
+    // Bug fix: log clearly when autoGenerate is missing/false so it's visible in Actions logs
+    if (!d?.scheduleSettings?.autoGenerate) {
+      log('⏭️', `Skipping "${d?.channelTheme || p.id}": autoGenerate is not enabled`);
+      return false;
+    }
+
+    // If specific project requested via PROJECT_ID env, skip schedule check
     if (PROJECT_ID) return true;
 
-    // Check if it's time to run
+    // Check if it's time to run — if nextScheduledRun was never set, run immediately
     const nextRun = d.scheduleSettings?.nextScheduledRun
       ? new Date(d.scheduleSettings.nextScheduledRun)
-      : new Date(0);
+      : new Date(0); // new Date(0) = Jan 1 1970 → always <= now → always eligible
     return nextRun <= now;
   });
 
