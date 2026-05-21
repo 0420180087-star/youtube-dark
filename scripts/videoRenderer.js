@@ -5,7 +5,7 @@
  */
 
 import ffmpeg from 'fluent-ffmpeg';
-import fetch from 'node-fetch';
+// fetch é nativo no Node 18+ — node-fetch removido
 import fs from 'fs';
 import path from 'path';
 import { promisify } from 'util';
@@ -220,7 +220,7 @@ function mixAudio(videoPath, voicePath, musicPath, outputPath) {
 }
 
 // ─── Main render function ─────────────────────────────────────────────────────
-export async function renderVideo({ visuals, segments, audioBase64, musicUrl, thumbnailBase64, tmpDir }) {
+export async function renderVideo({ visuals, segments, audioBase64, audioMimeType = 'audio/pcm', musicUrl, thumbnailBase64, tmpDir }) {
   fs.mkdirSync(tmpDir, { recursive: true });
 
   const processedClips = [];
@@ -292,18 +292,30 @@ export async function renderVideo({ visuals, segments, audioBase64, musicUrl, th
   const voicePath = path.join(tmpDir, 'voice.pcm');
   fs.writeFileSync(voicePath, Buffer.from(audioBase64, 'base64'));
 
-  // Convert PCM to usable audio format
+  // Converte áudio para MP3 — formato depende do mimeType retornado pelo Gemini TTS
+  // audio/pcm ou audio/L16 → raw PCM s16le 24000Hz mono
+  // audio/wav              → WAV padrão, FFmpeg detecta automaticamente
   const voiceConvPath = path.join(tmpDir, 'voice.mp3');
+  const isRawPcm = !audioMimeType || audioMimeType.includes('pcm') || audioMimeType.includes('L16');
+
   await new Promise((resolve, reject) => {
-    ffmpeg(voicePath)
-      .inputOptions(['-f', 's16le', '-ar', '24000', '-ac', '1'])
+    const cmd = ffmpeg(voicePath);
+    if (isRawPcm) {
+      cmd.inputOptions(['-f', 's16le', '-ar', '24000', '-ac', '1']);
+    }
+    cmd
       .outputOptions(['-c:a', 'libmp3lame', '-b:a', '128k'])
       .output(voiceConvPath)
       .on('end', resolve)
       .on('error', (err) => {
-        // Try as raw audio if PCM conversion fails
-        fs.copyFileSync(voicePath, voiceConvPath);
-        resolve();
+        console.warn('  ⚠️ Conversão de áudio falhou, tentando sem inputOptions:', err.message);
+        // Fallback: tenta sem forçar formato de entrada
+        ffmpeg(voicePath)
+          .outputOptions(['-c:a', 'libmp3lame', '-b:a', '128k'])
+          .output(voiceConvPath)
+          .on('end', resolve)
+          .on('error', () => { fs.copyFileSync(voicePath, voiceConvPath); resolve(); })
+          .run();
       })
       .run();
   });

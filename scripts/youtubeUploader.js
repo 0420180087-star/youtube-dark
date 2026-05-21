@@ -3,8 +3,9 @@
  * Used by the GitHub Actions automation runner.
  */
 
-import fetch from 'node-fetch';
+// fetch é nativo no Node 18+ — node-fetch removido
 import fs from 'fs';
+import FormData from 'form-data';
 
 // Renova o access token usando o refresh token
 export async function refreshAccessToken(clientId, clientSecret, refreshToken) {
@@ -78,32 +79,22 @@ export async function uploadVideoFile(accessToken, videoPath, metadata) {
   return { videoUrl: `https://youtube.com/watch?v=${result.id}`, videoId: result.id };
 }
 
-// Faz upload da thumbnail para o vídeo já publicado.
-// O endpoint thumbnails/set espera o corpo bruto da imagem (uploadType=media),
-// NÃO multipart/form-data. Enviar como form-data resulta em erro silencioso.
+// Faz upload da thumbnail para o vídeo já publicado
 export async function uploadThumbnail(accessToken, videoId, thumbnailBase64) {
   if (!thumbnailBase64) return;
   try {
     const buffer = Buffer.from(thumbnailBase64, 'base64');
+    const form = new FormData();
+    form.append('image', buffer, { filename: 'thumbnail.jpg', contentType: 'image/jpeg' });
 
-    const res = await fetch(
-      `https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=${videoId}&uploadType=media`,
+    await fetch(
+      `https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=${videoId}`,
       {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'image/jpeg',
-          'Content-Length': String(buffer.length),
-        },
-        body: buffer,
+        headers: { Authorization: `Bearer ${accessToken}`, ...form.getHeaders() },
+        body: form,
       }
     );
-
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      console.warn(`  ⚠️ Thumbnail upload falhou (HTTP ${res.status}): ${errText}`);
-      return;
-    }
     console.log('  🖼️ Thumbnail do YouTube atualizada');
   } catch (err) {
     console.warn('  ⚠️ Thumbnail upload falhou:', err.message);

@@ -7,6 +7,11 @@
 import { createClient } from '@supabase/supabase-js';
 import ws from 'ws';
 import axios from 'axios';
+
+// WebSocket polyfill para Node 20 (Node 22 tem nativo)
+if (typeof globalThis.WebSocket === 'undefined') {
+  globalThis.WebSocket = ws;
+}
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -29,9 +34,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   process.exit(1);
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-  realtime: { transport: ws },
-});
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 // Per-run mutable keys — populated from user_settings before each project runs.
 // Falls back to ENV if no per-user key is configured.
@@ -119,16 +122,30 @@ async function geminiGenerateJSON(prompt, maxTokens = 4096) {
 
 async function geminiGenerateImage(prompt) {
   try {
+    // Timeout de 45s — imagen-3 pode pendurar indefinidamente sem isso
     const res = await axios.post(
       `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:predict?key=${GEMINI_API_KEY}`,
       {
         instances: [{ prompt }],
         parameters: { sampleCount: 1, aspectRatio: '16:9' }
-      }
+      },
+      { timeout: 45000 }
     );
-    return res.data.predictions?.[0]?.bytesBase64Encoded || null;
+    const b64 = res.data.predictions?.[0]?.bytesBase64Encoded;
+    if (!b64) {
+      log('⚠️', 'imagen-3 não retornou imagem (conta pode não ter acesso ao modelo)');
+      return null;
+    }
+    return b64;
   } catch (err) {
-    log('⚠️', `Image generation failed, skipping thumbnail: ${err.message}`);
+    // imagen-3 exige conta allowlistada — se não tiver acesso, usa fallback silencioso
+    if (err?.response?.status === 403 || err?.response?.status === 400) {
+      log('⚠️', `imagen-3 sem acesso (${err.response.status}) — thumbnail pulada`);
+    } else if (err.code === 'ECONNABORTED') {
+      log('⚠️', 'imagen-3 timeout (>45s) — thumbnail pulada');
+    } else {
+      log('⚠️', `Thumbnail falhou: ${err.message}`);
+    }
     return null;
   }
 }
@@ -178,7 +195,12 @@ async function geminiTTS(text, voiceName = 'Fenrir', tone = 'Cinematic') {
     throw new Error('TTS returned no audio data');
   }
 
-  return audioPart.inlineData.data; // base64 audio
+  // Retorna tanto o base64 quanto o mimeType para que o renderer
+  // saiba se é PCM raw (audio/pcm) ou WAV (audio/wav / audio/L16)
+  return {
+    data: audioPart.inlineData.data,
+    mimeType: audioPart.inlineData.mimeType || 'audio/pcm',
+  };
 }
 
 async function searchPexels(query, usedIds, isVideo = true) {
@@ -323,11 +345,20 @@ async function stepVoice(script, projectData) {
 
     log('🎤', `  Generating TTS for segment ${i + 1}/${segments.length} (${text.length} chars)...`);
 
-    const audioBase64 = await geminiWithRetry(() =>
+    const ttsResult = await geminiWithRetry(() =>
       geminiTTS(text, projectData.defaultVoice || 'Fenrir', projectData.defaultTone || 'Cinematic')
     );
 
-    audioChunks.push(Buffer.from(audioBase64, 'base64'));
+    // ttsResult pode ser { data, mimeType } ou string (compatibilidade)
+    const audioData = typeof ttsResult === 'string' ? ttsResult : ttsResult.data;
+    const mimeType = typeof ttsResult === 'string' ? 'audio/pcm' : (ttsResult.mimeType || 'audio/pcm');
+
+    if (i === 0) {
+      // Guarda o mimeType do primeiro chunk para passar ao renderer
+      audioChunks._mimeType = mimeType;
+    }
+
+    audioChunks.push(Buffer.from(audioData, 'base64'));
 
     // Small delay between segments to avoid rate limits
     if (i < segments.length - 1) {
@@ -340,9 +371,10 @@ async function stepVoice(script, projectData) {
   // Concatenate all audio buffers into one
   const combined = Buffer.concat(audioChunks);
   const combinedBase64 = combined.toString('base64');
+  const mimeType = audioChunks._mimeType || 'audio/pcm';
 
-  log('✅', `Voice generated: ${audioChunks.length} segments, ${(combined.length / 1024 / 1024).toFixed(1)}MB total`);
-  return combinedBase64;
+  log('✅', `Voice generated: ${audioChunks.length} segments, ${(combined.length / 1024 / 1024).toFixed(1)}MB total, mimeType=${mimeType}`);
+  return { audioBase64: combinedBase64, mimeType };
 }
 
 async function stepVisuals(script, projectData) {
@@ -434,7 +466,7 @@ Return JSON:
   return metadata;
 }
 
-async function stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, projectData) {
+async function stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, projectData, audioMimeType = 'audio/pcm') {
   log('🎬', 'Step 7: Rendering video with FFmpeg...');
 
   const tmpDir = path.join(os.tmpdir(), `autopost_${Date.now()}`);
@@ -457,6 +489,7 @@ async function stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, pro
     visuals,
     segments: clipSegments,
     audioBase64: audioBase64,
+    audioMimeType: audioMimeType,
     musicUrl: null,
     thumbnailBase64: thumbnailBase64 || null,
     tmpDir,
@@ -480,7 +513,7 @@ async function stepUploadYouTube(projectData, metadata, renderResult, thumbnailB
       .from('project_auth')
       .select('youtube_refresh_token')
       .eq('project_id', projectData.id || projectData.projectId || '')
-      .maybeSingle();
+      .single();
     refreshToken = authRow?.youtube_refresh_token;
   }
 
@@ -516,17 +549,17 @@ async function processProject(projectRow) {
   // the same project at the same time as this GitHub Actions runner.
   const { data: lockAcquired, error: lockError } = await supabase
     .rpc('acquire_autopilot_lock', {
-      p_project_id: String(projectId), // cast explícito: projects.id é TEXT, não UUID
+      p_project_id: String(projectId),
       p_locked_by: 'github-actions',
       p_lock_minutes: 90,
     });
 
   if (lockError) {
-    log('❌', `Lock RPC error for "${data.channelTheme}": ${lockError.message}`);
+    log('❌', `Lock RPC error: ${lockError.message} — verifique se a migration 005 foi aplicada no Supabase`);
     return false;
   }
   if (!lockAcquired) {
-    log('⏭️', `Lock not acquired for "${data.channelTheme}" — already running elsewhere. Skipping.`);
+    log('⏭️', `Lock não adquirido para "${data.channelTheme}" — já rodando em outro lugar`);
     return false;
   }
 
@@ -558,9 +591,11 @@ async function processProject(projectRow) {
     currentStep = 'script';
     const script = await stepScript(idea.topic, data);
 
-    // Step 3: Voice/Narration (NEW — was missing!)
+    // Step 3: Voice/Narration
     currentStep = 'voice';
-    const audioBase64 = await stepVoice(script, data);
+    const voiceResult = await stepVoice(script, data);
+    const audioBase64 = voiceResult.audioBase64;
+    const audioMimeType = voiceResult.mimeType;
 
     // Step 4: Visuals
     currentStep = 'visuals';
@@ -584,7 +619,7 @@ async function processProject(projectRow) {
 
     // Step 7: Render Video (now receives audio!)
     currentStep = 'render';
-    const renderResult = await stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, data);
+    const renderResult = await stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, data, audioMimeType);
 
     // Step 8: Upload
     currentStep = 'upload';
@@ -627,7 +662,7 @@ async function processProject(projectRow) {
     await supabase.from('autopilot_logs').insert({
       project_id: projectId,
       status: 'success',
-      message: `Vídeo publicado: ${uploadResult?.videoUrl || 'sem URL'}`,
+      message: `Publicado: ${uploadResult?.videoUrl || 'sem URL'}`,
       step: 'upload',
       video_title: metadata.title || idea.topic,
       elapsed_ms: duration * 1000,
@@ -696,34 +731,28 @@ async function main() {
   // Filter eligible projects
   const now = new Date();
 
-  // Debug: log schedule state of every project to help diagnose "0 eligible" runs
+  log('🔍', `Verificando ${projects.length} projeto(s):`);
   for (const p of projects) {
     const d = p.data;
     const autoGen = d?.scheduleSettings?.autoGenerate;
-    const nextRun = d?.scheduleSettings?.nextScheduledRun;
-    log('🔍', `Project "${d?.channelTheme || p.id}": autoGenerate=${autoGen}, nextRun=${nextRun || 'not set'}`);
+    const nextRun = d?.scheduleSettings?.nextScheduledRun || 'nunca definido';
+    log('   ', `"${d?.channelTheme || p.id}": autoGenerate=${autoGen}, nextRun=${nextRun}`);
   }
 
   const eligible = projects.filter((p) => {
     const d = p.data;
-
-    // Bug fix: log clearly when autoGenerate is missing/false so it's visible in Actions logs
     if (!d?.scheduleSettings?.autoGenerate) {
-      log('⏭️', `Skipping "${d?.channelTheme || p.id}": autoGenerate is not enabled`);
+      log('⏭️', `"${d?.channelTheme || p.id}" pulado: autoGenerate não está ativado`);
       return false;
     }
-
-    // If specific project requested via PROJECT_ID env, skip schedule check
     if (PROJECT_ID) return true;
-
-    // Check if it's time to run — if nextScheduledRun was never set, run immediately
     const nextRun = d.scheduleSettings?.nextScheduledRun
       ? new Date(d.scheduleSettings.nextScheduledRun)
-      : new Date(0); // new Date(0) = Jan 1 1970 → always <= now → always eligible
+      : new Date(0);
     return nextRun <= now;
   });
 
-  log('📋', `Found ${projects.length} projects, ${eligible.length} eligible for processing`);
+  log('📋', `${projects.length} projeto(s) encontrados, ${eligible.length} elegível(is)`);
 
   let successCount = 0;
   let errorCount = 0;
