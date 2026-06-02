@@ -263,37 +263,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const connectYoutube = async (projectId?: string) => {
     if (!user) { await login(); return; }
-
-    const activeClientId = googleClientId?.trim();
-    if (!activeClientId) {
-      alert('Por favor, configure o Google Client ID nas Configurações primeiro.');
-      return;
-    }
-
-    const base = (import.meta.env.BASE_URL ?? '/').replace(/\/$/, '');
-    const redirectUri = window.location.origin + base + '/oauth/callback';
-
-    const state = crypto.randomUUID();
-    sessionStorage.setItem('yt_oauth_pending', JSON.stringify({
-      state,
-      projectId: projectId || 'default',
-      userEmail: user.email,
-      redirectUri,
-    }));
-
-    const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
-    authUrl.searchParams.set('client_id', activeClientId);
-    authUrl.searchParams.set('redirect_uri', redirectUri);
-    authUrl.searchParams.set('response_type', 'code');
-    authUrl.searchParams.set('scope', [
-      'https://www.googleapis.com/auth/youtube.upload',
-      'https://www.googleapis.com/auth/youtube.readonly',
-    ].join(' '));
-    authUrl.searchParams.set('access_type', 'offline');
-    authUrl.searchParams.set('prompt', 'consent');
-    authUrl.searchParams.set('state', state);
-
-    window.location.href = authUrl.toString();
+    await triggerYoutubeOAuth(projectId || 'default', user.email);
   };
 
   const refreshYouTubeToken = async (projectId: string): Promise<string | null> => {
