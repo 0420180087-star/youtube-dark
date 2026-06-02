@@ -55,7 +55,7 @@ serve(async (req) => {
         .select('youtube_refresh_token, youtube_access_token, token_expires_at')
         .eq('project_id', project_id)
         .eq('user_email', user_email)
-        .single()
+        .maybeSingle()
       data = result.data
     }
 
@@ -64,9 +64,10 @@ serve(async (req) => {
         .from('project_auth')
         .select('youtube_refresh_token, youtube_access_token, token_expires_at')
         .eq('user_email', user_email)
+        .not('youtube_refresh_token', 'is', null)
         .order('updated_at', { ascending: false })
         .limit(1)
-        .single()
+        .maybeSingle()
       data = result.data
     }
 
