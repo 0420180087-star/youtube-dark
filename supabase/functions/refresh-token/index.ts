@@ -55,7 +55,7 @@ serve(async (req) => {
         .select('youtube_refresh_token, youtube_access_token, token_expires_at')
         .eq('project_id', project_id)
         .eq('user_email', user_email)
-        .single()
+        .maybeSingle()
       data = result.data
     }
 
@@ -64,9 +64,10 @@ serve(async (req) => {
         .from('project_auth')
         .select('youtube_refresh_token, youtube_access_token, token_expires_at')
         .eq('user_email', user_email)
+        .not('youtube_refresh_token', 'is', null)
         .order('updated_at', { ascending: false })
         .limit(1)
-        .single()
+        .maybeSingle()
       data = result.data
     }
 
@@ -104,9 +105,13 @@ serve(async (req) => {
 
     if (!tokens.access_token) {
       console.error('Token refresh failed:', tokens)
+      const needsReconnect = tokens.error === 'invalid_grant'
       return new Response(
-        JSON.stringify({ error: tokens.error_description || 'Falha ao renovar token' }),
-        { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } }
+        JSON.stringify({
+          error: tokens.error_description || 'Falha ao renovar token',
+          needsReconnect,
+        }),
+        { status: needsReconnect ? 401 : 400, headers: { ...CORS, 'Content-Type': 'application/json' } }
       )
     }
 
