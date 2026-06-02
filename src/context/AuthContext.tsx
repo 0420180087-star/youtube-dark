@@ -203,9 +203,62 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           console.warn('[Supabase] Falha ao salvar perfil:', e);
         }
       }
+
+      // Após login: garante que existe refresh_token salvo no Supabase.
+      // Se não houver (primeiro login ou revogado), dispara o OAuth offline
+      // para que o exchange-code salve o refresh_token em project_auth.
+      try {
+        const check = await callRefreshTokenFull('', profile.email);
+        if (check.accessToken) {
+          await persistAccessToken(check.accessToken);
+        } else {
+          console.log('[Auth] Sem refresh_token — disparando OAuth offline');
+          await triggerYoutubeOAuth('default', profile.email);
+        }
+      } catch (e) {
+        console.warn('[Auth] Verificação pós-login falhou:', e);
+      }
     } catch (e) {
       console.error(e);
     }
+  };
+
+  // Authorization Code Flow com offline+consent → exchange-code salva
+  // o refresh_token em project_auth (Supabase).
+  const triggerYoutubeOAuth = async (projectId: string, userEmail: string) => {
+    const activeClientId = googleClientId?.trim();
+    if (!activeClientId) {
+      alert('Configure o Google Client ID nas Configurações primeiro.');
+      return;
+    }
+
+    const base = (import.meta.env.BASE_URL ?? '/').replace(/\/$/, '');
+    const redirectUri = window.location.origin + base + '/oauth/callback';
+
+    const state = crypto.randomUUID();
+    sessionStorage.setItem('yt_oauth_pending', JSON.stringify({
+      state,
+      projectId,
+      userEmail,
+      redirectUri,
+    }));
+
+    const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+    authUrl.searchParams.set('client_id', activeClientId);
+    authUrl.searchParams.set('redirect_uri', redirectUri);
+    authUrl.searchParams.set('response_type', 'code');
+    authUrl.searchParams.set('scope', [
+      'https://www.googleapis.com/auth/userinfo.profile',
+      'https://www.googleapis.com/auth/userinfo.email',
+      'https://www.googleapis.com/auth/youtube.upload',
+      'https://www.googleapis.com/auth/youtube.readonly',
+    ].join(' '));
+    authUrl.searchParams.set('access_type', 'offline');
+    authUrl.searchParams.set('prompt', 'consent');
+    authUrl.searchParams.set('include_granted_scopes', 'true');
+    authUrl.searchParams.set('state', state);
+
+    window.location.href = authUrl.toString();
   };
 
   const connectYoutube = async (projectId?: string) => {
