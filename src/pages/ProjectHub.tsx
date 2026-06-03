@@ -148,6 +148,7 @@ export const ProjectHub: React.FC = () => {
       editMinImages !== (project.visualPacing?.minImagesPer5Sec ?? 1) ||
       editMaxImages !== (project.visualPacing?.maxImagesPer5Sec ?? 2) ||
       editStyle !== (project.visualPacing?.style ?? 'dynamic') ||
+      editMaxMediaDur !== (project.maxMediaDurationSeconds ?? 6) ||
       editFreq !== (project.scheduleSettings?.frequencyDays || 1) ||
       editTimeStart !== (project.scheduleSettings?.timeWindowStart || '13:00') ||
       editTimeEnd !== (project.scheduleSettings?.timeWindowEnd || '15:00') ||
