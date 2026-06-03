@@ -320,6 +320,7 @@ export const ProjectHub: React.FC = () => {
                 maxImagesPer5Sec: editMaxImages,
                 style: editStyle
             },
+            maxMediaDurationSeconds: Number(editMaxMediaDur),
             scheduleSettings: {
                 frequencyDays: Number(editFreq),
                 timeWindowStart: editTimeStart,
