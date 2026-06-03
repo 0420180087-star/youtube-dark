@@ -398,19 +398,29 @@ async function stepVisuals(script, projectData) {
   const toneModifier = getToneModifier(projectData.defaultTone);
   const scenes = [];
 
+  // Keep each media on screen at most this many seconds — configurable per-project
+  const MAX_MEDIA_DUR = Math.max(2, Number(projectData.maxMediaDurationSeconds) || 6);
+
   for (let i = 0; i < script.segments.length; i++) {
     const seg = script.segments[i];
     const prompts = seg.visualDescriptions || [];
+    if (prompts.length === 0) continue;
 
-    for (let j = 0; j < prompts.length; j++) {
-      const query = `${prompts[j]} ${toneModifier}`.split(' ').slice(0, 4).join(' ');
-      log('🔍', `  Searching: "${query}"`);
+    const segDur = Math.max(2, Number(seg.estimatedDuration) || 5);
+    // Split segment into N slots so no single media stays longer than MAX_MEDIA_DUR
+    const slotCount = Math.max(prompts.length, Math.ceil(segDur / MAX_MEDIA_DUR));
+    const slotDur = segDur / slotCount;
+
+    for (let j = 0; j < slotCount; j++) {
+      const prompt = prompts[j % prompts.length];
+      const query = `${prompt} ${toneModifier}`.split(' ').slice(0, 4).join(' ');
+      log('🔍', `  Searching (${j + 1}/${slotCount}): "${query}"`);
 
       let result = await searchPexels(query, usedIds);
 
       // Fallback: try without tone modifier
       if (!result) {
-        const fallbackQuery = prompts[j].split(' ').slice(0, 3).join(' ');
+        const fallbackQuery = prompt.split(' ').slice(0, 3).join(' ');
         result = await searchPexels(fallbackQuery, usedIds);
       }
 
@@ -421,7 +431,8 @@ async function stepVisuals(script, projectData) {
 
       scenes.push({
         segmentIndex: i,
-        prompt: prompts[j],
+        prompt,
+        duration: slotDur,
         videoUrl: result?.videoUrl,
         imageUrl: result?.imageUrl || result?.thumbnailUrl,
       });
@@ -431,7 +442,7 @@ async function stepVisuals(script, projectData) {
     }
   }
 
-  log('✅', `Found ${scenes.length} visual scenes`);
+  log('✅', `Found ${scenes.length} visual scenes (max ${MAX_MEDIA_DUR}s per media)`);
   return scenes;
 }
 
