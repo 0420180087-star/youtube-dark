@@ -1312,7 +1312,37 @@ export const ProjectHub: React.FC = () => {
                                     </div>
                                 </div>
                             )}
-                            
+
+                            {/* Max Media Duration — applies to both Gemini & Pexels media */}
+                            <div className="col-span-1 md:col-span-2 pt-4 border-t border-slate-800/50">
+                                <div className="flex justify-between items-center mb-3">
+                                    <label className="flex items-center gap-2 text-sm font-medium text-slate-400">
+                                        <Zap className="w-3.5 h-3.5 text-orange-400" /> Max time each media stays on screen
+                                    </label>
+                                    <div className="flex items-center gap-2 bg-slate-950 px-2 py-1 rounded border border-slate-800">
+                                        <input
+                                            type="number"
+                                            min={2}
+                                            max={30}
+                                            step={1}
+                                            value={editMaxMediaDur}
+                                            onChange={(e) => setEditMaxMediaDur(Math.max(2, Math.min(30, Number(e.target.value) || 6)))}
+                                            className="w-12 bg-transparent text-center text-white text-xs outline-none"
+                                        />
+                                        <span className="text-[10px] text-slate-500">sec</span>
+                                    </div>
+                                </div>
+                                <input
+                                    type="range" min={2} max={20} step={1}
+                                    value={editMaxMediaDur}
+                                    onChange={(e) => setEditMaxMediaDur(Number(e.target.value))}
+                                    className="w-full accent-orange-500"
+                                />
+                                <p className="text-[10px] text-slate-500 italic mt-2">
+                                    Each image or Pexels clip is replaced after this many seconds. Lower values create more dynamic videos but require more media.
+                                </p>
+                            </div>
+
                             <p className="text-xs text-slate-600 mt-4">These settings will apply to all new videos created in this project.</p>
                         </div>
 
