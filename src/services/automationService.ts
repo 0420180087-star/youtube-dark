@@ -64,13 +64,34 @@ export async function stepGenerateIdea(
     return { topic: unusedIdea.topic, context: unusedIdea.context, specificContext: unusedIdea.specificContext, ideaId: unusedIdea.id };
   }
 
-  // Generate new ideas
+  // Generate new ideas — retry with fresh angles, then synthesize a fallback so autopilot never stalls
   callbacks.onProgress('idea', 'Nenhuma ideia disponível, gerando novas...');
   const excludeList = project.videos.map(v => v.title);
   const libraryContext = project.library?.map(item => `[${item.type?.toUpperCase() || 'INFO'}] ${item.title}: ${item.content}`).join('\n') || '';
-  const ideas = await generateVideoIdeas(project.channelTheme, project.description || '', project.defaultTone, project.language, excludeList, libraryContext);
 
-  if (!ideas || ideas.length === 0) throw new Error('Nenhuma ideia gerada pela IA');
+  const FRESH_ANGLES = ['untold history', 'modern mystery', 'shocking facts', 'hidden truth', 'expert insights', 'controversial take'];
+  let ideas: GeminiVideoIdea[] = [];
+  for (let attempt = 0; attempt < 3 && ideas.length === 0; attempt++) {
+    try {
+      const angle = attempt === 0 ? '' : FRESH_ANGLES[Math.floor(Math.random() * FRESH_ANGLES.length)];
+      ideas = await generateVideoIdeas(project.channelTheme, project.description || '', project.defaultTone, project.language, excludeList, libraryContext, angle);
+    } catch (e) {
+      console.warn(`[autopilot] idea generation attempt ${attempt + 1} failed:`, e);
+    }
+    if (ideas.length === 0) callbacks.onProgress('idea', `Tentativa ${attempt + 1} sem ideias, retentando...`);
+  }
+
+  // Final fallback: never let autopilot stop just because brainstorm came back empty
+  if (ideas.length === 0) {
+    callbacks.onProgress('idea', 'IA não retornou ideias, criando fallback automático...');
+    const seeds = ['The Untold Story of', 'What Nobody Tells You About', 'The Hidden Truth Behind', 'Why Everyone is Wrong About'];
+    const seed = seeds[Math.floor(Math.random() * seeds.length)];
+    ideas = [{
+      topic: `${seed} ${project.channelTheme}`,
+      context: `An exploration of ${project.channelTheme} from a fresh angle.`,
+      specificContext: `Create an engaging deep-dive about ${project.channelTheme}. ${project.description || ''} Focus on a surprising, click-worthy perspective the audience hasn't seen before.`
+    }];
+  }
 
   // Persist ALL generated ideas immediately so a parallel runner won't regenerate them
   // and so the chosen one is marked 'used' atomically (prevents duplicate videos).
@@ -79,7 +100,6 @@ export async function stepGenerateIdea(
   const best = ideas[0];
 
   // Try to mark the freshly-saved idea as used (best-effort, by topic match).
-  // The real ID lives inside ProjectContext; we re-read the latest project state.
   try {
     const latest = callbacks.getLatestProject(project.id);
     const matched = latest?.ideas?.find(i => i.topic === best.topic && i.status === 'new');
