@@ -277,7 +277,22 @@ Language: ${projectData.language || 'en'}.
 
 Return JSON: { "topic": "video title", "context": "brief description", "specificContext": "detailed angle" }`;
 
-  const idea = await geminiGenerateJSON(prompt);
+  let idea;
+  try {
+    idea = await geminiGenerateJSON(prompt);
+    if (!idea || !idea.topic) throw new Error('AI returned no topic');
+  } catch (e) {
+    // Fallback: never block autopilot just because brainstorm failed
+    log('⚠️', `Brainstorm fallback (IA falhou: ${e.message}). Gerando ideia automática.`);
+    const seeds = ['The Untold Story of', 'The Hidden Truth Behind', 'What Nobody Tells You About', 'Why Everyone is Wrong About'];
+    const seed = seeds[Math.floor(Math.random() * seeds.length)];
+    idea = {
+      topic: `${seed} ${projectData.channelTheme}`,
+      context: `An engaging deep-dive about ${projectData.channelTheme}.`,
+      specificContext: `Explore ${projectData.channelTheme} from a fresh, click-worthy angle. ${projectData.description || ''}`.trim(),
+    };
+  }
+
   log('✅', `Generated idea: "${idea.topic}"`);
   return { topic: idea.topic, context: idea.context, specificContext: idea.specificContext, updatedIdeas: ideas };
 }
