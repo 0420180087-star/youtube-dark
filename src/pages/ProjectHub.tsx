@@ -124,6 +124,7 @@ export const ProjectHub: React.FC = () => {
     setEditMinImages(project.visualPacing?.minImagesPer5Sec ?? 1);
     setEditMaxImages(project.visualPacing?.maxImagesPer5Sec ?? 2);
     setEditStyle(project.visualPacing?.style ?? 'dynamic');
+    setEditMaxMediaDur(project.maxMediaDurationSeconds ?? 6);
     setEditFreq(project.scheduleSettings?.frequencyDays || 1);
     setEditTimeStart(project.scheduleSettings?.timeWindowStart || '13:00');
     setEditTimeEnd(project.scheduleSettings?.timeWindowEnd || '15:00');
