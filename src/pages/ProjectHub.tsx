@@ -93,6 +93,7 @@ export const ProjectHub: React.FC = () => {
   const [editMinImages, setEditMinImages] = useState(project?.visualPacing?.minImagesPer5Sec ?? 1);
   const [editMaxImages, setEditMaxImages] = useState(project?.visualPacing?.maxImagesPer5Sec ?? 2);
   const [editStyle, setEditStyle] = useState<VisualPacingStyle>(project?.visualPacing?.style ?? 'dynamic');
+  const [editMaxMediaDur, setEditMaxMediaDur] = useState<number>(project?.maxMediaDurationSeconds ?? 6);
   
   // Schedule Edit State
   const [editFreq, setEditFreq] = useState(project?.scheduleSettings?.frequencyDays || 1);
