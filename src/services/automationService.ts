@@ -207,30 +207,30 @@ export async function stepGenerateVisuals(
   // Tracks when the last image generation call was made for rate-limit throttling
   let lastImageCallTime = 0;
 
+  // Max time any single image/video can stay on screen before being swapped.
+  // Configurable per-project (defaults to 6s) — keeps videos dynamic.
+  const MAX_MEDIA_DUR = Math.max(2, project.maxMediaDurationSeconds ?? 6);
+
   for (let i = 0; i < script.segments.length; i++) {
     const start = timestamps[i];
     const next = timestamps[i + 1] || totalDuration;
     const totalSegmentDur = next - start;
     const seg = script.segments[i];
-    const prompts = seg.visualDescriptions || [];
+    const prompts: string[] = seg.visualDescriptions || [];
+    if (prompts.length === 0) continue;
 
-    const weights = prompts.map(() => 0.5 + Math.random());
-    const totalWeight = weights.reduce((a: number, b: number) => a + b, 0);
-    const sceneDurations = weights.map((w: number) => (w / totalWeight) * totalSegmentDur);
+    // Number of slots = at least one per prompt, but split further if the
+    // segment is longer than MAX_MEDIA_DUR so no media stays on screen too long.
+    const slotCount = Math.max(prompts.length, Math.ceil(totalSegmentDur / MAX_MEDIA_DUR));
+    const slotDur = totalSegmentDur / slotCount;
 
     let currentSceneStart = start;
 
-    for (let j = 0; j < prompts.length; j++) {
-      callbacks.onProgress('visuals', `Segmento ${i + 1}, cena ${j + 1}/${prompts.length}`);
-      const prompt = prompts[j];
-      const dur = sceneDurations[j];
+    for (let j = 0; j < slotCount; j++) {
+      callbacks.onProgress('visuals', `Segmento ${i + 1}, cena ${j + 1}/${slotCount}`);
+      const prompt = prompts[j % prompts.length];
 
       // Throttle between image requests to respect Gemini rate limits.
-      // We track the timestamp of the last call and wait only as long as
-      // necessary, instead of using a fixed blind delay.
-      // Target: no more than 10 image requests per minute (6s apart).
-      // The geminiService's key-rotation engine handles 429s independently;
-      // this pre-throttle reduces how often we hit them in the first place.
       if (i > 0 || j > 0) {
         const MIN_INTERVAL_MS = 6_000;
         const sinceLastCall = Date.now() - lastImageCallTime;
@@ -271,9 +271,9 @@ export async function stepGenerateVisuals(
         segmentIndex: i, imageUrl: imgUrl, videoUrl, prompt,
         effect: ANIMATION_EFFECTS[(i + j) % ANIMATION_EFFECTS.length],
         startTime: currentSceneStart,
-        duration: dur
+        duration: slotDur
       });
-      currentSceneStart += dur;
+      currentSceneStart += slotDur;
     }
   }
 
