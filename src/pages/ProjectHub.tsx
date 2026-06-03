@@ -93,6 +93,7 @@ export const ProjectHub: React.FC = () => {
   const [editMinImages, setEditMinImages] = useState(project?.visualPacing?.minImagesPer5Sec ?? 1);
   const [editMaxImages, setEditMaxImages] = useState(project?.visualPacing?.maxImagesPer5Sec ?? 2);
   const [editStyle, setEditStyle] = useState<VisualPacingStyle>(project?.visualPacing?.style ?? 'dynamic');
+  const [editMaxMediaDur, setEditMaxMediaDur] = useState<number>(project?.maxMediaDurationSeconds ?? 6);
   
   // Schedule Edit State
   const [editFreq, setEditFreq] = useState(project?.scheduleSettings?.frequencyDays || 1);
@@ -123,6 +124,7 @@ export const ProjectHub: React.FC = () => {
     setEditMinImages(project.visualPacing?.minImagesPer5Sec ?? 1);
     setEditMaxImages(project.visualPacing?.maxImagesPer5Sec ?? 2);
     setEditStyle(project.visualPacing?.style ?? 'dynamic');
+    setEditMaxMediaDur(project.maxMediaDurationSeconds ?? 6);
     setEditFreq(project.scheduleSettings?.frequencyDays || 1);
     setEditTimeStart(project.scheduleSettings?.timeWindowStart || '13:00');
     setEditTimeEnd(project.scheduleSettings?.timeWindowEnd || '15:00');
@@ -146,6 +148,7 @@ export const ProjectHub: React.FC = () => {
       editMinImages !== (project.visualPacing?.minImagesPer5Sec ?? 1) ||
       editMaxImages !== (project.visualPacing?.maxImagesPer5Sec ?? 2) ||
       editStyle !== (project.visualPacing?.style ?? 'dynamic') ||
+      editMaxMediaDur !== (project.maxMediaDurationSeconds ?? 6) ||
       editFreq !== (project.scheduleSettings?.frequencyDays || 1) ||
       editTimeStart !== (project.scheduleSettings?.timeWindowStart || '13:00') ||
       editTimeEnd !== (project.scheduleSettings?.timeWindowEnd || '15:00') ||
@@ -317,6 +320,7 @@ export const ProjectHub: React.FC = () => {
                 maxImagesPer5Sec: editMaxImages,
                 style: editStyle
             },
+            maxMediaDurationSeconds: Number(editMaxMediaDur),
             scheduleSettings: {
                 frequencyDays: Number(editFreq),
                 timeWindowStart: editTimeStart,
@@ -1308,7 +1312,37 @@ export const ProjectHub: React.FC = () => {
                                     </div>
                                 </div>
                             )}
-                            
+
+                            {/* Max Media Duration — applies to both Gemini & Pexels media */}
+                            <div className="col-span-1 md:col-span-2 pt-4 border-t border-slate-800/50">
+                                <div className="flex justify-between items-center mb-3">
+                                    <label className="flex items-center gap-2 text-sm font-medium text-slate-400">
+                                        <Zap className="w-3.5 h-3.5 text-orange-400" /> Max time each media stays on screen
+                                    </label>
+                                    <div className="flex items-center gap-2 bg-slate-950 px-2 py-1 rounded border border-slate-800">
+                                        <input
+                                            type="number"
+                                            min={2}
+                                            max={30}
+                                            step={1}
+                                            value={editMaxMediaDur}
+                                            onChange={(e) => setEditMaxMediaDur(Math.max(2, Math.min(30, Number(e.target.value) || 6)))}
+                                            className="w-12 bg-transparent text-center text-white text-xs outline-none"
+                                        />
+                                        <span className="text-[10px] text-slate-500">sec</span>
+                                    </div>
+                                </div>
+                                <input
+                                    type="range" min={2} max={20} step={1}
+                                    value={editMaxMediaDur}
+                                    onChange={(e) => setEditMaxMediaDur(Number(e.target.value))}
+                                    className="w-full accent-orange-500"
+                                />
+                                <p className="text-[10px] text-slate-500 italic mt-2">
+                                    Each image or Pexels clip is replaced after this many seconds. Lower values create more dynamic videos but require more media.
+                                </p>
+                            </div>
+
                             <p className="text-xs text-slate-600 mt-4">These settings will apply to all new videos created in this project.</p>
                         </div>
 

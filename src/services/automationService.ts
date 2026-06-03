@@ -64,13 +64,34 @@ export async function stepGenerateIdea(
     return { topic: unusedIdea.topic, context: unusedIdea.context, specificContext: unusedIdea.specificContext, ideaId: unusedIdea.id };
   }
 
-  // Generate new ideas
+  // Generate new ideas — retry with fresh angles, then synthesize a fallback so autopilot never stalls
   callbacks.onProgress('idea', 'Nenhuma ideia disponível, gerando novas...');
   const excludeList = project.videos.map(v => v.title);
   const libraryContext = project.library?.map(item => `[${item.type?.toUpperCase() || 'INFO'}] ${item.title}: ${item.content}`).join('\n') || '';
-  const ideas = await generateVideoIdeas(project.channelTheme, project.description || '', project.defaultTone, project.language, excludeList, libraryContext);
 
-  if (!ideas || ideas.length === 0) throw new Error('Nenhuma ideia gerada pela IA');
+  const FRESH_ANGLES = ['untold history', 'modern mystery', 'shocking facts', 'hidden truth', 'expert insights', 'controversial take'];
+  let ideas: GeminiVideoIdea[] = [];
+  for (let attempt = 0; attempt < 3 && ideas.length === 0; attempt++) {
+    try {
+      const angle = attempt === 0 ? '' : FRESH_ANGLES[Math.floor(Math.random() * FRESH_ANGLES.length)];
+      ideas = await generateVideoIdeas(project.channelTheme, project.description || '', project.defaultTone, project.language, excludeList, libraryContext, angle);
+    } catch (e) {
+      console.warn(`[autopilot] idea generation attempt ${attempt + 1} failed:`, e);
+    }
+    if (ideas.length === 0) callbacks.onProgress('idea', `Tentativa ${attempt + 1} sem ideias, retentando...`);
+  }
+
+  // Final fallback: never let autopilot stop just because brainstorm came back empty
+  if (ideas.length === 0) {
+    callbacks.onProgress('idea', 'IA não retornou ideias, criando fallback automático...');
+    const seeds = ['The Untold Story of', 'What Nobody Tells You About', 'The Hidden Truth Behind', 'Why Everyone is Wrong About'];
+    const seed = seeds[Math.floor(Math.random() * seeds.length)];
+    ideas = [{
+      topic: `${seed} ${project.channelTheme}`,
+      context: `An exploration of ${project.channelTheme} from a fresh angle.`,
+      specificContext: `Create an engaging deep-dive about ${project.channelTheme}. ${project.description || ''} Focus on a surprising, click-worthy perspective the audience hasn't seen before.`
+    }];
+  }
 
   // Persist ALL generated ideas immediately so a parallel runner won't regenerate them
   // and so the chosen one is marked 'used' atomically (prevents duplicate videos).
@@ -79,7 +100,6 @@ export async function stepGenerateIdea(
   const best = ideas[0];
 
   // Try to mark the freshly-saved idea as used (best-effort, by topic match).
-  // The real ID lives inside ProjectContext; we re-read the latest project state.
   try {
     const latest = callbacks.getLatestProject(project.id);
     const matched = latest?.ideas?.find(i => i.topic === best.topic && i.status === 'new');
@@ -187,30 +207,30 @@ export async function stepGenerateVisuals(
   // Tracks when the last image generation call was made for rate-limit throttling
   let lastImageCallTime = 0;
 
+  // Max time any single image/video can stay on screen before being swapped.
+  // Configurable per-project (defaults to 6s) — keeps videos dynamic.
+  const MAX_MEDIA_DUR = Math.max(2, project.maxMediaDurationSeconds ?? 6);
+
   for (let i = 0; i < script.segments.length; i++) {
     const start = timestamps[i];
     const next = timestamps[i + 1] || totalDuration;
     const totalSegmentDur = next - start;
     const seg = script.segments[i];
-    const prompts = seg.visualDescriptions || [];
+    const prompts: string[] = seg.visualDescriptions || [];
+    if (prompts.length === 0) continue;
 
-    const weights = prompts.map(() => 0.5 + Math.random());
-    const totalWeight = weights.reduce((a: number, b: number) => a + b, 0);
-    const sceneDurations = weights.map((w: number) => (w / totalWeight) * totalSegmentDur);
+    // Number of slots = at least one per prompt, but split further if the
+    // segment is longer than MAX_MEDIA_DUR so no media stays on screen too long.
+    const slotCount = Math.max(prompts.length, Math.ceil(totalSegmentDur / MAX_MEDIA_DUR));
+    const slotDur = totalSegmentDur / slotCount;
 
     let currentSceneStart = start;
 
-    for (let j = 0; j < prompts.length; j++) {
-      callbacks.onProgress('visuals', `Segmento ${i + 1}, cena ${j + 1}/${prompts.length}`);
-      const prompt = prompts[j];
-      const dur = sceneDurations[j];
+    for (let j = 0; j < slotCount; j++) {
+      callbacks.onProgress('visuals', `Segmento ${i + 1}, cena ${j + 1}/${slotCount}`);
+      const prompt = prompts[j % prompts.length];
 
       // Throttle between image requests to respect Gemini rate limits.
-      // We track the timestamp of the last call and wait only as long as
-      // necessary, instead of using a fixed blind delay.
-      // Target: no more than 10 image requests per minute (6s apart).
-      // The geminiService's key-rotation engine handles 429s independently;
-      // this pre-throttle reduces how often we hit them in the first place.
       if (i > 0 || j > 0) {
         const MIN_INTERVAL_MS = 6_000;
         const sinceLastCall = Date.now() - lastImageCallTime;
@@ -251,9 +271,9 @@ export async function stepGenerateVisuals(
         segmentIndex: i, imageUrl: imgUrl, videoUrl, prompt,
         effect: ANIMATION_EFFECTS[(i + j) % ANIMATION_EFFECTS.length],
         startTime: currentSceneStart,
-        duration: dur
+        duration: slotDur
       });
-      currentSceneStart += dur;
+      currentSceneStart += slotDur;
     }
   }
 
