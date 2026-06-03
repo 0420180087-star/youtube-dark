@@ -158,6 +158,9 @@ export interface Project {
   language?: string;
   defaultDuration?: VideoDuration;
   defaultFormat?: VideoFormat;
+  // Max seconds a single image/video can stay on screen before being swapped.
+  // The visuals pipeline splits long segments into chunks of this length.
+  maxMediaDurationSeconds?: number;
   visualSourceMix?: VisualSourceMix;
   visualPacing?: VisualPacingSettings;
 
