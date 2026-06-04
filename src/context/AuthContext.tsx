@@ -240,6 +240,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       state,
       projectId,
       userEmail,
+      clientId: activeClientId,
       redirectUri,
     }));
 
