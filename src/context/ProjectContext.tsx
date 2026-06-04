@@ -381,11 +381,16 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const runFullPipeline = async (project: Project) => {
     if (isRunningAutomation.current) return;
 
-    const currentToken = accessTokenRef.current;
+    let currentToken = accessTokenRef.current;
+    if (!currentToken && project.youtubeChannelData) {
+      setAutoPilotStatus('Renovando sessão do YouTube...');
+      currentToken = await refreshYouTubeToken(project.id);
+      accessTokenRef.current = currentToken;
+    }
     if (!currentToken || !project.youtubeChannelData) {
       const reason = !project.youtubeChannelData
         ? "canal YouTube não configurado neste projeto"
-        : "token do YouTube expirou — reconecte o canal em Configurações";
+        : "não foi possível renovar o login do YouTube automaticamente";
       setAutoPilotStatus(`Auto-Pilot Pausado: ${reason}`);
       return;
     }
@@ -450,6 +455,11 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       // Live token getter — guarantees the most recently refreshed token is used,
       // even if the pipeline has been running for many minutes.
       getYoutubeAccessToken: () => accessTokenRef.current,
+      refreshYoutubeAccessToken: async () => {
+        const token = await refreshYouTubeToken(project.id);
+        accessTokenRef.current = token;
+        return token;
+      },
       youtubeAccessToken: currentToken,
     };
 
