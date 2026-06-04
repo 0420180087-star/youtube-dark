@@ -32,7 +32,7 @@ serve(async (req) => {
     }
 
     const activeClientId = client_id || Deno.env.get('GOOGLE_CLIENT_ID')
-    const activeClientSecret = client_secret || Deno.env.get('YOUTUBE_CLIENT_SECRET')
+    const activeClientSecret = client_secret || Deno.env.get('YOUTUBE_CLIENT_SECRET') || Deno.env.get('GOOGLE_CLIENT_SECRET')
 
     if (!activeClientId || !activeClientSecret) {
       return new Response(
@@ -52,7 +52,7 @@ serve(async (req) => {
     if (project_id && project_id !== 'default') {
       const result = await supabaseAdmin
         .from('project_auth')
-        .select('youtube_refresh_token, youtube_access_token, token_expires_at')
+        .select('project_id, user_email, youtube_refresh_token, youtube_access_token, token_expires_at')
         .eq('project_id', project_id)
         .eq('user_email', user_email)
         .maybeSingle()
@@ -62,7 +62,7 @@ serve(async (req) => {
     if (!data?.youtube_refresh_token) {
       const result = await supabaseAdmin
         .from('project_auth')
-        .select('youtube_refresh_token, youtube_access_token, token_expires_at')
+        .select('project_id, user_email, youtube_refresh_token, youtube_access_token, token_expires_at')
         .eq('user_email', user_email)
         .not('youtube_refresh_token', 'is', null)
         .order('updated_at', { ascending: false })
@@ -79,7 +79,7 @@ serve(async (req) => {
     }
 
     // Token ainda válido (margem 5min) — retorna direto
-    if (data.token_expires_at) {
+    if (data.youtube_access_token && data.token_expires_at) {
       const expiresAt = new Date(data.token_expires_at)
       if (expiresAt.getTime() - Date.now() > 5 * 60 * 1000) {
         return new Response(
@@ -124,7 +124,8 @@ serve(async (req) => {
         token_expires_at: expiresAt,
         updated_at: new Date().toISOString(),
       })
-      .eq('user_email', user_email)
+      .eq('project_id', data.project_id)
+      .eq('user_email', data.user_email)
 
     return new Response(
       JSON.stringify({ access_token: tokens.access_token, expires_at: expiresAt }),
