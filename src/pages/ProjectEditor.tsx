@@ -613,12 +613,10 @@ export const ProjectEditor: React.FC = () => {
       // enter this function twice before the disabled prop re-renders.
       if (isUploading || isRenderingVideo) return;
 
-      // If accessToken is null (e.g. page was reloaded), try to refresh silently before alerting.
-      // This is the most common cause of the "connect YouTube" alert showing unnecessarily.
       let currentToken = accessToken;
-      if (!currentToken && project?.youtubeChannelData) {
+      if (project?.youtubeChannelData) {
           setRenderStatus('Renovando sessão do YouTube…');
-          currentToken = await refreshYouTubeToken(projectId || '');
+          currentToken = await refreshYouTubeToken(projectId || '') || currentToken;
       }
 
       if (!project?.youtubeChannelData) {
