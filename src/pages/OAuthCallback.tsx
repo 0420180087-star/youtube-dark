@@ -67,7 +67,7 @@ export const OAuthCallback: React.FC = () => {
         return;
       }
 
-      let pending: { state: string; projectId: string; userEmail: string; redirectUri: string };
+      let pending: { state: string; projectId: string; userEmail: string; redirectUri: string; clientId?: string };
       try {
         pending = JSON.parse(pendingRaw);
       } catch {
@@ -117,6 +117,7 @@ export const OAuthCallback: React.FC = () => {
               redirect_uri: pending.redirectUri,
               project_id: pending.projectId,
               user_email: pending.userEmail,
+              client_id: pending.clientId,
             }),
           });
         } catch (networkErr: any) {
