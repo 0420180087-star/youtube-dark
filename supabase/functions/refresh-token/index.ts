@@ -78,18 +78,9 @@ serve(async (req) => {
       )
     }
 
-    // Token ainda válido (margem 5min) — retorna direto
-    if (data.youtube_access_token && data.token_expires_at) {
-      const expiresAt = new Date(data.token_expires_at)
-      if (expiresAt.getTime() - Date.now() > 5 * 60 * 1000) {
-        return new Response(
-          JSON.stringify({ access_token: data.youtube_access_token, expires_at: data.token_expires_at }),
-          { headers: { ...CORS, 'Content-Type': 'application/json' } }
-        )
-      }
-    }
-
-    // Token expirado — renova via Google
+    // Sempre renova antes do upload/login automático.
+    // Não retornamos token cacheado aqui porque ele pode ter sido revogado antes
+    // de token_expires_at; o usuário pediu explicitamente refresh antes de postar.
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
