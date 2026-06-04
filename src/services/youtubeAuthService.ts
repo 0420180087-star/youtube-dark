@@ -13,6 +13,7 @@ export interface RefreshResult {
   accessToken: string | null;
   /** true quando o Google retornou invalid_grant — refresh_token foi revogado */
   needsReconnect: boolean;
+    errorMessage?: string;
 }
 
 /**
@@ -23,14 +24,16 @@ export interface RefreshResult {
 export const callRefreshToken = async (
     projectId: string,
     userEmail: string | null | undefined,
+    clientId?: string,
 ): Promise<string | null> => {
-    const result = await callRefreshTokenFull(projectId, userEmail);
+    const result = await callRefreshTokenFull(projectId, userEmail, clientId);
     return result.accessToken;
 };
 
 export const callRefreshTokenFull = async (
     projectId: string,
     userEmail: string | null | undefined,
+    clientId?: string,
 ): Promise<RefreshResult> => {
     if (!SUPABASE_URL || !SUPABASE_ANON || !userEmail) {
         return { accessToken: null, needsReconnect: false };
@@ -42,7 +45,7 @@ export const callRefreshTokenFull = async (
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${SUPABASE_ANON}`,
             },
-            body: JSON.stringify({ project_id: projectId, user_email: userEmail }),
+            body: JSON.stringify({ project_id: projectId, user_email: userEmail, client_id: clientId }),
         });
 
         const data = await res.json().catch(() => ({}));
@@ -53,14 +56,14 @@ export const callRefreshTokenFull = async (
                 // Marca no localStorage para a UI mostrar o aviso
                 localStorage.setItem(NEEDS_RECONNECT_KEY, '1');
             }
-            return { accessToken: null, needsReconnect };
+            return { accessToken: null, needsReconnect, errorMessage: data?.error || data?.message };
         }
 
         // Sucesso — limpa flag caso estivesse marcado
         localStorage.removeItem(NEEDS_RECONNECT_KEY);
         return { accessToken: data?.access_token ?? null, needsReconnect: false };
     } catch {
-        return { accessToken: null, needsReconnect: false };
+        return { accessToken: null, needsReconnect: false, errorMessage: 'Falha de rede ao renovar token do YouTube' };
     }
 };
 

@@ -30,7 +30,7 @@ interface AuthContextType {
   logout: () => void;
   connectYoutube: (projectId?: string) => Promise<void>;
   disconnectYoutube: () => void;
-  refreshYouTubeToken: (projectId: string) => Promise<string | null>;
+  refreshYouTubeToken: (projectId?: string) => Promise<string | null>;
   setYoutubeToken: (token: string) => Promise<void>;
   clearReconnectFlag: () => void;
 }
@@ -87,7 +87,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         //
         let freshTokenSet = false;
         if (profile?.email) {
-          const result = await callRefreshTokenFull('', profile.email);
+          const result = await callRefreshTokenFull('', profile.email, clientId || undefined);
 
           if (result.accessToken) {
             await persistAccessToken(result.accessToken);
@@ -208,7 +208,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // Se não houver (primeiro login ou revogado), dispara o OAuth offline
       // para que o exchange-code salve o refresh_token em project_auth.
       try {
-        const check = await callRefreshTokenFull('', profile.email);
+        const check = await callRefreshTokenFull('', profile.email, googleClientId || undefined);
         if (check.accessToken) {
           await persistAccessToken(check.accessToken);
         } else {
@@ -240,6 +240,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       state,
       projectId,
       userEmail,
+      clientId: activeClientId,
       redirectUri,
     }));
 
@@ -266,8 +267,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     await triggerYoutubeOAuth(projectId || 'default', user.email);
   };
 
-  const refreshYouTubeToken = async (projectId: string): Promise<string | null> => {
-    const result = await callRefreshTokenFull(projectId, user?.email);
+  const refreshYouTubeToken = async (projectId?: string): Promise<string | null> => {
+    const result = await callRefreshTokenFull(projectId || '', user?.email, googleClientId || undefined);
     if (result.accessToken) {
       await persistAccessToken(result.accessToken);
       return result.accessToken;
@@ -276,7 +277,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setNeedsYoutubeReconnect(true);
       localStorage.setItem(NEEDS_RECONNECT_KEY, '1');
     }
-    return accessToken;
+    if (accessToken && await isAccessTokenValid(accessToken)) return accessToken;
+
+    try {
+      const cached = await loadEncryptedString(ACCESS_TOKEN_STORAGE_KEY);
+      if (cached && await isAccessTokenValid(cached)) {
+        setAccessToken(cached);
+        return cached;
+      }
+    } catch (e) {
+      console.warn('[Auth] Falha ao validar token cacheado:', e);
+    }
+
+    return null;
   };
 
   const disconnectYoutube = () => {

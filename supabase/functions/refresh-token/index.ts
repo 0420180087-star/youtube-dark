@@ -32,7 +32,7 @@ serve(async (req) => {
     }
 
     const activeClientId = client_id || Deno.env.get('GOOGLE_CLIENT_ID')
-    const activeClientSecret = client_secret || Deno.env.get('YOUTUBE_CLIENT_SECRET')
+    const activeClientSecret = client_secret || Deno.env.get('YOUTUBE_CLIENT_SECRET') || Deno.env.get('GOOGLE_CLIENT_SECRET')
 
     if (!activeClientId || !activeClientSecret) {
       return new Response(
@@ -52,7 +52,7 @@ serve(async (req) => {
     if (project_id && project_id !== 'default') {
       const result = await supabaseAdmin
         .from('project_auth')
-        .select('youtube_refresh_token, youtube_access_token, token_expires_at')
+        .select('project_id, user_email, youtube_refresh_token, youtube_access_token, token_expires_at')
         .eq('project_id', project_id)
         .eq('user_email', user_email)
         .maybeSingle()
@@ -62,7 +62,7 @@ serve(async (req) => {
     if (!data?.youtube_refresh_token) {
       const result = await supabaseAdmin
         .from('project_auth')
-        .select('youtube_refresh_token, youtube_access_token, token_expires_at')
+        .select('project_id, user_email, youtube_refresh_token, youtube_access_token, token_expires_at')
         .eq('user_email', user_email)
         .not('youtube_refresh_token', 'is', null)
         .order('updated_at', { ascending: false })
@@ -78,18 +78,9 @@ serve(async (req) => {
       )
     }
 
-    // Token ainda válido (margem 5min) — retorna direto
-    if (data.token_expires_at) {
-      const expiresAt = new Date(data.token_expires_at)
-      if (expiresAt.getTime() - Date.now() > 5 * 60 * 1000) {
-        return new Response(
-          JSON.stringify({ access_token: data.youtube_access_token, expires_at: data.token_expires_at }),
-          { headers: { ...CORS, 'Content-Type': 'application/json' } }
-        )
-      }
-    }
-
-    // Token expirado — renova via Google
+    // Sempre renova antes do upload/login automático.
+    // Não retornamos token cacheado aqui porque ele pode ter sido revogado antes
+    // de token_expires_at; o usuário pediu explicitamente refresh antes de postar.
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -124,7 +115,8 @@ serve(async (req) => {
         token_expires_at: expiresAt,
         updated_at: new Date().toISOString(),
       })
-      .eq('user_email', user_email)
+      .eq('project_id', data.project_id)
+      .eq('user_email', data.user_email)
 
     return new Response(
       JSON.stringify({ access_token: tokens.access_token, expires_at: expiresAt }),
