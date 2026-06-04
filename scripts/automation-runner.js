@@ -725,7 +725,7 @@ async function processProject(projectRow) {
 
     // Step 8: Upload
     currentStep = 'upload';
-    const uploadResult = await stepUploadYouTube(data, metadata, renderResult, thumbnailBase64);
+    const uploadResult = await stepUploadYouTube(data, metadata, renderResult, thumbnailBase64, projectRow.user_email);
 
     // Save video record into project data
     const newVideo = {
