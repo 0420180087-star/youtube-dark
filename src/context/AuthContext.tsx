@@ -87,7 +87,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         //
         let freshTokenSet = false;
         if (profile?.email) {
-          const result = await callRefreshTokenFull('', profile.email);
+          const result = await callRefreshTokenFull('', profile.email, clientId || undefined);
 
           if (result.accessToken) {
             await persistAccessToken(result.accessToken);
@@ -208,7 +208,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // Se não houver (primeiro login ou revogado), dispara o OAuth offline
       // para que o exchange-code salve o refresh_token em project_auth.
       try {
-        const check = await callRefreshTokenFull('', profile.email);
+        const check = await callRefreshTokenFull('', profile.email, googleClientId || undefined);
         if (check.accessToken) {
           await persistAccessToken(check.accessToken);
         } else {
@@ -267,7 +267,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const refreshYouTubeToken = async (projectId?: string): Promise<string | null> => {
-    const result = await callRefreshTokenFull(projectId || '', user?.email);
+    const result = await callRefreshTokenFull(projectId || '', user?.email, googleClientId || undefined);
     if (result.accessToken) {
       await persistAccessToken(result.accessToken);
       return result.accessToken;
