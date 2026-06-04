@@ -525,35 +525,111 @@ async function stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, pro
   return { videoPath, tmpDir };
 }
 
-async function stepUploadYouTube(projectData, metadata, renderResult, thumbnailBase64) {
+async function stepUploadYouTube(projectData, metadata, renderResult, thumbnailBase64, userEmail) {
   log('📤', 'Step 8: Uploading to YouTube...');
 
   if (!YOUTUBE_CLIENT_ID || !YOUTUBE_CLIENT_SECRET) {
     throw new Error('YouTube credentials not configured');
   }
 
-  // Try project_auth table first (new OAuth flow), fallback to project data (legacy)
-  let refreshToken = projectData.youtubeRefreshToken;
-  if (!refreshToken) {
-    const { data: authRow } = await supabase
+  // ── Resolve refresh_token + cached access_token from project_auth ──
+  // Priority:
+  //  1. project-specific row (project_id + user_email)
+  //  2. project-specific row (project_id only)
+  //  3. most-recent row for this user_email (any project)
+  const projectId = projectData.id || projectData.projectId || '';
+  let authRow = null;
+
+  if (projectId && userEmail) {
+    const r = await supabase
       .from('project_auth')
-      .select('youtube_refresh_token')
-      .eq('project_id', projectData.id || projectData.projectId || '')
-      .single();
-    refreshToken = authRow?.youtube_refresh_token;
+      .select('youtube_refresh_token, youtube_access_token, token_expires_at, project_id, user_email')
+      .eq('project_id', projectId)
+      .eq('user_email', userEmail)
+      .maybeSingle();
+    authRow = r.data;
+  }
+  if (!authRow?.youtube_refresh_token && projectId) {
+    const r = await supabase
+      .from('project_auth')
+      .select('youtube_refresh_token, youtube_access_token, token_expires_at, project_id, user_email')
+      .eq('project_id', projectId)
+      .not('youtube_refresh_token', 'is', null)
+      .order('updated_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    authRow = r.data;
+  }
+  if (!authRow?.youtube_refresh_token && userEmail) {
+    const r = await supabase
+      .from('project_auth')
+      .select('youtube_refresh_token, youtube_access_token, token_expires_at, project_id, user_email')
+      .eq('user_email', userEmail)
+      .not('youtube_refresh_token', 'is', null)
+      .order('updated_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    authRow = r.data;
   }
 
+  const refreshToken = authRow?.youtube_refresh_token || projectData.youtubeRefreshToken;
   if (!refreshToken) {
     throw new Error('No YouTube refresh token found. Open the app, go to Project Settings and reconnect YouTube to authorize offline access.');
   }
 
+  // Reuse cached access_token if it still has >5min of life
+  let accessToken = null;
+  if (authRow?.youtube_access_token && authRow?.token_expires_at) {
+    const msLeft = new Date(authRow.token_expires_at).getTime() - Date.now();
+    if (msLeft > 5 * 60 * 1000) {
+      accessToken = authRow.youtube_access_token;
+      log('🔑', `Reusing cached access token (expires in ${Math.round(msLeft / 60000)}min)`);
+    }
+  }
+
   try {
-    const accessToken = await refreshAccessToken(YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, refreshToken);
-    log('🔑', 'Access token refreshed');
+    if (!accessToken) {
+      // Auto-login: exchange refresh_token → fresh access_token
+      const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_id: YOUTUBE_CLIENT_ID,
+          client_secret: YOUTUBE_CLIENT_SECRET,
+          refresh_token: refreshToken,
+          grant_type: 'refresh_token',
+        }),
+      });
+      const tokens = await tokenRes.json();
+      if (!tokens.access_token) {
+        const needsReconnect = tokens.error === 'invalid_grant';
+        throw new Error(
+          needsReconnect
+            ? 'YouTube refresh_token foi revogado pelo Google. Reconecte o canal no app.'
+            : `Falha ao renovar token: ${JSON.stringify(tokens)}`
+        );
+      }
+      accessToken = tokens.access_token;
+      const expiresAt = new Date(Date.now() + (tokens.expires_in || 3600) * 1000).toISOString();
+      log('🔑', 'Access token renovado via refresh_token (auto-login)');
+
+      // Persist fresh access_token + expiry back to project_auth so o app
+      // e próximas execuções reusem sem precisar revalidar
+      if (authRow?.project_id && authRow?.user_email) {
+        await supabase
+          .from('project_auth')
+          .update({
+            youtube_access_token: accessToken,
+            token_expires_at: expiresAt,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('project_id', authRow.project_id)
+          .eq('user_email', authRow.user_email);
+      }
+    }
 
     const { videoUrl, videoId } = await uploadVideoFile(accessToken, renderResult.videoPath, metadata);
 
-    // Upload thumbnail separately if we have one
     if (thumbnailBase64) {
       await uploadThumbnail(accessToken, videoId, thumbnailBase64);
     }
@@ -649,7 +725,7 @@ async function processProject(projectRow) {
 
     // Step 8: Upload
     currentStep = 'upload';
-    const uploadResult = await stepUploadYouTube(data, metadata, renderResult, thumbnailBase64);
+    const uploadResult = await stepUploadYouTube(data, metadata, renderResult, thumbnailBase64, projectRow.user_email);
 
     // Save video record into project data
     const newVideo = {
