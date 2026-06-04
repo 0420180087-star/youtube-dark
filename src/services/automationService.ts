@@ -36,6 +36,7 @@ export interface PipelineCallbacks {
   // Live token getter — read fresh on every use so long pipelines pick up refreshed tokens.
   // Falls back to legacy `youtubeAccessToken` field if provided.
   getYoutubeAccessToken?: () => string | null;
+  refreshYoutubeAccessToken?: () => Promise<string | null>;
   youtubeAccessToken?: string;
 }
 
@@ -359,7 +360,7 @@ export async function stepUploadToYouTube(
   console.log(`[Upload] File format: ${fileType} (${(blob.size / 1024 / 1024).toFixed(1)}MB)`);
 
   callbacks.onProgress('upload', 'Enviando para YouTube...');
-  const liveToken = callbacks.getYoutubeAccessToken?.() || callbacks.youtubeAccessToken || '';
+  const liveToken = await resolveYoutubeAccessToken(callbacks);
   if (!liveToken) throw new Error('Token YouTube ausente no momento do upload (expirou durante o pipeline)');
   const ytbId = await uploadVideoToYouTube(liveToken, file, metadata, thumbnailUrl);
 
@@ -369,6 +370,15 @@ export async function stepUploadToYouTube(
   });
   callbacks.onStepComplete('upload');
   return ytbId;
+}
+
+async function resolveYoutubeAccessToken(callbacks: PipelineCallbacks): Promise<string> {
+  return (
+    await callbacks.refreshYoutubeAccessToken?.() ||
+    callbacks.getYoutubeAccessToken?.() ||
+    callbacks.youtubeAccessToken ||
+    ''
+  );
 }
 
 // --- FULL PIPELINE ORCHESTRATOR ---
@@ -681,7 +691,7 @@ ${segment.narratorText?.substring(0, 300) || ''}
 
     // 7. Upload Short
     const { uploadVideoToYouTube } = await import('./youtubeService');
-    const shortLiveToken = callbacks.getYoutubeAccessToken?.() || callbacks.youtubeAccessToken || '';
+    const shortLiveToken = await resolveYoutubeAccessToken(callbacks);
     if (!shortLiveToken) throw new Error('Token YouTube ausente para upload do Short');
     const shortYtbId = await uploadVideoToYouTube(
       shortLiveToken,
