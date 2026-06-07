@@ -227,8 +227,8 @@ export async function renderVideo({ visuals, segments, audioBase64, audioMimeTyp
 
   for (let i = 0; i < visuals.length; i++) {
     const visual = visuals[i];
-    const segment = segments[i] || segments[segments.length - 1];
-    const duration = Math.max(2, segment.estimatedDuration || 5);
+    const segment = segments[i] || segments[segments.length - 1] || {};
+    const duration = Math.max(2, Number(visual.duration) || Number(segment.estimatedDuration) || 5);
 
     if (!visual?.url) {
       console.warn(`  ⚠️ Clipe ${i + 1}: sem URL, pulando`);
@@ -262,12 +262,12 @@ export async function renderVideo({ visuals, segments, audioBase64, audioMimeTyp
 
       processedClips.push(outPath);
     } catch (err) {
-      console.warn(`  ⚠️ Clipe ${i + 1} falhou: ${err.message}. Usando placeholder...`);
-      // Generate a solid color placeholder clip instead of skipping
+      console.warn(`  ⚠️ Clipe ${i + 1} falhou: ${err.message}. Usando placeholder visual...`);
+      // Generate a non-black placeholder clip instead of skipping
       try {
         await new Promise((resolve, reject) => {
           ffmpeg()
-            .input('color=c=black:s=1920x1080:r=30')
+            .input('color=c=0x101826:s=1920x1080:r=30')
             .inputOptions(['-f', 'lavfi'])
             .outputOptions(['-t', String(duration), '-c:v', 'libx264', '-crf', '28', '-an'])
             .output(outPath)
