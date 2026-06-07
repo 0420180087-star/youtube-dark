@@ -406,7 +406,9 @@ export const renderVideoHeadless = async (
     const previous = sortedSceneInputs[i - 1];
     return Math.abs(scene.startTime - (previous.startTime + previous.duration)) > 0.01;
   });
-  const needsRecalc = Math.abs(totalStoredDuration - audioDuration) > 2 || maxStoredSceneDuration > configuredMaxMediaDur + 0.01 || hasTimingGaps;
+  const lastInput = sortedSceneInputs[sortedSceneInputs.length - 1];
+  const lastWouldExceedCap = lastInput ? audioDuration - lastInput.startTime > configuredMaxMediaDur + 0.01 : false;
+  const needsRecalc = Math.abs(totalStoredDuration - audioDuration) > 0.25 || maxStoredSceneDuration > configuredMaxMediaDur + 0.01 || hasTimingGaps || lastWouldExceedCap;
 
   let renderScenes = loadedScenes;
   if (needsRecalc) {
