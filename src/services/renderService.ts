@@ -61,6 +61,10 @@ type LoadedScene = {
   videoStarted: boolean;
   originalIndex: number;
   blobUrl?: string; // for cleanup after render
+  // Poster image used as a fallback when the video element isn't ready
+  // (buffering, decode glitch, or first-frame not yet decoded). Prevents
+  // black frames during playback.
+  poster?: HTMLImageElement | HTMLCanvasElement;
 };
 
 // ─── Load scene — tries video (via blob URL to bypass CORS), falls back to image
@@ -94,6 +98,7 @@ const loadSceneMedia = async (
       video.muted = true;
       video.playsInline = true;
       video.preload = "auto";
+      video.loop = true; // loop short clips so scene duration is always covered (no freeze/black at end)
       video.src = blobUrl; // Use local blob URL — no CORS taint
 
       await new Promise<void>((resolve, reject) => {
@@ -115,6 +120,24 @@ const loadSceneMedia = async (
 
       video.currentTime = 0;
 
+      // Preload the Pexels thumbnail as a poster fallback (best-effort).
+      // If video.readyState drops below 2 during render, we draw this poster
+      // instead of leaving a black frame on screen.
+      let poster: HTMLImageElement | undefined;
+      if (scene.imageUrl) {
+        try {
+          const p = new Image();
+          p.crossOrigin = "anonymous";
+          await new Promise<void>((res) => {
+            const t = setTimeout(() => res(), 6000);
+            p.onload = () => { clearTimeout(t); res(); };
+            p.onerror = () => { clearTimeout(t); res(); };
+            p.src = scene.imageUrl;
+          });
+          if (p.naturalWidth > 0) poster = p;
+        } catch { /* ignore — poster is optional */ }
+      }
+
       return {
         startTime: scene.startTime,
         duration: scene.duration,
@@ -125,6 +148,7 @@ const loadSceneMedia = async (
         videoStarted: false,
         originalIndex: index,
         blobUrl, // store to revoke later
+        poster,
       } as LoadedScene;
     } catch (e) {
       console.warn("⚠️ Vídeo falhou (CORS/rede), usando thumbnail:", e);
@@ -227,8 +251,21 @@ const drawScene = (
       scene.videoStarted = true;
     }
 
-    // If video isn't ready yet, signal caller to use fallback
+    // If video isn't ready yet, draw the poster (thumbnail) so we never get
+    // a black frame on screen. Apply Ken Burns to the poster for life.
     if (vid.readyState < 2) {
+      if (scene.poster) {
+        applyKenBurns(ctx, scene.effect, progress, width, height);
+        ctx.filter = "saturate(110%) contrast(1.03)";
+        const pw = (scene.poster as HTMLImageElement).naturalWidth || width;
+        const ph = (scene.poster as HTMLImageElement).naturalHeight || height;
+        const ps = Math.max(width / pw, height / ph);
+        const pdw = pw * ps;
+        const pdh = ph * ps;
+        ctx.drawImage(scene.poster as CanvasImageSource, (width - pdw) / 2, (height - pdh) / 2, pdw, pdh);
+        ctx.restore();
+        return true;
+      }
       ctx.restore();
       return false;
     }
@@ -491,10 +528,13 @@ export const renderVideoHeadless = async (
 
         const drawn = drawScene(ctx2d, scene, sceneProgress, width, height, alpha);
 
-        // If video not ready (readyState < 2), draw previous scene as fallback
-        if (!drawn && sceneIdx > 0) {
-          const fallback = loadedScenes[sceneIdx - 1];
-          drawScene(ctx2d, fallback, 1, width, height, 1);
+        // If video not ready and no poster fallback was available, try the
+        // previous scene (or next, if we're at index 0) to avoid any black frame.
+        if (!drawn) {
+          const fallback = sceneIdx > 0
+            ? loadedScenes[sceneIdx - 1]
+            : loadedScenes[Math.min(sceneIdx + 1, loadedScenes.length - 1)];
+          if (fallback) drawScene(ctx2d, fallback, 1, width, height, 1);
         }
 
         // Reset transforms before scanlines
