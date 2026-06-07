@@ -251,8 +251,21 @@ const drawScene = (
       scene.videoStarted = true;
     }
 
-    // If video isn't ready yet, signal caller to use fallback
+    // If video isn't ready yet, draw the poster (thumbnail) so we never get
+    // a black frame on screen. Apply Ken Burns to the poster for life.
     if (vid.readyState < 2) {
+      if (scene.poster) {
+        applyKenBurns(ctx, scene.effect, progress, width, height);
+        ctx.filter = "saturate(110%) contrast(1.03)";
+        const pw = (scene.poster as HTMLImageElement).naturalWidth || width;
+        const ph = (scene.poster as HTMLImageElement).naturalHeight || height;
+        const ps = Math.max(width / pw, height / ph);
+        const pdw = pw * ps;
+        const pdh = ph * ps;
+        ctx.drawImage(scene.poster as CanvasImageSource, (width - pdw) / 2, (height - pdh) / 2, pdw, pdh);
+        ctx.restore();
+        return true;
+      }
       ctx.restore();
       return false;
     }
