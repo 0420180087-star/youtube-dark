@@ -541,11 +541,11 @@ export const renderVideoHeadless = async (
           drawScene(ctx2d, prev, prevProgress, width, height, 1);
         }
 
-        // Draw current scene — fade in if at start
-        const fadeInAlpha = sceneTime < CROSSFADE ? sceneTime / CROSSFADE : 1;
-        // Fade out if near end of scene
+        // Draw current scene. Never fade against the black canvas at the very
+        // beginning/end — only fade when another scene exists underneath.
+        const fadeInAlpha = sceneIdx > 0 && sceneTime < CROSSFADE ? sceneTime / CROSSFADE : 1;
         const timeLeft = scene.duration - sceneTime;
-        const fadeOutAlpha = timeLeft < CROSSFADE ? timeLeft / CROSSFADE : 1;
+        const fadeOutAlpha = sceneIdx < renderScenes.length - 1 && timeLeft < CROSSFADE ? timeLeft / CROSSFADE : 1;
         const alpha = Math.min(fadeInAlpha, fadeOutAlpha);
 
         const drawn = drawScene(ctx2d, scene, sceneProgress, width, height, alpha);
