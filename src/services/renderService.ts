@@ -61,6 +61,10 @@ type LoadedScene = {
   videoStarted: boolean;
   originalIndex: number;
   blobUrl?: string; // for cleanup after render
+  // Poster image used as a fallback when the video element isn't ready
+  // (buffering, decode glitch, or first-frame not yet decoded). Prevents
+  // black frames during playback.
+  poster?: HTMLImageElement | HTMLCanvasElement;
 };
 
 // ─── Load scene — tries video (via blob URL to bypass CORS), falls back to image
