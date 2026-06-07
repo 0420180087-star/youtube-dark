@@ -528,10 +528,13 @@ export const renderVideoHeadless = async (
 
         const drawn = drawScene(ctx2d, scene, sceneProgress, width, height, alpha);
 
-        // If video not ready (readyState < 2), draw previous scene as fallback
-        if (!drawn && sceneIdx > 0) {
-          const fallback = loadedScenes[sceneIdx - 1];
-          drawScene(ctx2d, fallback, 1, width, height, 1);
+        // If video not ready and no poster fallback was available, try the
+        // previous scene (or next, if we're at index 0) to avoid any black frame.
+        if (!drawn) {
+          const fallback = sceneIdx > 0
+            ? loadedScenes[sceneIdx - 1]
+            : loadedScenes[Math.min(sceneIdx + 1, loadedScenes.length - 1)];
+          if (fallback) drawScene(ctx2d, fallback, 1, width, height, 1);
         }
 
         // Reset transforms before scanlines
