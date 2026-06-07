@@ -223,13 +223,15 @@ export async function stepGenerateVisuals(
     // Number of slots = at least one per prompt, but split further if the
     // segment is longer than MAX_MEDIA_DUR so no media stays on screen too long.
     const slotCount = Math.max(prompts.length, Math.ceil(totalSegmentDur / MAX_MEDIA_DUR));
-    const slotDur = totalSegmentDur / slotCount;
+    const useExactCut = slotCount === Math.ceil(totalSegmentDur / MAX_MEDIA_DUR) && slotCount >= prompts.length;
 
     let currentSceneStart = start;
 
     for (let j = 0; j < slotCount; j++) {
       callbacks.onProgress('visuals', `Segmento ${i + 1}, cena ${j + 1}/${slotCount}`);
       const prompt = prompts[j % prompts.length];
+      const remaining = (start + totalSegmentDur) - currentSceneStart;
+      const slotDur = useExactCut ? Math.min(MAX_MEDIA_DUR, remaining) : totalSegmentDur / slotCount;
 
       // Throttle between image requests to respect Gemini rate limits.
       if (i > 0 || j > 0) {
