@@ -516,12 +516,12 @@ export const renderVideoHeadless = async (
         );
 
         // Find current scene index
-        let sceneIdx = loadedScenes.findIndex(
+        let sceneIdx = renderScenes.findIndex(
           (s) => elapsed >= s.startTime && elapsed < s.startTime + s.duration
         );
-        if (sceneIdx === -1) sceneIdx = loadedScenes.length - 1;
+        if (sceneIdx === -1) sceneIdx = renderScenes.length - 1;
 
-        const scene = loadedScenes[sceneIdx];
+        const scene = renderScenes[sceneIdx];
         const sceneTime = elapsed - scene.startTime;
         const sceneProgress = Math.min(1, sceneTime / scene.duration);
 
@@ -535,7 +535,7 @@ export const renderVideoHeadless = async (
 
         // Draw previous scene for crossfade
         if (sceneIdx > 0 && sceneTime < CROSSFADE) {
-          const prev = loadedScenes[sceneIdx - 1];
+          const prev = renderScenes[sceneIdx - 1];
           const prevTime = elapsed - prev.startTime;
           const prevProgress = Math.min(1, prevTime / prev.duration);
           drawScene(ctx2d, prev, prevProgress, width, height, 1);
@@ -554,8 +554,8 @@ export const renderVideoHeadless = async (
         // previous scene (or next, if we're at index 0) to avoid any black frame.
         if (!drawn) {
           const fallback = sceneIdx > 0
-            ? loadedScenes[sceneIdx - 1]
-            : loadedScenes[Math.min(sceneIdx + 1, loadedScenes.length - 1)];
+            ? renderScenes[sceneIdx - 1]
+            : renderScenes[Math.min(sceneIdx + 1, renderScenes.length - 1)];
           if (fallback) drawScene(ctx2d, fallback, 1, width, height, 1);
         }
 
