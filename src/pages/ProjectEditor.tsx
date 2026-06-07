@@ -582,7 +582,7 @@ export const ProjectEditor: React.FC = () => {
           const blob = await renderVideoHeadless(video, (percent, status) => {
               setRenderProgress(percent);
               setRenderStatus(status);
-          });
+          }, { maxMediaDurationSeconds: project?.maxMediaDurationSeconds });
 
           const url = URL.createObjectURL(blob);
           setGeneratedVideoBlob(blob);
