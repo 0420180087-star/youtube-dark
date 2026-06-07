@@ -98,6 +98,7 @@ const loadSceneMedia = async (
       video.muted = true;
       video.playsInline = true;
       video.preload = "auto";
+      video.loop = true; // loop short clips so scene duration is always covered (no freeze/black at end)
       video.src = blobUrl; // Use local blob URL — no CORS taint
 
       await new Promise<void>((resolve, reject) => {
@@ -119,6 +120,24 @@ const loadSceneMedia = async (
 
       video.currentTime = 0;
 
+      // Preload the Pexels thumbnail as a poster fallback (best-effort).
+      // If video.readyState drops below 2 during render, we draw this poster
+      // instead of leaving a black frame on screen.
+      let poster: HTMLImageElement | undefined;
+      if (scene.imageUrl) {
+        try {
+          const p = new Image();
+          p.crossOrigin = "anonymous";
+          await new Promise<void>((res) => {
+            const t = setTimeout(() => res(), 6000);
+            p.onload = () => { clearTimeout(t); res(); };
+            p.onerror = () => { clearTimeout(t); res(); };
+            p.src = scene.imageUrl;
+          });
+          if (p.naturalWidth > 0) poster = p;
+        } catch { /* ignore — poster is optional */ }
+      }
+
       return {
         startTime: scene.startTime,
         duration: scene.duration,
@@ -129,6 +148,7 @@ const loadSceneMedia = async (
         videoStarted: false,
         originalIndex: index,
         blobUrl, // store to revoke later
+        poster,
       } as LoadedScene;
     } catch (e) {
       console.warn("⚠️ Vídeo falhou (CORS/rede), usando thumbnail:", e);
