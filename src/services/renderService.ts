@@ -384,8 +384,7 @@ export const renderVideoHeadless = async (
     while (cursor < totalDuration - 0.01) {
       const source = baseScenes[idx % baseScenes.length];
       const remaining = totalDuration - cursor;
-      const sourceDur = Math.max(0.5, Number(source.duration) || configuredMaxMediaDur);
-      const duration = Math.min(remaining, configuredMaxMediaDur, sourceDur);
+      const duration = Math.min(remaining, configuredMaxMediaDur);
       timed.push({
         ...source,
         startTime: cursor,
