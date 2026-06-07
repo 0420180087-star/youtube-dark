@@ -489,7 +489,7 @@ export const ProjectEditor: React.FC = () => {
               
               const maxMediaDur = Math.max(2, project?.maxMediaDurationSeconds ?? 6);
               const slotCount = Math.max(prompts.length, Math.ceil(totalSegmentDur / maxMediaDur));
-              const slotDur = totalSegmentDur / slotCount;
+              const useExactCut = slotCount === Math.ceil(totalSegmentDur / maxMediaDur) && slotCount >= prompts.length;
               
               let currentSceneStart = start;
 
@@ -497,7 +497,8 @@ export const ProjectEditor: React.FC = () => {
                   if (abort.signal.aborted) break;
 
                   const prompt = prompts[j % prompts.length];
-                  const dur = slotDur;
+                  const remaining = (start + totalSegmentDur) - currentSceneStart;
+                  const dur = useExactCut ? Math.min(maxMediaDur, remaining) : totalSegmentDur / slotCount;
 
                   // Check if we already have this specific scene
                   const existingScene = scenes.find(sc => sc.segmentIndex === i && Math.abs(sc.startTime - currentSceneStart) < 0.05);
@@ -944,13 +945,14 @@ export const ProjectEditor: React.FC = () => {
 
           const maxMediaDur = Math.max(2, project?.maxMediaDurationSeconds ?? 6);
           const slotCount = Math.max(prompts.length, Math.ceil(totalDuration / maxMediaDur));
-          const slotDur = totalDuration / slotCount;
+          const useExactCut = slotCount === Math.ceil(totalDuration / maxMediaDur) && slotCount >= prompts.length;
 
           let currentStart = startTime;
 
           for (let j = 0; j < slotCount; j++) {
               const prompt = prompts[j % prompts.length];
-              const dur = slotDur;
+              const remaining = (startTime + totalDuration) - currentStart;
+              const dur = useExactCut ? Math.min(maxMediaDur, remaining) : totalDuration / slotCount;
               
               if (j > 0) await new Promise(r => setTimeout(r, 6000));
               
