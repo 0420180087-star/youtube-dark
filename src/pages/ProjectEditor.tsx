@@ -937,16 +937,20 @@ export const ProjectEditor: React.FC = () => {
               totalDuration = perSeg;
           }
 
-          // Randomly divide duration
-          const weights = prompts.map(() => 0.5 + Math.random());
-          const totalWeight = weights.reduce((a, b) => a + b, 0);
-          const sceneDurations = weights.map(w => (w / totalWeight) * totalDuration);
+          if (prompts.length === 0) {
+              updateVideo(project!.id, video!.id, { visualScenes: newScenes });
+              return;
+          }
+
+          const maxMediaDur = Math.max(2, project?.maxMediaDurationSeconds ?? 6);
+          const slotCount = Math.max(prompts.length, Math.ceil(totalDuration / maxMediaDur));
+          const slotDur = totalDuration / slotCount;
 
           let currentStart = startTime;
 
-          for (let j = 0; j < prompts.length; j++) {
-              const prompt = prompts[j];
-              const dur = sceneDurations[j];
+          for (let j = 0; j < slotCount; j++) {
+              const prompt = prompts[j % prompts.length];
+              const dur = slotDur;
               
               if (j > 0) await new Promise(r => setTimeout(r, 6000));
               
