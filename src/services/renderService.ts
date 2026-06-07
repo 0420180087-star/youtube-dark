@@ -401,7 +401,12 @@ export const renderVideoHeadless = async (
 
   const totalStoredDuration = sortedSceneInputs.reduce((sum, s) => sum + s.duration, 0);
   const maxStoredSceneDuration = Math.max(...sortedSceneInputs.map(s => Number(s.duration) || 0));
-  const needsRecalc = Math.abs(totalStoredDuration - audioDuration) > 2 || maxStoredSceneDuration > configuredMaxMediaDur + 0.01;
+  const hasTimingGaps = sortedSceneInputs.some((scene, i) => {
+    if (i === 0) return Math.abs(scene.startTime) > 0.01;
+    const previous = sortedSceneInputs[i - 1];
+    return Math.abs(scene.startTime - (previous.startTime + previous.duration)) > 0.01;
+  });
+  const needsRecalc = Math.abs(totalStoredDuration - audioDuration) > 2 || maxStoredSceneDuration > configuredMaxMediaDur + 0.01 || hasTimingGaps;
 
   let renderScenes = loadedScenes;
   if (needsRecalc) {
@@ -415,7 +420,7 @@ export const renderVideoHeadless = async (
     if (gap > 0.01) renderScenes[i].duration = Math.min(configuredMaxMediaDur, renderScenes[i].duration + gap);
   }
 
-  // Last scene always extends to end of audio
+  // Last scene may extend only if it still respects the media-duration cap
   if (renderScenes.length > 0) {
     const last = renderScenes[renderScenes.length - 1];
     const end = last.startTime + last.duration;
