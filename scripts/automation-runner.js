@@ -409,10 +409,13 @@ async function stepVisuals(script, projectData) {
     const segDur = Math.max(2, Number(seg.estimatedDuration) || 5);
     // Split segment into N slots so no single media stays longer than MAX_MEDIA_DUR
     const slotCount = Math.max(prompts.length, Math.ceil(segDur / MAX_MEDIA_DUR));
-    const slotDur = segDur / slotCount;
+    const useExactCut = slotCount === Math.ceil(segDur / MAX_MEDIA_DUR) && slotCount >= prompts.length;
+    let currentStart = 0;
 
     for (let j = 0; j < slotCount; j++) {
       const prompt = prompts[j % prompts.length];
+      const remaining = segDur - currentStart;
+      const slotDur = useExactCut ? Math.min(MAX_MEDIA_DUR, remaining) : segDur / slotCount;
       const query = `${prompt} ${toneModifier}`.split(' ').slice(0, 4).join(' ');
       log('🔍', `  Searching (${j + 1}/${slotCount}): "${query}"`);
 
@@ -436,6 +439,7 @@ async function stepVisuals(script, projectData) {
         videoUrl: result?.videoUrl,
         imageUrl: result?.imageUrl || result?.thumbnailUrl,
       });
+      currentStart += slotDur;
 
       // Rate limit
       if (i > 0 || j > 0) await new Promise((r) => setTimeout(r, 1000));
