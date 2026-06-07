@@ -485,6 +485,7 @@ export const ProjectEditor: React.FC = () => {
               
               const s = segs[i]; 
               const prompts = s.visualDescriptions || [];
+              if (prompts.length === 0) continue;
               
               const maxMediaDur = Math.max(2, project?.maxMediaDurationSeconds ?? 6);
               const slotCount = Math.max(prompts.length, Math.ceil(totalSegmentDur / maxMediaDur));
@@ -557,7 +558,7 @@ export const ProjectEditor: React.FC = () => {
                   
                   currentSceneStart += dur;
                   scenes.sort((a, b) => a.startTime - b.startTime); 
-                  updateVideo(project!.id, video!.id, { visualScenes: scenes, status: (i === segs.length - 1 && j === prompts.length - 1) ? ProjectStatus.VIDEO_GENERATED : ProjectStatus.SCRIPTING }); 
+                  updateVideo(project!.id, video!.id, { visualScenes: scenes, status: (i === segs.length - 1 && j === slotCount - 1) ? ProjectStatus.VIDEO_GENERATED : ProjectStatus.SCRIPTING }); 
               }
           } 
           setActiveTab('studio');
