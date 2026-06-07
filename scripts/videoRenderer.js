@@ -94,7 +94,9 @@ function imageToVideoClip(imagePath, outputPath, duration, effect = 'zoom-in') {
 // ─── Trim a video to exact duration, keeping full video motion ───────────────
 function trimVideo(inputPath, outputPath, duration) {
   return new Promise((resolve, reject) => {
-    ffmpeg(inputPath)
+    ffmpeg()
+      .input(inputPath)
+      .inputOptions(['-stream_loop', '-1'])
       .outputOptions([
         '-t', String(duration),
         '-c:v', 'libx264',
