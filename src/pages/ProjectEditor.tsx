@@ -486,21 +486,20 @@ export const ProjectEditor: React.FC = () => {
               const s = segs[i]; 
               const prompts = s.visualDescriptions || [];
               
-              // Randomly divide duration among prompts for "dopamine release" quick cuts
-              const weights = prompts.map(() => 0.5 + Math.random());
-              const totalWeight = weights.reduce((a, b) => a + b, 0);
-              const sceneDurations = weights.map(w => (w / totalWeight) * totalSegmentDur);
+              const maxMediaDur = Math.max(2, project?.maxMediaDurationSeconds ?? 6);
+              const slotCount = Math.max(prompts.length, Math.ceil(totalSegmentDur / maxMediaDur));
+              const slotDur = totalSegmentDur / slotCount;
               
               let currentSceneStart = start;
 
-              for (let j = 0; j < prompts.length; j++) {
+              for (let j = 0; j < slotCount; j++) {
                   if (abort.signal.aborted) break;
 
-                  const prompt = prompts[j];
-                  const dur = sceneDurations[j];
+                  const prompt = prompts[j % prompts.length];
+                  const dur = slotDur;
 
                   // Check if we already have this specific scene
-                  const existingScene = scenes.find(sc => sc.segmentIndex === i && sc.prompt === prompt);
+                  const existingScene = scenes.find(sc => sc.segmentIndex === i && Math.abs(sc.startTime - currentSceneStart) < 0.05);
                   if (existingScene && !force) {
                       currentSceneStart += dur;
                       continue;
@@ -542,8 +541,8 @@ export const ProjectEditor: React.FC = () => {
                   
                   setLastValidImage(url); 
                   
-                  // Filter out any existing scene for this specific prompt to avoid duplicates
-                  scenes = scenes.filter(sc => !(sc.segmentIndex === i && sc.prompt === prompt));
+                  // Filter out any existing scene for this specific slot to avoid duplicates
+                  scenes = scenes.filter(sc => !(sc.segmentIndex === i && Math.abs(sc.startTime - currentSceneStart) < 0.05));
 
                   scenes.push({ 
                       segmentIndex: i, 
