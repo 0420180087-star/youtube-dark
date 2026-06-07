@@ -349,7 +349,7 @@ export async function stepUploadToYouTube(
   callbacks.onProgress('upload', 'Renderizando vídeo...');
   const blob = await renderVideoHeadless(latestVideo, (pct, status) => {
     callbacks.onProgress('upload', status);
-  });
+  }, { maxMediaDurationSeconds: project.maxMediaDurationSeconds });
 
   // Detect actual format from blob type — use MP4 when available (faster YouTube processing)
   const blobType = blob.type || 'video/webm';
@@ -667,7 +667,7 @@ export async function stepGenerateAndUploadShort(
     const { renderVideoHeadless } = await import('./renderService');
     const shortBlob = await renderVideoHeadless(shortVideo, (pct, status) => {
       callbacks.onProgress('shorts', `Renderizando Short: ${status}`);
-    });
+    }, { maxMediaDurationSeconds: project.maxMediaDurationSeconds });
 
     const shortBlobType = shortBlob.type || 'video/webm';
     const shortIsMP4 = shortBlobType.includes('mp4');
