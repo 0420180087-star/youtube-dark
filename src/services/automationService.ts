@@ -223,13 +223,15 @@ export async function stepGenerateVisuals(
     // Number of slots = at least one per prompt, but split further if the
     // segment is longer than MAX_MEDIA_DUR so no media stays on screen too long.
     const slotCount = Math.max(prompts.length, Math.ceil(totalSegmentDur / MAX_MEDIA_DUR));
-    const slotDur = totalSegmentDur / slotCount;
+    const useExactCut = slotCount === Math.ceil(totalSegmentDur / MAX_MEDIA_DUR) && slotCount >= prompts.length;
 
     let currentSceneStart = start;
 
     for (let j = 0; j < slotCount; j++) {
       callbacks.onProgress('visuals', `Segmento ${i + 1}, cena ${j + 1}/${slotCount}`);
       const prompt = prompts[j % prompts.length];
+      const remaining = (start + totalSegmentDur) - currentSceneStart;
+      const slotDur = useExactCut ? Math.min(MAX_MEDIA_DUR, remaining) : totalSegmentDur / slotCount;
 
       // Throttle between image requests to respect Gemini rate limits.
       if (i > 0 || j > 0) {
@@ -349,7 +351,7 @@ export async function stepUploadToYouTube(
   callbacks.onProgress('upload', 'Renderizando vídeo...');
   const blob = await renderVideoHeadless(latestVideo, (pct, status) => {
     callbacks.onProgress('upload', status);
-  });
+  }, { maxMediaDurationSeconds: project.maxMediaDurationSeconds });
 
   // Detect actual format from blob type — use MP4 when available (faster YouTube processing)
   const blobType = blob.type || 'video/webm';
@@ -667,7 +669,7 @@ export async function stepGenerateAndUploadShort(
     const { renderVideoHeadless } = await import('./renderService');
     const shortBlob = await renderVideoHeadless(shortVideo, (pct, status) => {
       callbacks.onProgress('shorts', `Renderizando Short: ${status}`);
-    });
+    }, { maxMediaDurationSeconds: project.maxMediaDurationSeconds });
 
     const shortBlobType = shortBlob.type || 'video/webm';
     const shortIsMP4 = shortBlobType.includes('mp4');

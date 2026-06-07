@@ -295,7 +295,8 @@ const drawScene = (
 // ─── MAIN RENDER FUNCTION ────────────────────────────────────────────────────
 export const renderVideoHeadless = async (
   video: Video,
-  onProgress: (percent: number, status: string) => void
+  onProgress: (percent: number, status: string) => void,
+  options: { maxMediaDurationSeconds?: number } = {}
 ): Promise<Blob> => {
   if (!video.audioUrl || !video.visualScenes || video.visualScenes.length === 0)
     throw new Error("Missing assets — audio or visual scenes not found");
@@ -370,38 +371,65 @@ export const renderVideoHeadless = async (
   );
 
   // ── RECALCULATE SCENE TIMING based on actual audio duration ────────────────
-  // This is the key fix: scenes must be evenly distributed across the FULL audio duration
-  // The stored startTime values may be wrong (based on estimated duration, not real audio)
-  
-  const totalStoredDuration = sortedSceneInputs.reduce((sum, s) => sum + s.duration, 0);
-  const needsRecalc = Math.abs(totalStoredDuration - audioDuration) > 2;
+  // Never stretch a scene past the configured media cut. If audio timing differs
+  // from generated estimates, duplicate/cycle scenes instead of making one video
+  // stay on screen too long.
+  const configuredMaxMediaDur = Math.max(2, Number(options.maxMediaDurationSeconds) || 6);
+  const normalizeSceneTiming = (baseScenes: LoadedScene[], totalDuration: number): LoadedScene[] => {
+    if (baseScenes.length === 0) return [];
+    const timed: LoadedScene[] = [];
+    let cursor = 0;
+    let idx = 0;
 
-  if (needsRecalc) {
-    console.log(`[Render] Recalculating scene timing: stored=${totalStoredDuration.toFixed(1)}s, audio=${audioDuration.toFixed(1)}s`);
-    const scale = audioDuration / totalStoredDuration;
-    let t = 0;
-    for (const scene of loadedScenes) {
-      scene.startTime = t;
-      scene.duration = scene.duration * scale;
-      t += scene.duration;
+    while (cursor < totalDuration - 0.01) {
+      const source = baseScenes[idx % baseScenes.length];
+      const remaining = totalDuration - cursor;
+      const duration = Math.min(remaining, configuredMaxMediaDur);
+      timed.push({
+        ...source,
+        startTime: cursor,
+        duration,
+        videoStarted: false,
+      });
+      cursor += duration;
+      idx += 1;
     }
+
+    return timed;
+  };
+
+  const totalStoredDuration = sortedSceneInputs.reduce((sum, s) => sum + s.duration, 0);
+  const maxStoredSceneDuration = Math.max(...sortedSceneInputs.map(s => Number(s.duration) || 0));
+  const hasTimingGaps = sortedSceneInputs.some((scene, i) => {
+    if (i === 0) return Math.abs(scene.startTime) > 0.01;
+    const previous = sortedSceneInputs[i - 1];
+    return Math.abs(scene.startTime - (previous.startTime + previous.duration)) > 0.01;
+  });
+  const lastInput = sortedSceneInputs[sortedSceneInputs.length - 1];
+  const lastWouldExceedCap = lastInput ? audioDuration - lastInput.startTime > configuredMaxMediaDur + 0.01 : false;
+  const needsRecalc = Math.abs(totalStoredDuration - audioDuration) > 0.25 || maxStoredSceneDuration > configuredMaxMediaDur + 0.01 || hasTimingGaps || lastWouldExceedCap;
+
+  let renderScenes = loadedScenes;
+  if (needsRecalc) {
+    console.log(`[Render] Recalculating scene timing with ${configuredMaxMediaDur}s cap: stored=${totalStoredDuration.toFixed(1)}s, audio=${audioDuration.toFixed(1)}s`);
+    renderScenes = normalizeSceneTiming(loadedScenes, audioDuration);
   }
 
   // Cover any gaps between scenes
-  for (let i = 0; i < loadedScenes.length - 1; i++) {
-    const gap = loadedScenes[i + 1].startTime - (loadedScenes[i].startTime + loadedScenes[i].duration);
-    if (gap > 0.01) loadedScenes[i].duration += gap;
+  for (let i = 0; i < renderScenes.length - 1; i++) {
+    const gap = renderScenes[i + 1].startTime - (renderScenes[i].startTime + renderScenes[i].duration);
+    if (gap > 0.01) renderScenes[i].duration = Math.min(configuredMaxMediaDur, renderScenes[i].duration + gap);
   }
 
-  // Last scene always extends to end of audio
-  if (loadedScenes.length > 0) {
-    const last = loadedScenes[loadedScenes.length - 1];
+  // Last scene may extend only if it still respects the media-duration cap
+  if (renderScenes.length > 0) {
+    const last = renderScenes[renderScenes.length - 1];
     const end = last.startTime + last.duration;
-    if (end < audioDuration) last.duration = audioDuration - last.startTime;
+    if (end < audioDuration && audioDuration - last.startTime <= configuredMaxMediaDur) last.duration = audioDuration - last.startTime;
   }
 
-  console.log(`[Render] ${loadedScenes.length} scenes loaded. Audio: ${audioDuration.toFixed(1)}s`);
-  console.log("[Render] Scene timing:", loadedScenes.map(s => `${s.startTime.toFixed(1)}-${(s.startTime+s.duration).toFixed(1)}s`).join(", "));
+  console.log(`[Render] ${renderScenes.length} scenes loaded. Audio: ${audioDuration.toFixed(1)}s`);
+  console.log("[Render] Scene timing:", renderScenes.map(s => `${s.startTime.toFixed(1)}-${(s.startTime+s.duration).toFixed(1)}s`).join(", "));
 
   onProgress(20, "Rendering video...");
 
@@ -494,12 +522,12 @@ export const renderVideoHeadless = async (
         );
 
         // Find current scene index
-        let sceneIdx = loadedScenes.findIndex(
+        let sceneIdx = renderScenes.findIndex(
           (s) => elapsed >= s.startTime && elapsed < s.startTime + s.duration
         );
-        if (sceneIdx === -1) sceneIdx = loadedScenes.length - 1;
+        if (sceneIdx === -1) sceneIdx = renderScenes.length - 1;
 
-        const scene = loadedScenes[sceneIdx];
+        const scene = renderScenes[sceneIdx];
         const sceneTime = elapsed - scene.startTime;
         const sceneProgress = Math.min(1, sceneTime / scene.duration);
 
@@ -513,17 +541,17 @@ export const renderVideoHeadless = async (
 
         // Draw previous scene for crossfade
         if (sceneIdx > 0 && sceneTime < CROSSFADE) {
-          const prev = loadedScenes[sceneIdx - 1];
+          const prev = renderScenes[sceneIdx - 1];
           const prevTime = elapsed - prev.startTime;
           const prevProgress = Math.min(1, prevTime / prev.duration);
           drawScene(ctx2d, prev, prevProgress, width, height, 1);
         }
 
-        // Draw current scene — fade in if at start
-        const fadeInAlpha = sceneTime < CROSSFADE ? sceneTime / CROSSFADE : 1;
-        // Fade out if near end of scene
+        // Draw current scene. Never fade against the black canvas at the very
+        // beginning/end — only fade when another scene exists underneath.
+        const fadeInAlpha = sceneIdx > 0 && sceneTime < CROSSFADE ? sceneTime / CROSSFADE : 1;
         const timeLeft = scene.duration - sceneTime;
-        const fadeOutAlpha = timeLeft < CROSSFADE ? timeLeft / CROSSFADE : 1;
+        const fadeOutAlpha = sceneIdx < renderScenes.length - 1 && timeLeft < CROSSFADE ? timeLeft / CROSSFADE : 1;
         const alpha = Math.min(fadeInAlpha, fadeOutAlpha);
 
         const drawn = drawScene(ctx2d, scene, sceneProgress, width, height, alpha);
@@ -532,8 +560,8 @@ export const renderVideoHeadless = async (
         // previous scene (or next, if we're at index 0) to avoid any black frame.
         if (!drawn) {
           const fallback = sceneIdx > 0
-            ? loadedScenes[sceneIdx - 1]
-            : loadedScenes[Math.min(sceneIdx + 1, loadedScenes.length - 1)];
+            ? renderScenes[sceneIdx - 1]
+            : renderScenes[Math.min(sceneIdx + 1, renderScenes.length - 1)];
           if (fallback) drawScene(ctx2d, fallback, 1, width, height, 1);
         }
 

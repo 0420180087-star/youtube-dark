@@ -485,22 +485,23 @@ export const ProjectEditor: React.FC = () => {
               
               const s = segs[i]; 
               const prompts = s.visualDescriptions || [];
+              if (prompts.length === 0) continue;
               
-              // Randomly divide duration among prompts for "dopamine release" quick cuts
-              const weights = prompts.map(() => 0.5 + Math.random());
-              const totalWeight = weights.reduce((a, b) => a + b, 0);
-              const sceneDurations = weights.map(w => (w / totalWeight) * totalSegmentDur);
+              const maxMediaDur = Math.max(2, project?.maxMediaDurationSeconds ?? 6);
+              const slotCount = Math.max(prompts.length, Math.ceil(totalSegmentDur / maxMediaDur));
+              const useExactCut = slotCount === Math.ceil(totalSegmentDur / maxMediaDur) && slotCount >= prompts.length;
               
               let currentSceneStart = start;
 
-              for (let j = 0; j < prompts.length; j++) {
+              for (let j = 0; j < slotCount; j++) {
                   if (abort.signal.aborted) break;
 
-                  const prompt = prompts[j];
-                  const dur = sceneDurations[j];
+                  const prompt = prompts[j % prompts.length];
+                  const remaining = (start + totalSegmentDur) - currentSceneStart;
+                  const dur = useExactCut ? Math.min(maxMediaDur, remaining) : totalSegmentDur / slotCount;
 
                   // Check if we already have this specific scene
-                  const existingScene = scenes.find(sc => sc.segmentIndex === i && sc.prompt === prompt);
+                  const existingScene = scenes.find(sc => sc.segmentIndex === i && Math.abs(sc.startTime - currentSceneStart) < 0.05);
                   if (existingScene && !force) {
                       currentSceneStart += dur;
                       continue;
@@ -542,8 +543,8 @@ export const ProjectEditor: React.FC = () => {
                   
                   setLastValidImage(url); 
                   
-                  // Filter out any existing scene for this specific prompt to avoid duplicates
-                  scenes = scenes.filter(sc => !(sc.segmentIndex === i && sc.prompt === prompt));
+                  // Filter out any existing scene for this specific slot to avoid duplicates
+                  scenes = scenes.filter(sc => !(sc.segmentIndex === i && Math.abs(sc.startTime - currentSceneStart) < 0.05));
 
                   scenes.push({ 
                       segmentIndex: i, 
@@ -558,7 +559,7 @@ export const ProjectEditor: React.FC = () => {
                   
                   currentSceneStart += dur;
                   scenes.sort((a, b) => a.startTime - b.startTime); 
-                  updateVideo(project!.id, video!.id, { visualScenes: scenes, status: (i === segs.length - 1 && j === prompts.length - 1) ? ProjectStatus.VIDEO_GENERATED : ProjectStatus.SCRIPTING }); 
+                  updateVideo(project!.id, video!.id, { visualScenes: scenes, status: (i === segs.length - 1 && j === slotCount - 1) ? ProjectStatus.VIDEO_GENERATED : ProjectStatus.SCRIPTING }); 
               }
           } 
           setActiveTab('studio');
@@ -583,7 +584,7 @@ export const ProjectEditor: React.FC = () => {
           const blob = await renderVideoHeadless(video, (percent, status) => {
               setRenderProgress(percent);
               setRenderStatus(status);
-          });
+          }, { maxMediaDurationSeconds: project?.maxMediaDurationSeconds });
 
           const url = URL.createObjectURL(blob);
           setGeneratedVideoBlob(blob);
@@ -937,16 +938,21 @@ export const ProjectEditor: React.FC = () => {
               totalDuration = perSeg;
           }
 
-          // Randomly divide duration
-          const weights = prompts.map(() => 0.5 + Math.random());
-          const totalWeight = weights.reduce((a, b) => a + b, 0);
-          const sceneDurations = weights.map(w => (w / totalWeight) * totalDuration);
+          if (prompts.length === 0) {
+              updateVideo(project!.id, video!.id, { visualScenes: newScenes });
+              return;
+          }
+
+          const maxMediaDur = Math.max(2, project?.maxMediaDurationSeconds ?? 6);
+          const slotCount = Math.max(prompts.length, Math.ceil(totalDuration / maxMediaDur));
+          const useExactCut = slotCount === Math.ceil(totalDuration / maxMediaDur) && slotCount >= prompts.length;
 
           let currentStart = startTime;
 
-          for (let j = 0; j < prompts.length; j++) {
-              const prompt = prompts[j];
-              const dur = sceneDurations[j];
+          for (let j = 0; j < slotCount; j++) {
+              const prompt = prompts[j % prompts.length];
+              const remaining = (startTime + totalDuration) - currentStart;
+              const dur = useExactCut ? Math.min(maxMediaDur, remaining) : totalDuration / slotCount;
               
               if (j > 0) await new Promise(r => setTimeout(r, 6000));
               
