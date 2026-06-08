@@ -435,8 +435,7 @@ async function stepVisuals(script, projectData) {
 
   for (let i = 0; i < script.segments.length; i++) {
     const seg = script.segments[i];
-    const prompts = seg.visualDescriptions || [];
-    if (prompts.length === 0) continue;
+    const prompts = getSegmentVisualPrompts(seg);
 
     const segDur = Math.max(2, Number(seg.estimatedDuration) || 5);
     // Split segment into N slots so no single media stays longer than MAX_MEDIA_DUR
@@ -445,7 +444,8 @@ async function stepVisuals(script, projectData) {
     let currentStart = 0;
 
     for (let j = 0; j < slotCount; j++) {
-      const prompt = prompts[j % prompts.length];
+      const basePrompt = prompts[j % prompts.length];
+      const prompt = buildSlotVisualPrompt(seg, basePrompt, i, j, slotCount, projectData.channelTheme);
       const remaining = segDur - currentStart;
       const slotDur = useExactCut ? Math.min(MAX_MEDIA_DUR, remaining) : segDur / slotCount;
       const query = `${prompt} ${toneModifier}`.split(' ').slice(0, 4).join(' ');
