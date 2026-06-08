@@ -260,7 +260,7 @@ export async function stepGenerateVisuals(
             video.format || project.defaultFormat
           );
           if (result) {
-            videoUrl = result.videoUrl;
+            videoUrl = result.videoUrl || undefined;
             imgUrl = result.thumbnailUrl;
             pexelsId = result.id;
           }
