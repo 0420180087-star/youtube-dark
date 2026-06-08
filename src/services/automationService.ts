@@ -20,6 +20,7 @@ import {
 import { searchContextualMedia } from './pexelsService';
 import { renderVideoHeadless } from './renderService';
 import { uploadVideoToYouTube } from './youtubeService';
+import { buildSlotVisualPrompt, createFallbackVisualDataUrl, getSegmentVisualPrompts } from './visualSceneService';
 
 const ANIMATION_EFFECTS: VisualEffect[] = ['zoom-in', 'zoom-out', 'pan-left', 'pan-right', 'zoom-in-fast'];
 
@@ -217,8 +218,7 @@ export async function stepGenerateVisuals(
     const next = timestamps[i + 1] || totalDuration;
     const totalSegmentDur = next - start;
     const seg = script.segments[i];
-    const prompts: string[] = seg.visualDescriptions || [];
-    if (prompts.length === 0) continue;
+    const prompts: string[] = getSegmentVisualPrompts(seg);
 
     // Number of slots = at least one per prompt, but split further if the
     // segment is longer than MAX_MEDIA_DUR so no media stays on screen too long.
@@ -229,7 +229,8 @@ export async function stepGenerateVisuals(
 
     for (let j = 0; j < slotCount; j++) {
       callbacks.onProgress('visuals', `Segmento ${i + 1}, cena ${j + 1}/${slotCount}`);
-      const prompt = prompts[j % prompts.length];
+      const basePrompt = prompts[j % prompts.length];
+      const prompt = buildSlotVisualPrompt(seg, basePrompt, i, j, slotCount, project.channelTheme);
       const remaining = (start + totalSegmentDur) - currentSceneStart;
       const slotDur = useExactCut ? Math.min(MAX_MEDIA_DUR, remaining) : totalSegmentDur / slotCount;
 
@@ -245,6 +246,7 @@ export async function stepGenerateVisuals(
 
       let imgUrl = '';
       let videoUrl = undefined;
+      let pexelsId: number | undefined;
       const pexelsChance = (project.visualSourceMix?.pexelsPercentage || 50) / 100;
 
       if (Math.random() < pexelsChance) {
@@ -260,6 +262,7 @@ export async function stepGenerateVisuals(
           if (result) {
             videoUrl = result.videoUrl;
             imgUrl = result.thumbnailUrl;
+            pexelsId = result.id;
           }
         } catch (e) {
           console.warn('Pexels failed, falling back to Gemini', e);
@@ -267,11 +270,16 @@ export async function stepGenerateVisuals(
       }
 
       if (!imgUrl) {
-        imgUrl = await generateSceneImage(prompt, project.defaultTone, video.format);
+        try {
+          imgUrl = await generateSceneImage(prompt, project.defaultTone, video.format);
+        } catch (e) {
+          console.warn('Gemini image failed, using non-black generated fallback', e);
+          imgUrl = createFallbackVisualDataUrl(prompt, project.defaultTone, video.format, i * 100 + j);
+        }
       }
 
       scenes.push({
-        segmentIndex: i, imageUrl: imgUrl, videoUrl, prompt,
+        segmentIndex: i, imageUrl: imgUrl, videoUrl, pexelsId, prompt,
         effect: ANIMATION_EFFECTS[(i + j) % ANIMATION_EFFECTS.length],
         startTime: currentSceneStart,
         duration: slotDur
