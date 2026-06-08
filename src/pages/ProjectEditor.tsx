@@ -13,6 +13,7 @@ import {
 } from '../services/geminiService';
 import { searchContextualMedia } from '../services/pexelsService';
 import { uploadVideoToYouTube } from '../services/youtubeService';
+import { buildSlotVisualPrompt, collectPexelsIds, createFallbackVisualDataUrl, getSegmentVisualPrompts } from '../services/visualSceneService';
 import {
   ScriptTab, AudioTab, VisualsTab, StudioTab, PublishTab,
 } from './ProjectEditorTabs';
@@ -458,7 +459,7 @@ export const ProjectEditor: React.FC = () => {
           scenes = [];
       }
 
-      const pexelsUsedIds = new Set<number>();
+      const pexelsUsedIds = collectPexelsIds(scenes);
       let lastImageCallMs = 0; // tracks last image API call timestamp for throttling
       try { 
           const segs = video!.script!.segments; 
@@ -484,8 +485,7 @@ export const ProjectEditor: React.FC = () => {
               setCurrentSegmentIndex(i); 
               
               const s = segs[i]; 
-              const prompts = s.visualDescriptions || [];
-              if (prompts.length === 0) continue;
+              const prompts = getSegmentVisualPrompts(s);
               
               const maxMediaDur = Math.max(2, project?.maxMediaDurationSeconds ?? 6);
               const slotCount = Math.max(prompts.length, Math.ceil(totalSegmentDur / maxMediaDur));
@@ -496,7 +496,8 @@ export const ProjectEditor: React.FC = () => {
               for (let j = 0; j < slotCount; j++) {
                   if (abort.signal.aborted) break;
 
-                  const prompt = prompts[j % prompts.length];
+                  const basePrompt = prompts[j % prompts.length];
+                  const prompt = buildSlotVisualPrompt(s, basePrompt, i, j, slotCount, project?.channelTheme);
                   const remaining = (start + totalSegmentDur) - currentSceneStart;
                   const dur = useExactCut ? Math.min(maxMediaDur, remaining) : totalSegmentDur / slotCount;
 
@@ -517,6 +518,7 @@ export const ProjectEditor: React.FC = () => {
                   
                   let url = '';
                   let videoUrl = undefined;
+                  let pexelsId: number | undefined;
 
                   // Try to get a stock video first to save Gemini API quota
                   const pexelsChance = (project?.visualSourceMix?.pexelsPercentage || 50) / 100;
@@ -533,12 +535,18 @@ export const ProjectEditor: React.FC = () => {
                       if (pexelsResult) {
                           videoUrl = pexelsResult.videoUrl;
                           url = pexelsResult.thumbnailUrl;
+                           pexelsId = pexelsResult.id;
                       }
                   }
 
                   if (!url) {
                       // Fallback to Gemini Image Generation if no stock video found or chosen
-                      url = await generateSceneImage(prompt, scriptTone, video!.format || 'Landscape 16:9', visualsSessionId.current); 
+                      try {
+                          url = await generateSceneImage(prompt, scriptTone, video!.format || 'Landscape 16:9', visualsSessionId.current);
+                      } catch (e) {
+                          console.warn('Gemini image failed, using non-black generated fallback', e);
+                          url = createFallbackVisualDataUrl(prompt, scriptTone, video!.format || 'Landscape 16:9', i * 100 + j);
+                      }
                   }
                   
                   setLastValidImage(url); 
@@ -550,6 +558,7 @@ export const ProjectEditor: React.FC = () => {
                       segmentIndex: i, 
                       imageUrl: url, 
                       videoUrl: videoUrl,
+                      pexelsId,
                       videoOffset: videoUrl ? Math.random() * 10 : 0, // Random start point for stock videos
                       prompt: prompt, 
                       effect: ANIMATION_EFFECTS[Math.floor(Math.random() * ANIMATION_EFFECTS.length)], 
