@@ -478,7 +478,7 @@ export const ProjectEditor: React.FC = () => {
           
           for (let i = 0; i < segs.length; i++) { 
               const start = starts[i]; 
-              const end = (starts[i + 1] !== undefined) ? starts[i + 1] : (video!.segmentTimestamps ? starts[i] + segs[i].estimatedDuration : totDur); 
+              const end = (starts[i + 1] !== undefined) ? starts[i + 1] : totDur; 
               const totalSegmentDur = Math.max(1, end - start); 
 
               setGeneratingIndex(i); 
@@ -967,7 +967,7 @@ export const ProjectEditor: React.FC = () => {
 
               const isDocumentary = scriptTone.toLowerCase().includes('documentary') || scriptTone.toLowerCase().includes('wendover') || scriptTone.toLowerCase().includes('explainer');
               const pexelsChance = isDocumentary ? 0.7 : 0.4;
-              const singleUsedIds = new Set<number>();
+              const singleUsedIds = collectPexelsIds(newScenes);
 
               if (Math.random() < pexelsChance) {
                   const pexelsResult = await searchContextualMedia(
