@@ -533,7 +533,7 @@ export const ProjectEditor: React.FC = () => {
                         video!.format || 'Landscape 16:9'
                       );
                       if (pexelsResult) {
-                          videoUrl = pexelsResult.videoUrl;
+                           videoUrl = pexelsResult.videoUrl || undefined;
                           url = pexelsResult.thumbnailUrl;
                            pexelsId = pexelsResult.id;
                       }
@@ -979,7 +979,7 @@ export const ProjectEditor: React.FC = () => {
                     video!.format || 'Landscape 16:9'
                   );
                   if (pexelsResult) {
-                      videoUrl = pexelsResult.videoUrl;
+                      videoUrl = pexelsResult.videoUrl || undefined;
                       url = pexelsResult.thumbnailUrl;
                       pexelsId = pexelsResult.id;
                   }
