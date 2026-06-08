@@ -252,6 +252,38 @@ const TONE_MODIFIERS = {
   'Urban Legend Storyteller': 'forest mystery night',
 };
 
+const SLOT_VARIATIONS = [
+  'wide establishing shot', 'close detail shot', 'dynamic movement shot',
+  'symbolic cinematic insert', 'dramatic atmosphere shot', 'human perspective shot',
+  'environment texture shot', 'high-energy transition shot'
+];
+
+function getSegmentVisualPrompts(segment) {
+  const explicit = (segment.visualDescriptions || []).map(p => String(p || '').trim()).filter(Boolean);
+  if (explicit.length) return explicit;
+  const title = String(segment.sectionTitle || '').trim();
+  const sentences = String(segment.narratorText || '')
+    .replace(/\s+/g, ' ')
+    .split(/(?<=[.!?])\s+/)
+    .map(s => s.replace(/["“”]/g, '').trim())
+    .filter(s => s.length > 20)
+    .slice(0, 4);
+  if (sentences.length) return sentences.map((s, idx) => `${title || 'Narrative beat'} — ${s.slice(0, 180)} — cinematic b-roll ${idx + 1}`);
+  return [title || 'cinematic atmosphere for this narrative moment'];
+}
+
+function buildSlotVisualPrompt(segment, basePrompt, segmentIndex, slotIndex, totalSlots, channelTheme) {
+  const variation = SLOT_VARIATIONS[(segmentIndex + slotIndex) % SLOT_VARIATIONS.length];
+  const context = String(segment.narratorText || '').replace(/\s+/g, ' ').trim().slice(0, 220);
+  return [
+    String(basePrompt || segment.sectionTitle || 'cinematic scene').trim(),
+    `topic: ${channelTheme || 'general'}`,
+    context ? `story context: ${context}` : '',
+    `visual variation ${slotIndex + 1} of ${totalSlots}: ${variation}`,
+    'must be visually distinct from previous shots',
+  ].filter(Boolean).join('. ');
+}
+
 function getToneModifier(tone) {
   return TONE_MODIFIERS[tone] || 'cinematic atmospheric';
 }
