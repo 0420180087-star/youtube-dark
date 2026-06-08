@@ -472,12 +472,19 @@ async function stepVisuals(script, projectData) {
         result = await searchPexels(projectData.channelTheme || 'cinematic', usedIds);
       }
 
+      // Final stock fallback: use Pexels photos before resorting to a generated placeholder.
+      if (!result) {
+        result = await searchPexels(query, usedIds, false)
+          || await searchPexels(projectData.channelTheme || 'cinematic', usedIds, false);
+      }
+
       scenes.push({
         segmentIndex: i,
         prompt,
         duration: slotDur,
         videoUrl: result?.videoUrl,
-        imageUrl: result?.imageUrl || result?.thumbnailUrl,
+        imageUrl: result?.imageUrl || result?.thumbnailUrl || createFallbackVisualDataUrl(prompt, i * 100 + j),
+        effect: ['zoom-in', 'zoom-out', 'pan-left', 'pan-right', 'zoom-in-fast'][(i + j) % 5],
       });
       currentStart += slotDur;
 
