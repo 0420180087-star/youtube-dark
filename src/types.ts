@@ -53,6 +53,7 @@ export interface VisualScene {
   segmentIndex: number;
   imageUrl: string;
   videoUrl?: string;
+  pexelsId?: number;
   videoOffset?: number;
   prompt: string;
   effect: VisualEffect;

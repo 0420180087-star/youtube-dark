@@ -252,6 +252,46 @@ const TONE_MODIFIERS = {
   'Urban Legend Storyteller': 'forest mystery night',
 };
 
+const SLOT_VARIATIONS = [
+  'wide establishing shot', 'close detail shot', 'dynamic movement shot',
+  'symbolic cinematic insert', 'dramatic atmosphere shot', 'human perspective shot',
+  'environment texture shot', 'high-energy transition shot'
+];
+
+function getSegmentVisualPrompts(segment) {
+  const explicit = (segment.visualDescriptions || []).map(p => String(p || '').trim()).filter(Boolean);
+  if (explicit.length) return explicit;
+  const title = String(segment.sectionTitle || '').trim();
+  const sentences = String(segment.narratorText || '')
+    .replace(/\s+/g, ' ')
+    .split(/(?<=[.!?])\s+/)
+    .map(s => s.replace(/["“”]/g, '').trim())
+    .filter(s => s.length > 20)
+    .slice(0, 4);
+  if (sentences.length) return sentences.map((s, idx) => `${title || 'Narrative beat'} — ${s.slice(0, 180)} — cinematic b-roll ${idx + 1}`);
+  return [title || 'cinematic atmosphere for this narrative moment'];
+}
+
+function buildSlotVisualPrompt(segment, basePrompt, segmentIndex, slotIndex, totalSlots, channelTheme) {
+  const variation = SLOT_VARIATIONS[(segmentIndex + slotIndex) % SLOT_VARIATIONS.length];
+  const context = String(segment.narratorText || '').replace(/\s+/g, ' ').trim().slice(0, 220);
+  return [
+    String(basePrompt || segment.sectionTitle || 'cinematic scene').trim(),
+    `topic: ${channelTheme || 'general'}`,
+    context ? `story context: ${context}` : '',
+    `visual variation ${slotIndex + 1} of ${totalSlots}: ${variation}`,
+    'must be visually distinct from previous shots',
+  ].filter(Boolean).join('. ');
+}
+
+function createFallbackVisualDataUrl(prompt, seed = 0) {
+  const palettes = [['#101826', '#0f766e'], ['#172033', '#b45309'], ['#111827', '#be123c'], ['#0f172a', '#2563eb']];
+  const [bg, accent] = palettes[Math.abs(seed) % palettes.length];
+  const label = String(prompt || 'cinematic scene').replace(/[<>&]/g, '').slice(0, 110);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${bg}"/><stop offset="1" stop-color="#020617"/></linearGradient><radialGradient id="r" cx="68%" cy="34%" r="55%"><stop offset="0" stop-color="${accent}" stop-opacity="0.55"/><stop offset="1" stop-color="${accent}" stop-opacity="0"/></radialGradient></defs><rect width="100%" height="100%" fill="url(#g)"/><rect width="100%" height="100%" fill="url(#r)"/><path d="M0 778 C 538 626, 998 929, 1920 691 L 1920 1080 L 0 1080 Z" fill="${accent}" opacity="0.28"/><text x="154" y="907" fill="#f8fafc" font-family="Arial,sans-serif" font-size="66" font-weight="700" opacity="0.82">${label}</text></svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
 function getToneModifier(tone) {
   return TONE_MODIFIERS[tone] || 'cinematic atmospheric';
 }
@@ -403,8 +443,7 @@ async function stepVisuals(script, projectData) {
 
   for (let i = 0; i < script.segments.length; i++) {
     const seg = script.segments[i];
-    const prompts = seg.visualDescriptions || [];
-    if (prompts.length === 0) continue;
+    const prompts = getSegmentVisualPrompts(seg);
 
     const segDur = Math.max(2, Number(seg.estimatedDuration) || 5);
     // Split segment into N slots so no single media stays longer than MAX_MEDIA_DUR
@@ -413,7 +452,8 @@ async function stepVisuals(script, projectData) {
     let currentStart = 0;
 
     for (let j = 0; j < slotCount; j++) {
-      const prompt = prompts[j % prompts.length];
+      const basePrompt = prompts[j % prompts.length];
+      const prompt = buildSlotVisualPrompt(seg, basePrompt, i, j, slotCount, projectData.channelTheme);
       const remaining = segDur - currentStart;
       const slotDur = useExactCut ? Math.min(MAX_MEDIA_DUR, remaining) : segDur / slotCount;
       const query = `${prompt} ${toneModifier}`.split(' ').slice(0, 4).join(' ');
@@ -432,12 +472,25 @@ async function stepVisuals(script, projectData) {
         result = await searchPexels(projectData.channelTheme || 'cinematic', usedIds);
       }
 
+      // Final stock fallback: use Pexels photos before resorting to a generated placeholder.
+      if (!result) {
+        result = await searchPexels(query, usedIds, false)
+          || await searchPexels(projectData.channelTheme || 'cinematic', usedIds, false);
+      }
+
+      let generatedImageUrl = null;
+      if (!result?.imageUrl && !result?.thumbnailUrl) {
+        const b64 = await geminiGenerateImage(`${prompt}. Cinematic video scene, no text, no watermark, 16:9.`);
+        if (b64) generatedImageUrl = `data:image/jpeg;base64,${b64}`;
+      }
+
       scenes.push({
         segmentIndex: i,
         prompt,
         duration: slotDur,
         videoUrl: result?.videoUrl,
-        imageUrl: result?.imageUrl || result?.thumbnailUrl,
+        imageUrl: result?.imageUrl || result?.thumbnailUrl || generatedImageUrl || createFallbackVisualDataUrl(prompt, i * 100 + j),
+        effect: ['zoom-in', 'zoom-out', 'pan-left', 'pan-right', 'zoom-in-fast'][(i + j) % 5],
       });
       currentStart += slotDur;
 

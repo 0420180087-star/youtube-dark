@@ -67,6 +67,37 @@ type LoadedScene = {
   poster?: HTMLImageElement | HTMLCanvasElement;
 };
 
+const createTimelinePlaceholder = (startTime: number, duration: number, index: number): LoadedScene => {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1920;
+  canvas.height = 1080;
+  const ctx = canvas.getContext("2d")!;
+  const palettes = [["#101826", "#0f766e"], ["#172033", "#b45309"], ["#111827", "#be123c"], ["#0f172a", "#2563eb"]];
+  const [c1, c2] = palettes[index % palettes.length];
+  const grad = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+  grad.addColorStop(0, c1);
+  grad.addColorStop(1, "#020617");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = c2;
+  ctx.globalAlpha = 0.35;
+  ctx.beginPath();
+  ctx.ellipse(canvas.width * 0.68, canvas.height * 0.42, canvas.width * 0.28, canvas.height * 0.22, -0.4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  return {
+    startTime,
+    duration,
+    effect: ["zoom-in", "pan-left", "pan-right", "zoom-out"][index % 4] as VisualEffect,
+    element: canvas,
+    isVideo: false,
+    ready: true,
+    videoStarted: false,
+    originalIndex: -1,
+  };
+};
+
 // ─── Load scene — tries video (via blob URL to bypass CORS), falls back to image
 const loadSceneMedia = async (
   scene: {
@@ -378,21 +409,28 @@ export const renderVideoHeadless = async (
   const normalizeSceneTiming = (baseScenes: LoadedScene[], totalDuration: number): LoadedScene[] => {
     if (baseScenes.length === 0) return [];
     const timed: LoadedScene[] = [];
+    const usedSceneIndexes = new Set<number>();
     let cursor = 0;
-    let idx = 0;
+    let placeholderIdx = 0;
 
     while (cursor < totalDuration - 0.01) {
-      const source = baseScenes[idx % baseScenes.length];
       const remaining = totalDuration - cursor;
       const duration = Math.min(remaining, configuredMaxMediaDur);
-      timed.push({
-        ...source,
-        startTime: cursor,
-        duration,
-        videoStarted: false,
-      });
+      const aligned = baseScenes.find(scene => !usedSceneIndexes.has(scene.originalIndex) && cursor >= scene.startTime - 0.05 && cursor < scene.startTime + scene.duration - 0.01);
+
+      if (aligned) {
+        usedSceneIndexes.add(aligned.originalIndex);
+        timed.push({
+          ...aligned,
+          startTime: cursor,
+          duration,
+          videoStarted: false,
+        });
+      } else {
+        timed.push(createTimelinePlaceholder(cursor, duration, placeholderIdx++));
+      }
+
       cursor += duration;
-      idx += 1;
     }
 
     return timed;

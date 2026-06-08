@@ -13,6 +13,7 @@ import {
 } from '../services/geminiService';
 import { searchContextualMedia } from '../services/pexelsService';
 import { uploadVideoToYouTube } from '../services/youtubeService';
+import { buildSlotVisualPrompt, collectPexelsIds, createFallbackVisualDataUrl, getSegmentVisualPrompts } from '../services/visualSceneService';
 import {
   ScriptTab, AudioTab, VisualsTab, StudioTab, PublishTab,
 } from './ProjectEditorTabs';
@@ -458,7 +459,7 @@ export const ProjectEditor: React.FC = () => {
           scenes = [];
       }
 
-      const pexelsUsedIds = new Set<number>();
+      const pexelsUsedIds = collectPexelsIds(scenes);
       let lastImageCallMs = 0; // tracks last image API call timestamp for throttling
       try { 
           const segs = video!.script!.segments; 
@@ -477,15 +478,14 @@ export const ProjectEditor: React.FC = () => {
           
           for (let i = 0; i < segs.length; i++) { 
               const start = starts[i]; 
-              const end = (starts[i + 1] !== undefined) ? starts[i + 1] : (video!.segmentTimestamps ? starts[i] + segs[i].estimatedDuration : totDur); 
+              const end = (starts[i + 1] !== undefined) ? starts[i + 1] : totDur; 
               const totalSegmentDur = Math.max(1, end - start); 
 
               setGeneratingIndex(i); 
               setCurrentSegmentIndex(i); 
               
               const s = segs[i]; 
-              const prompts = s.visualDescriptions || [];
-              if (prompts.length === 0) continue;
+              const prompts = getSegmentVisualPrompts(s);
               
               const maxMediaDur = Math.max(2, project?.maxMediaDurationSeconds ?? 6);
               const slotCount = Math.max(prompts.length, Math.ceil(totalSegmentDur / maxMediaDur));
@@ -496,7 +496,8 @@ export const ProjectEditor: React.FC = () => {
               for (let j = 0; j < slotCount; j++) {
                   if (abort.signal.aborted) break;
 
-                  const prompt = prompts[j % prompts.length];
+                  const basePrompt = prompts[j % prompts.length];
+                  const prompt = buildSlotVisualPrompt(s, basePrompt, i, j, slotCount, project?.channelTheme);
                   const remaining = (start + totalSegmentDur) - currentSceneStart;
                   const dur = useExactCut ? Math.min(maxMediaDur, remaining) : totalSegmentDur / slotCount;
 
@@ -517,6 +518,7 @@ export const ProjectEditor: React.FC = () => {
                   
                   let url = '';
                   let videoUrl = undefined;
+                  let pexelsId: number | undefined;
 
                   // Try to get a stock video first to save Gemini API quota
                   const pexelsChance = (project?.visualSourceMix?.pexelsPercentage || 50) / 100;
@@ -531,14 +533,20 @@ export const ProjectEditor: React.FC = () => {
                         video!.format || 'Landscape 16:9'
                       );
                       if (pexelsResult) {
-                          videoUrl = pexelsResult.videoUrl;
+                           videoUrl = pexelsResult.videoUrl || undefined;
                           url = pexelsResult.thumbnailUrl;
+                           pexelsId = pexelsResult.id;
                       }
                   }
 
                   if (!url) {
                       // Fallback to Gemini Image Generation if no stock video found or chosen
-                      url = await generateSceneImage(prompt, scriptTone, video!.format || 'Landscape 16:9', visualsSessionId.current); 
+                      try {
+                          url = await generateSceneImage(prompt, scriptTone, video!.format || 'Landscape 16:9', visualsSessionId.current);
+                      } catch (e) {
+                          console.warn('Gemini image failed, using non-black generated fallback', e);
+                          url = createFallbackVisualDataUrl(prompt, scriptTone, video!.format || 'Landscape 16:9', i * 100 + j);
+                      }
                   }
                   
                   setLastValidImage(url); 
@@ -550,6 +558,7 @@ export const ProjectEditor: React.FC = () => {
                       segmentIndex: i, 
                       imageUrl: url, 
                       videoUrl: videoUrl,
+                      pexelsId,
                       videoOffset: videoUrl ? Math.random() * 10 : 0, // Random start point for stock videos
                       prompt: prompt, 
                       effect: ANIMATION_EFFECTS[Math.floor(Math.random() * ANIMATION_EFFECTS.length)], 
@@ -918,7 +927,7 @@ export const ProjectEditor: React.FC = () => {
       setGeneratingIndex(idx);
       try {
           const segment = video!.script!.segments[idx];
-          const prompts = segment.visualDescriptions || [];
+          const prompts = getSegmentVisualPrompts(segment);
           
           let newScenes = video!.visualScenes ? [...video!.visualScenes] : [];
           // Remove all scenes for this segment
@@ -926,21 +935,26 @@ export const ProjectEditor: React.FC = () => {
 
           let startTime = 0;
           let totalDuration = segment.estimatedDuration;
+          let audioTotalDuration: number | undefined;
+
+          if (video!.audioUrl) {
+              try {
+                  const c = new AudioContext({ sampleRate: 24000 });
+                  const b = await decodeAudioData(new Uint8Array(atob(video!.audioUrl).split('').map(c => c.charCodeAt(0))).buffer, c);
+                  audioTotalDuration = b.duration;
+                  await c.close();
+              } catch { /* keep estimated duration fallback */ }
+          }
 
           if (video!.segmentTimestamps) {
               startTime = video!.segmentTimestamps[idx];
-              const endTime = video!.segmentTimestamps[idx + 1] || (startTime + totalDuration);
+              const endTime = video!.segmentTimestamps[idx + 1] || audioTotalDuration || (startTime + totalDuration);
               totalDuration = endTime - startTime;
           } else {
               const totalDur = video!.script!.segments.reduce((acc, s) => acc + s.estimatedDuration, 0);
               const perSeg = totalDur / video!.script!.segments.length;
               startTime = idx * perSeg;
               totalDuration = perSeg;
-          }
-
-          if (prompts.length === 0) {
-              updateVideo(project!.id, video!.id, { visualScenes: newScenes });
-              return;
           }
 
           const maxMediaDur = Math.max(2, project?.maxMediaDurationSeconds ?? 6);
@@ -950,7 +964,8 @@ export const ProjectEditor: React.FC = () => {
           let currentStart = startTime;
 
           for (let j = 0; j < slotCount; j++) {
-              const prompt = prompts[j % prompts.length];
+              const basePrompt = prompts[j % prompts.length];
+              const prompt = buildSlotVisualPrompt(segment, basePrompt, idx, j, slotCount, project?.channelTheme);
               const remaining = (startTime + totalDuration) - currentStart;
               const dur = useExactCut ? Math.min(maxMediaDur, remaining) : totalDuration / slotCount;
               
@@ -958,10 +973,11 @@ export const ProjectEditor: React.FC = () => {
               
               let url = '';
               let videoUrl = undefined;
+              let pexelsId: number | undefined;
 
               const isDocumentary = scriptTone.toLowerCase().includes('documentary') || scriptTone.toLowerCase().includes('wendover') || scriptTone.toLowerCase().includes('explainer');
               const pexelsChance = isDocumentary ? 0.7 : 0.4;
-              const singleUsedIds = new Set<number>();
+              const singleUsedIds = collectPexelsIds(newScenes);
 
               if (Math.random() < pexelsChance) {
                   const pexelsResult = await searchContextualMedia(
@@ -973,19 +989,26 @@ export const ProjectEditor: React.FC = () => {
                     video!.format || 'Landscape 16:9'
                   );
                   if (pexelsResult) {
-                      videoUrl = pexelsResult.videoUrl;
+                      videoUrl = pexelsResult.videoUrl || undefined;
                       url = pexelsResult.thumbnailUrl;
+                      pexelsId = pexelsResult.id;
                   }
               }
 
               if (!url) {
-                  url = await generateSceneImage(prompt, scriptTone, video!.format || 'Landscape 16:9', visualsSessionId.current);
+                  try {
+                      url = await generateSceneImage(prompt, scriptTone, video!.format || 'Landscape 16:9', visualsSessionId.current);
+                  } catch (e) {
+                      console.warn('Gemini image failed, using non-black generated fallback', e);
+                      url = createFallbackVisualDataUrl(prompt, scriptTone, video!.format || 'Landscape 16:9', idx * 100 + j);
+                  }
               }
               
               newScenes.push({
                   segmentIndex: idx,
                   imageUrl: url,
                   videoUrl: videoUrl,
+                  pexelsId,
                   videoOffset: videoUrl ? Math.random() * 10 : 0, // Random start point for stock videos
                   prompt: prompt,
                   effect: ANIMATION_EFFECTS[Math.floor(Math.random() * ANIMATION_EFFECTS.length)],
