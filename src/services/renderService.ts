@@ -67,6 +67,37 @@ type LoadedScene = {
   poster?: HTMLImageElement | HTMLCanvasElement;
 };
 
+const createTimelinePlaceholder = (startTime: number, duration: number, index: number): LoadedScene => {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1920;
+  canvas.height = 1080;
+  const ctx = canvas.getContext("2d")!;
+  const palettes = [["#101826", "#0f766e"], ["#172033", "#b45309"], ["#111827", "#be123c"], ["#0f172a", "#2563eb"]];
+  const [c1, c2] = palettes[index % palettes.length];
+  const grad = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+  grad.addColorStop(0, c1);
+  grad.addColorStop(1, "#020617");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = c2;
+  ctx.globalAlpha = 0.35;
+  ctx.beginPath();
+  ctx.ellipse(canvas.width * 0.68, canvas.height * 0.42, canvas.width * 0.28, canvas.height * 0.22, -0.4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  return {
+    startTime,
+    duration,
+    effect: ["zoom-in", "pan-left", "pan-right", "zoom-out"][index % 4] as VisualEffect,
+    element: canvas,
+    isVideo: false,
+    ready: true,
+    videoStarted: false,
+    originalIndex: -1,
+  };
+};
+
 // ─── Load scene — tries video (via blob URL to bypass CORS), falls back to image
 const loadSceneMedia = async (
   scene: {
