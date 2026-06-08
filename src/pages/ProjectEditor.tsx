@@ -935,10 +935,20 @@ export const ProjectEditor: React.FC = () => {
 
           let startTime = 0;
           let totalDuration = segment.estimatedDuration;
+          let audioTotalDuration: number | undefined;
+
+          if (video!.audioUrl) {
+              try {
+                  const c = new AudioContext({ sampleRate: 24000 });
+                  const b = await decodeAudioData(new Uint8Array(atob(video!.audioUrl).split('').map(c => c.charCodeAt(0))).buffer, c);
+                  audioTotalDuration = b.duration;
+                  await c.close();
+              } catch { /* keep estimated duration fallback */ }
+          }
 
           if (video!.segmentTimestamps) {
               startTime = video!.segmentTimestamps[idx];
-              const endTime = video!.segmentTimestamps[idx + 1] || (startTime + totalDuration);
+              const endTime = video!.segmentTimestamps[idx + 1] || audioTotalDuration || (startTime + totalDuration);
               totalDuration = endTime - startTime;
           } else {
               const totalDur = video!.script!.segments.reduce((acc, s) => acc + s.estimatedDuration, 0);
