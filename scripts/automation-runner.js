@@ -284,6 +284,14 @@ function buildSlotVisualPrompt(segment, basePrompt, segmentIndex, slotIndex, tot
   ].filter(Boolean).join('. ');
 }
 
+function createFallbackVisualDataUrl(prompt, seed = 0) {
+  const palettes = [['#101826', '#0f766e'], ['#172033', '#b45309'], ['#111827', '#be123c'], ['#0f172a', '#2563eb']];
+  const [bg, accent] = palettes[Math.abs(seed) % palettes.length];
+  const label = String(prompt || 'cinematic scene').replace(/[<>&]/g, '').slice(0, 110);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${bg}"/><stop offset="1" stop-color="#020617"/></linearGradient><radialGradient id="r" cx="68%" cy="34%" r="55%"><stop offset="0" stop-color="${accent}" stop-opacity="0.55"/><stop offset="1" stop-color="${accent}" stop-opacity="0"/></radialGradient></defs><rect width="100%" height="100%" fill="url(#g)"/><rect width="100%" height="100%" fill="url(#r)"/><path d="M0 778 C 538 626, 998 929, 1920 691 L 1920 1080 L 0 1080 Z" fill="${accent}" opacity="0.28"/><text x="154" y="907" fill="#f8fafc" font-family="Arial,sans-serif" font-size="66" font-weight="700" opacity="0.82">${label}</text></svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
 function getToneModifier(tone) {
   return TONE_MODIFIERS[tone] || 'cinematic atmospheric';
 }
