@@ -478,12 +478,18 @@ async function stepVisuals(script, projectData) {
           || await searchPexels(projectData.channelTheme || 'cinematic', usedIds, false);
       }
 
+      let generatedImageUrl = null;
+      if (!result?.imageUrl && !result?.thumbnailUrl) {
+        const b64 = await geminiGenerateImage(`${prompt}. Cinematic video scene, no text, no watermark, 16:9.`);
+        if (b64) generatedImageUrl = `data:image/jpeg;base64,${b64}`;
+      }
+
       scenes.push({
         segmentIndex: i,
         prompt,
         duration: slotDur,
         videoUrl: result?.videoUrl,
-        imageUrl: result?.imageUrl || result?.thumbnailUrl || createFallbackVisualDataUrl(prompt, i * 100 + j),
+        imageUrl: result?.imageUrl || result?.thumbnailUrl || generatedImageUrl || createFallbackVisualDataUrl(prompt, i * 100 + j),
         effect: ['zoom-in', 'zoom-out', 'pan-left', 'pan-right', 'zoom-in-fast'][(i + j) % 5],
       });
       currentStart += slotDur;
