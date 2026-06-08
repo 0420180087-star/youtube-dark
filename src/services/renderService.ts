@@ -410,20 +410,34 @@ export const renderVideoHeadless = async (
     if (baseScenes.length === 0) return [];
     const timed: LoadedScene[] = [];
     let cursor = 0;
-    let idx = 0;
+    let sourceIdx = 0;
+    let placeholderIdx = 0;
 
     while (cursor < totalDuration - 0.01) {
-      const source = baseScenes[idx % baseScenes.length];
       const remaining = totalDuration - cursor;
       const duration = Math.min(remaining, configuredMaxMediaDur);
-      timed.push({
-        ...source,
-        startTime: cursor,
-        duration,
-        videoStarted: false,
-      });
+      const aligned = baseScenes.find(scene => cursor >= scene.startTime - 0.05 && cursor < scene.startTime + scene.duration - 0.01);
+
+      if (aligned) {
+        timed.push({
+          ...aligned,
+          startTime: cursor,
+          duration,
+          videoStarted: false,
+        });
+      } else if (sourceIdx < baseScenes.length) {
+        const source = baseScenes[sourceIdx++];
+        timed.push({
+          ...source,
+          startTime: cursor,
+          duration,
+          videoStarted: false,
+        });
+      } else {
+        timed.push(createTimelinePlaceholder(cursor, duration, placeholderIdx++));
+      }
+
       cursor += duration;
-      idx += 1;
     }
 
     return timed;
