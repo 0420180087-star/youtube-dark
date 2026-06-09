@@ -14,7 +14,7 @@ if (typeof globalThis.WebSocket === 'undefined') {
 }
 import path from 'path';
 import os from 'os';
-import fs from 'fs';
+import { spawn } from 'child_process';
 import { renderVideo, cleanupTmp } from './videoRenderer.js';
 import { refreshAccessToken, uploadVideoFile, uploadThumbnail } from './youtubeUploader.js';
 
