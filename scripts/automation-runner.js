@@ -623,9 +623,9 @@ async function stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, pro
   log('🎬', 'Step 7: Rendering video with FFmpeg...');
 
   const tmpDir = path.join(os.tmpdir(), `autopost_${Date.now()}`);
+  fs.mkdirSync(tmpDir, { recursive: true });
 
   // Build per-scene visuals with duration from scene data
-  // This ensures Pexels videos are trimmed to the right length
   const visuals = scenes.map((s, i) => ({
     url: s.videoUrl || s.imageUrl,
     effect: s.effect || 'zoom-in',
@@ -633,17 +633,26 @@ async function stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, pro
     isVideo: !!s.videoUrl,
   }));
 
-  // Build per-clip segments with duration matching the scene array
-  const clipSegments = visuals.map((v) => ({
-    estimatedDuration: v.duration,
-  }));
+  const clipSegments = visuals.map((v) => ({ estimatedDuration: v.duration }));
+
+  // 🎵 Step 6.5: Generate procedural ambience to match total video duration
+  const totalDuration = visuals.reduce((sum, v) => sum + (v.duration || 0), 0);
+  let musicPath = null;
+  try {
+    musicPath = path.join(tmpDir, 'ambience.m4a');
+    await generateAmbienceTrack(musicPath, totalDuration, projectData.defaultTone);
+    log('🎵', `Ambience gerada (${totalDuration.toFixed(1)}s, tom: ${projectData.defaultTone || 'default'})`);
+  } catch (e) {
+    log('⚠️', `Falha ao gerar ambience: ${e.message} — continuando sem música`);
+    musicPath = null;
+  }
 
   const { videoPath } = await renderVideo({
     visuals,
     segments: clipSegments,
     audioBase64: audioBase64,
     audioMimeType: audioMimeType,
-    musicUrl: null,
+    musicUrl: musicPath,
     thumbnailBase64: thumbnailBase64 || null,
     tmpDir,
   });
