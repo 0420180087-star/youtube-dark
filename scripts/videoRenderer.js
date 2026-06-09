@@ -322,13 +322,20 @@ export async function renderVideo({ visuals, segments, audioBase64, audioMimeTyp
       .run();
   });
 
-  // Download background music if provided
+  // Background music: accept either a remote URL or a local file path already on disk
   let musicPath = null;
   if (musicUrl) {
     try {
-      musicPath = path.join(tmpDir, 'music.mp3');
-      await downloadFile(musicUrl, musicPath);
-      console.log('  🎵 Música de fundo adicionada');
+      if (/^https?:\/\//i.test(musicUrl)) {
+        musicPath = path.join(tmpDir, 'music.mp3');
+        await downloadFile(musicUrl, musicPath);
+        console.log('  🎵 Música de fundo (download) adicionada');
+      } else if (fs.existsSync(musicUrl)) {
+        musicPath = musicUrl;
+        console.log('  🎵 Música de fundo (local) adicionada');
+      } else {
+        console.warn('  ⚠️ musicUrl inválido — sem música de fundo');
+      }
     } catch {
       console.warn('  ⚠️ Música de fundo não disponível');
       musicPath = null;

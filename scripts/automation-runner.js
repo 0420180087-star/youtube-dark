@@ -15,6 +15,7 @@ if (typeof globalThis.WebSocket === 'undefined') {
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
+import { spawn } from 'child_process';
 import { renderVideo, cleanupTmp } from './videoRenderer.js';
 import { refreshAccessToken, uploadVideoFile, uploadThumbnail } from './youtubeUploader.js';
 
@@ -121,33 +122,102 @@ async function geminiGenerateJSON(prompt, maxTokens = 4096) {
 }
 
 async function geminiGenerateImage(prompt) {
+  // 1️⃣ Try imagen-3 (allowlisted accounts)
   try {
-    // Timeout de 45s — imagen-3 pode pendurar indefinidamente sem isso
     const res = await axios.post(
       `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:predict?key=${GEMINI_API_KEY}`,
-      {
-        instances: [{ prompt }],
-        parameters: { sampleCount: 1, aspectRatio: '16:9' }
-      },
+      { instances: [{ prompt }], parameters: { sampleCount: 1, aspectRatio: '16:9' } },
       { timeout: 45000 }
     );
     const b64 = res.data.predictions?.[0]?.bytesBase64Encoded;
-    if (!b64) {
-      log('⚠️', 'imagen-3 não retornou imagem (conta pode não ter acesso ao modelo)');
-      return null;
-    }
-    return b64;
+    if (b64) return b64;
   } catch (err) {
-    // imagen-3 exige conta allowlistada — se não tiver acesso, usa fallback silencioso
-    if (err?.response?.status === 403 || err?.response?.status === 400) {
-      log('⚠️', `imagen-3 sem acesso (${err.response.status}) — thumbnail pulada`);
-    } else if (err.code === 'ECONNABORTED') {
-      log('⚠️', 'imagen-3 timeout (>45s) — thumbnail pulada');
-    } else {
-      log('⚠️', `Thumbnail falhou: ${err.message}`);
+    const code = err?.response?.status;
+    if (code && code !== 403 && code !== 400 && code !== 404) {
+      log('⚠️', `imagen-3 error ${code}: ${err.message}`);
     }
-    return null;
   }
+
+  // 2️⃣ Fallback to Gemini 2.0 Flash image-generation (no allowlist needed)
+  const FLASH_MODELS = [
+    'gemini-2.0-flash-preview-image-generation',
+    'gemini-2.0-flash-exp',
+  ];
+  for (const model of FLASH_MODELS) {
+    try {
+      const res = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          contents: [{ parts: [{ text: `Generate a 16:9 cinematic image: ${prompt}` }] }],
+          generationConfig: { responseModalities: ['IMAGE', 'TEXT'] },
+        },
+        { timeout: 45000 }
+      );
+      const parts = res.data.candidates?.[0]?.content?.parts || [];
+      const imgPart = parts.find((p) => p.inlineData?.data);
+      if (imgPart?.inlineData?.data) {
+        log('🖼️', `Imagem gerada via ${model}`);
+        return imgPart.inlineData.data;
+      }
+    } catch (err) {
+      const code = err?.response?.status;
+      if (code !== 400 && code !== 404) {
+        log('⚠️', `${model} falhou: ${err.message}`);
+      }
+    }
+  }
+
+  log('⚠️', 'Todos os modelos de imagem falharam — usando fallback');
+  return null;
+}
+
+// ─── Generate a Node-side ambient music track via FFmpeg (no API needed) ─────
+function generateAmbienceTrack(outputPath, durationSec, tone = '') {
+  return new Promise((resolve, reject) => {
+    const t = (tone || '').toLowerCase();
+    // Map tone to a base sine frequency for the drone
+    let freq = 110; // A2 default
+    if (t.includes('horror') || t.includes('dark') || t.includes('suspense')) freq = 65;   // C2 deep drone
+    else if (t.includes('motiv') || t.includes('energ')) freq = 220;                       // A3 brighter
+    else if (t.includes('child') || t.includes('kid') || t.includes('cozy')) freq = 196;   // G3 warm
+    else if (t.includes('tech') || t.includes('gaming')) freq = 87;                        // F2
+
+    const dur = Math.max(30, Math.ceil(durationSec) + 5);
+
+    // Mix: sine drone + perfect 5th + brown noise pad, lowpass for warmth, fade in/out
+    const filter = [
+      `sine=frequency=${freq}:duration=${dur}[s1]`,
+      `sine=frequency=${Math.round(freq * 1.5)}:duration=${dur}[s2]`,
+      `anoisesrc=color=brown:duration=${dur}:amplitude=0.4[n]`,
+      `[s1][s2]amix=inputs=2:duration=longest[drone]`,
+      `[drone][n]amix=inputs=2:weights=1.0 0.35:duration=longest,lowpass=f=900,volume=0.6,afade=t=in:st=0:d=2,afade=t=out:st=${dur - 2}:d=2[out]`,
+    ].join(';');
+
+    const args = [
+      '-y',
+      '-f', 'lavfi',
+      '-i', `sine=frequency=${freq}:duration=${dur}`,
+      '-f', 'lavfi',
+      '-i', `sine=frequency=${Math.round(freq * 1.5)}:duration=${dur}`,
+      '-f', 'lavfi',
+      '-i', `anoisesrc=color=brown:duration=${dur}:amplitude=0.4`,
+      '-filter_complex',
+      `[0:a][1:a]amix=inputs=2:duration=longest[drone];[drone][2:a]amix=inputs=2:weights=1.0 0.35:duration=longest,lowpass=f=900,volume=0.6,afade=t=in:st=0:d=2,afade=t=out:st=${dur - 2}:d=2[out]`,
+      '-map', '[out]',
+      '-ac', '2',
+      '-ar', '44100',
+      '-b:a', '160k',
+      outputPath,
+    ];
+
+    const p = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    p.stderr.on('data', (d) => { stderr += d.toString(); });
+    p.on('close', (code) => {
+      if (code === 0 && fs.existsSync(outputPath)) resolve(outputPath);
+      else reject(new Error(`ffmpeg ambience exit ${code}: ${stderr.slice(-300)}`));
+    });
+  });
 }
 
 /**
@@ -553,9 +623,9 @@ async function stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, pro
   log('🎬', 'Step 7: Rendering video with FFmpeg...');
 
   const tmpDir = path.join(os.tmpdir(), `autopost_${Date.now()}`);
+  fs.mkdirSync(tmpDir, { recursive: true });
 
   // Build per-scene visuals with duration from scene data
-  // This ensures Pexels videos are trimmed to the right length
   const visuals = scenes.map((s, i) => ({
     url: s.videoUrl || s.imageUrl,
     effect: s.effect || 'zoom-in',
@@ -563,17 +633,26 @@ async function stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, pro
     isVideo: !!s.videoUrl,
   }));
 
-  // Build per-clip segments with duration matching the scene array
-  const clipSegments = visuals.map((v) => ({
-    estimatedDuration: v.duration,
-  }));
+  const clipSegments = visuals.map((v) => ({ estimatedDuration: v.duration }));
+
+  // 🎵 Step 6.5: Generate procedural ambience to match total video duration
+  const totalDuration = visuals.reduce((sum, v) => sum + (v.duration || 0), 0);
+  let musicPath = null;
+  try {
+    musicPath = path.join(tmpDir, 'ambience.m4a');
+    await generateAmbienceTrack(musicPath, totalDuration, projectData.defaultTone);
+    log('🎵', `Ambience gerada (${totalDuration.toFixed(1)}s, tom: ${projectData.defaultTone || 'default'})`);
+  } catch (e) {
+    log('⚠️', `Falha ao gerar ambience: ${e.message} — continuando sem música`);
+    musicPath = null;
+  }
 
   const { videoPath } = await renderVideo({
     visuals,
     segments: clipSegments,
     audioBase64: audioBase64,
     audioMimeType: audioMimeType,
-    musicUrl: null,
+    musicUrl: musicPath,
     thumbnailBase64: thumbnailBase64 || null,
     tmpDir,
   });
