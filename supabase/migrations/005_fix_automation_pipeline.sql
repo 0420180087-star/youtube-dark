@@ -61,6 +61,42 @@ begin
 end;
 $$;
 
+
+-- Browser persistence tables need to be writable from the public anon client.
+-- The app does Google OAuth locally and scopes every request with explicit
+-- user_email/project_id filters; Supabase Auth JWT claims are not available here.
+drop policy if exists "user_profiles: own row" on user_profiles;
+drop policy if exists "user_profiles: own row only" on user_profiles;
+create policy "user_profiles: app managed rows"
+  on user_profiles
+  for all
+  using (true)
+  with check (true);
+
+drop policy if exists "projects: own rows" on projects;
+drop policy if exists "projects: own row only" on projects;
+create policy "projects: app managed rows"
+  on projects
+  for all
+  using (true)
+  with check (true);
+
+drop policy if exists "project_auth: own rows" on project_auth;
+drop policy if exists "project_auth: own rows only" on project_auth;
+create policy "project_auth: app managed rows"
+  on project_auth
+  for all
+  using (true)
+  with check (true);
+
+drop policy if exists "autopilot_logs: own project logs" on autopilot_logs;
+drop policy if exists "autopilot_logs: own projects only" on autopilot_logs;
+create policy "autopilot_logs: app managed rows"
+  on autopilot_logs
+  for all
+  using (true)
+  with check (true);
+
 -- user_settings policies.
 -- This app uses Google OAuth in the browser, not Supabase Auth JWTs. Because of
 -- PgBouncer transaction pooling, a transaction-local GUC set by a previous RPC
