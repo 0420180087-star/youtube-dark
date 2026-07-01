@@ -26,7 +26,7 @@ alter table projects
 -- The lock expires automatically after `lock_minutes` minutes,
 -- so a crashed runner never permanently blocks a project.
 create or replace function acquire_autopilot_lock(
-    p_project_id  uuid,
+    p_project_id  text,
     p_locked_by   text,
     p_lock_minutes int default 90
 )
@@ -55,7 +55,7 @@ end;
 $$;
 
 -- RPC: Release the autopilot lock (call when pipeline finishes or errors).
-create or replace function release_autopilot_lock(p_project_id uuid)
+create or replace function release_autopilot_lock(p_project_id text)
 returns void
 language plpgsql
 security definer
