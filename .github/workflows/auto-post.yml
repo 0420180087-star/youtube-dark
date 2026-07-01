@@ -32,15 +32,15 @@ jobs:
         run: ffmpeg -version
 
       - name: Instalar dependências
-        run: npm install
+        run: npm ci
 
       - name: Executar pipeline de automação
         env:
-          SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          GEMINI_API_KEY: ${{ secrets.VITE_GEMINI_API_KEY }}
-          PEXELS_API_KEY: ${{ secrets.VITE_PEXELS_API_KEY }}
-          YOUTUBE_CLIENT_ID: ${{ secrets.VITE_GOOGLE_CLIENT_ID }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL || secrets.VITE_SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY || secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY || secrets.VITE_GEMINI_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY || secrets.VITE_PEXELS_API_KEY }}
+          YOUTUBE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID || secrets.VITE_GOOGLE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
           PROJECT_ID: ${{ github.event.inputs.project_id }}
         run: node scripts/automation-runner.js

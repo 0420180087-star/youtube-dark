@@ -118,9 +118,15 @@ export const Settings: React.FC = () => {
         setSaveSuccess(false);
         
         try {
-            // 1. Encrypt and Save API Keys (As Array)
-            if (apiKeys.length > 0) {
-                const encList = await encryptData(JSON.stringify(apiKeys));
+            // 1. Encrypt and Save API Keys (As Array). If the user typed a key
+            // but forgot to click "Adicionar", save it too.
+            const cleanPendingKey = newKeyInput.trim();
+            const keysToSave = [...apiKeys, ...(cleanPendingKey && !apiKeys.includes(cleanPendingKey) ? [cleanPendingKey] : [])];
+            setApiKeys(keysToSave);
+            if (cleanPendingKey) setNewKeyInput('');
+
+            if (keysToSave.length > 0) {
+                const encList = await encryptData(JSON.stringify(keysToSave));
                 localStorage.setItem(multiKeyStorageKey, encList);
                 
                 // CRITICAL: Clean up legacy slots to prevent "ghost" key usage
@@ -157,14 +163,16 @@ export const Settings: React.FC = () => {
             //    per user (no need to set workspace-wide env vars).
             if (supabase && user?.email) {
                 try {
-                    await supabase.from('user_settings').upsert({
+                    const { error } = await supabase.from('user_settings').upsert({
                         user_email: user.email,
-                        gemini_api_keys: apiKeys,
+                        gemini_api_keys: keysToSave,
                         pexels_api_key: pexelsKey.trim() || null,
                         updated_at: new Date().toISOString(),
                     }, { onConflict: 'user_email' });
+                    if (error) throw error;
                 } catch (e) {
                     console.warn('[Settings] cloud sync failed:', e);
+                    alert('Configurações salvas localmente, mas não sincronizaram com o Supabase. A automação do GitHub não verá essas chaves até aplicar as migrations/RLS e salvar novamente.');
                 }
             }
 

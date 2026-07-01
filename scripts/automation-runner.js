@@ -459,6 +459,7 @@ async function stepVoice(script, projectData) {
   if (segments.length === 0) throw new Error('No segments in script for TTS');
 
   const audioChunks = [];
+  let firstMimeType = 'audio/pcm';
 
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
@@ -478,9 +479,9 @@ async function stepVoice(script, projectData) {
     const audioData = typeof ttsResult === 'string' ? ttsResult : ttsResult.data;
     const mimeType = typeof ttsResult === 'string' ? 'audio/pcm' : (ttsResult.mimeType || 'audio/pcm');
 
-    if (i === 0) {
-      // Guarda o mimeType do primeiro chunk para passar ao renderer
-      audioChunks._mimeType = mimeType;
+    if (audioChunks.length === 0) {
+      // Guarda o mimeType do primeiro chunk real para passar ao renderer
+      firstMimeType = mimeType;
     }
 
     audioChunks.push(Buffer.from(audioData, 'base64'));
@@ -496,7 +497,7 @@ async function stepVoice(script, projectData) {
   // Concatenate all audio buffers into one
   const combined = Buffer.concat(audioChunks);
   const combinedBase64 = combined.toString('base64');
-  const mimeType = audioChunks._mimeType || 'audio/pcm';
+  const mimeType = firstMimeType;
 
   log('✅', `Voice generated: ${audioChunks.length} segments, ${(combined.length / 1024 / 1024).toFixed(1)}MB total, mimeType=${mimeType}`);
   return { audioBase64: combinedBase64, mimeType };
@@ -778,6 +779,26 @@ async function stepUploadYouTube(projectData, metadata, renderResult, thumbnailB
 
 // --- MAIN ORCHESTRATOR ---
 
+
+async function safeInsertAutopilotLog(payload) {
+  try {
+    const { error } = await supabase.from('autopilot_logs').insert(payload);
+    if (!error) return;
+    // Older databases may not have the new columns yet; keep logging non-fatal.
+    if ((error.message || '').includes('video_title') || (error.message || '').includes('elapsed_ms')) {
+      const fallback = { ...payload };
+      delete fallback.video_title;
+      delete fallback.elapsed_ms;
+      const retry = await supabase.from('autopilot_logs').insert(fallback);
+      if (retry.error) log('⚠️', `Failed to write autopilot log: ${retry.error.message}`);
+      return;
+    }
+    log('⚠️', `Failed to write autopilot log: ${error.message}`);
+  } catch (e) {
+    log('⚠️', `Failed to write autopilot log: ${e.message}`);
+  }
+}
+
 async function processProject(projectRow) {
   const projectId = projectRow.id;
   const data = projectRow.data;
@@ -793,7 +814,7 @@ async function processProject(projectRow) {
     });
 
   if (lockError) {
-    log('❌', `Lock RPC error: ${lockError.message} — verifique se a migration 005 foi aplicada no Supabase`);
+    log('❌', `Lock RPC error: ${lockError.message} — aplique as migrations 003 e 005 no Supabase`);
     return false;
   }
   if (!lockAcquired) {
@@ -897,7 +918,7 @@ async function processProject(projectRow) {
 
     // Log success
     const duration = Math.round((Date.now() - startTime) / 1000);
-    await supabase.from('autopilot_logs').insert({
+    await safeInsertAutopilotLog({
       project_id: projectId,
       status: 'success',
       message: `Publicado: ${uploadResult?.videoUrl || 'sem URL'}`,
@@ -921,7 +942,7 @@ async function processProject(projectRow) {
     await supabase.from('projects').update({ data, updated_at: new Date().toISOString() }).eq('id', projectId);
 
     // Log error
-    await supabase.from('autopilot_logs').insert({
+    await safeInsertAutopilotLog({
       project_id: projectId,
       status: 'error',
       message: err.message,

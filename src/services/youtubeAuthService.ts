@@ -35,8 +35,11 @@ export const callRefreshTokenFull = async (
     userEmail: string | null | undefined,
     clientId?: string,
 ): Promise<RefreshResult> => {
-    if (!SUPABASE_URL || !SUPABASE_ANON || !userEmail) {
-        return { accessToken: null, needsReconnect: false };
+    if (!SUPABASE_URL || !SUPABASE_ANON) {
+        return { accessToken: null, needsReconnect: false, errorMessage: 'Supabase não configurado: VITE_SUPABASE_URL ou VITE_SUPABASE_ANON_KEY ausente.' };
+    }
+    if (!userEmail) {
+        return { accessToken: null, needsReconnect: false, errorMessage: 'Usuário sem e-mail. Faça login novamente.' };
     }
     try {
         const res = await fetch(`${SUPABASE_URL}/functions/v1/refresh-token`, {
