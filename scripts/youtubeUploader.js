@@ -70,6 +70,7 @@ export async function uploadVideoFile(accessToken, videoPath, metadata) {
       'Content-Length': String(fileSize),
     },
     body: fileStream,
+    duplex: 'half',
   });
 
   const result = await uploadRes.json();

@@ -32,7 +32,7 @@ jobs:
         run: ffmpeg -version
 
       - name: Instalar dependências
-        run: npm install
+        run: npm ci
 
       - name: Executar pipeline de automação
         env:

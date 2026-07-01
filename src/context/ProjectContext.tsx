@@ -302,7 +302,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   };
 
   const triggerAutoPilotNow = async (projectId: string) => {
-    const project = projects.find(p => p.id === projectId);
+    const project = projectsRef.current.find(p => p.id === projectId);
     if (!project) return;
     if (isRunningAutomation.current) {
       setAutoPilotStatus("Já está em execução...");
@@ -322,10 +322,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
           );
           return;
         }
-        // refreshYouTubeToken already calls setAccessToken internally,
-        // so accessTokenRef will be updated via the useEffect sync.
-        // Give it one tick to propagate before proceeding.
-        await new Promise(r => setTimeout(r, 50));
+        accessTokenRef.current = freshToken;
       } catch {
         setAutoPilotStatus(
           "Auto-Pilot Pausado: não foi possível renovar o token. Reconecte o canal YouTube."
@@ -334,7 +331,8 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
     }
 
-    runFullPipeline(project);
+    const latestProject = projectsRef.current.find(p => p.id === projectId) || project;
+    runFullPipeline(latestProject);
   };
 
   // --- AUTO-PILOT ENGINE ---

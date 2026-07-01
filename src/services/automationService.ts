@@ -68,7 +68,8 @@ export async function stepGenerateIdea(
 
   // Generate new ideas — retry with fresh angles, then synthesize a fallback so autopilot never stalls
   callbacks.onProgress('idea', 'Nenhuma ideia disponível, gerando novas...');
-  const excludeList = project.videos.map(v => v.title);
+  const latestForIdeas = callbacks.getLatestProject(project.id) || project;
+  const excludeList = latestForIdeas.videos.map(v => v.title);
   const libraryContext = project.library?.map(item => `[${item.type?.toUpperCase() || 'INFO'}] ${item.title}: ${item.content}`).join('\n') || '';
 
   const FRESH_ANGLES = ['untold history', 'modern mystery', 'shocking facts', 'hidden truth', 'expert insights', 'controversial take'];
@@ -382,13 +383,10 @@ export async function stepUploadToYouTube(
   return ytbId;
 }
 
-async function resolveYoutubeAccessToken(callbacks: PipelineCallbacks): Promise<string> {
-  return (
-    await callbacks.refreshYoutubeAccessToken?.() ||
-    callbacks.getYoutubeAccessToken?.() ||
-    callbacks.youtubeAccessToken ||
-    ''
-  );
+async function resolveYoutubeAccessToken(callbacks: PipelineCallbacks): Promise<string | null> {
+  const current = callbacks.getYoutubeAccessToken?.() || callbacks.youtubeAccessToken || null;
+  if (current) return current;
+  return await callbacks.refreshYoutubeAccessToken?.() || null;
 }
 
 // --- FULL PIPELINE ORCHESTRATOR ---
@@ -540,7 +538,8 @@ export function calculateNextRunTime(settings: { frequencyDays: number; timeWind
 
   // If the calculated time is in the past, move to next eligible day
   if (nextDate <= now) {
-    nextDate.setDate(now.getDate() + 1);
+    nextDate = new Date(now);
+    nextDate.setDate(now.getDate() + Math.max(1, settings.frequencyDays || 1));
     const { h: newH, m: newM } = pickRandom();
     nextDate.setHours(newH, newM, 0, 0);
   }

@@ -9,26 +9,32 @@ import ffmpeg from 'fluent-ffmpeg';
 import fs from 'fs';
 import path from 'path';
 import { promisify } from 'util';
-import { pipeline } from 'stream';
+import { pipeline, Readable } from 'stream';
 
 const streamPipeline = promisify(pipeline);
 
 // ─── Download file with retries and validation ───────────────────────────────
 export async function downloadFile(url, destPath, retries = 3) {
   for (let attempt = 1; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 45000);
     try {
       const res = await fetch(url, {
         headers: { 'User-Agent': 'Mozilla/5.0' },
-        timeout: 30000,
+        signal: controller.signal,
       });
+      clearTimeout(timer);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      await streamPipeline(res.body, fs.createWriteStream(destPath));
+      const body = typeof res.body?.getReader === 'function' ? Readable.fromWeb(res.body) : res.body;
+      await streamPipeline(body, fs.createWriteStream(destPath));
 
       // Validate: file must be > 10KB to be a real video/image
       const stat = fs.statSync(destPath);
       if (stat.size < 10000) throw new Error(`File too small: ${stat.size} bytes`);
       return;
     } catch (err) {
+      clearTimeout(timer);
+      try { if (fs.existsSync(destPath)) fs.unlinkSync(destPath); } catch {}
       if (attempt === retries) throw err;
       await new Promise(r => setTimeout(r, 1000 * attempt));
     }
@@ -125,7 +131,6 @@ function concatenateWithCrossfade(clipPaths, outputPath, crossfadeDuration = 0.5
 
     // Build xfade filter chain for smooth transitions
     // xfade applies a crossfade between clips
-    const inputs = clipPaths.map(p => ffmpeg().input(p));
     const cmd = ffmpeg();
     clipPaths.forEach(p => cmd.input(p));
 
