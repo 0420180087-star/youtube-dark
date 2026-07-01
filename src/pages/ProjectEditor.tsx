@@ -575,6 +575,17 @@ export const ProjectEditor: React.FC = () => {
       } catch (e: any) { alert(e.message); } finally { setIsGeneratingVisuals(false); setGeneratingIndex(null); } 
   };
 
+  const fileFromRenderedBlob = (blob: Blob, title: string) => {
+      const blobType = blob.type || 'video/webm';
+      const isMP4 = blobType.includes('mp4');
+      const ext = isMP4 ? 'mp4' : 'webm';
+      const safeTitle = (title || 'video').replace(/[^a-z0-9]/gi, '_').toLowerCase();
+      return {
+          file: new File([blob], `${title || 'video'}.${ext}`, { type: blobType }),
+          downloadName: `${safeTitle}.${ext}`,
+      };
+  };
+
   // --- RENDER & DOWNLOAD ---
   // This is the single entry point for all render operations in this component.
   // It delegates entirely to renderService.ts — there is no second render engine here.
@@ -598,12 +609,13 @@ export const ProjectEditor: React.FC = () => {
           const url = URL.createObjectURL(blob);
           setGeneratedVideoBlob(blob);
           setGeneratedVideoUrl(url);
-          setVideoFile(new File([blob], `${video.title}.webm`, { type: 'video/webm' }));
+          const renderedFile = fileFromRenderedBlob(blob, video.title);
+          setVideoFile(renderedFile.file);
 
           if (autoDownload) {
               const a = document.createElement('a');
               a.href = url;
-              a.download = `${video.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.webm`;
+              a.download = renderedFile.downloadName;
               a.click();
           }
 
@@ -645,7 +657,7 @@ export const ProjectEditor: React.FC = () => {
       
       let fileToUpload = videoFile;
       if (!fileToUpload && generatedVideoBlob) {
-          fileToUpload = new File([generatedVideoBlob], `${video.title || 'video'}.webm`, { type: 'video/webm' });
+          fileToUpload = fileFromRenderedBlob(generatedVideoBlob, video.title || 'video').file;
       }
 
       // If no file, trigger render automatically.
@@ -658,7 +670,7 @@ export const ProjectEditor: React.FC = () => {
           try {
               const blob = await handleRenderAndDownload(false);
               if (blob) {
-                  fileToUpload = new File([blob], `${video.title || 'video'}.webm`, { type: 'video/webm' });
+                  fileToUpload = fileFromRenderedBlob(blob, video.title || 'video').file;
               }
           } catch (renderErr: any) {
               setIsUploading(false);

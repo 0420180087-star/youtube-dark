@@ -56,7 +56,7 @@ serve(async (req) => {
 
     const tokens = await tokenRes.json()
 
-    if (!tokens.access_token || !tokens.refresh_token) {
+    if (!tokens.access_token) {
       console.error('Token exchange failed:', tokens)
       return new Response(
         JSON.stringify({ error: tokens.error_description || 'Falha na troca de tokens' }),
@@ -72,11 +72,26 @@ serve(async (req) => {
 
     const expiresAt = new Date(Date.now() + (tokens.expires_in || 3600) * 1000).toISOString()
 
+    const existing = await supabaseAdmin
+      .from('project_auth')
+      .select('youtube_refresh_token')
+      .eq('project_id', project_id)
+      .eq('user_email', user_email)
+      .maybeSingle()
+
+    const refreshTokenToStore = tokens.refresh_token || existing.data?.youtube_refresh_token
+    if (!refreshTokenToStore) {
+      return new Response(
+        JSON.stringify({ error: 'Google não retornou refresh_token. Remova o acesso do app na conta Google e conecte novamente com consentimento offline.' }),
+        { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } }
+      )
+    }
+
     await supabaseAdmin.from('project_auth').upsert({
       project_id,
       user_email,
       youtube_access_token: tokens.access_token,
-      youtube_refresh_token: tokens.refresh_token,
+      youtube_refresh_token: refreshTokenToStore,
       token_expires_at: expiresAt,
       updated_at: new Date().toISOString(),
     }, { onConflict: 'project_id,user_email' })
