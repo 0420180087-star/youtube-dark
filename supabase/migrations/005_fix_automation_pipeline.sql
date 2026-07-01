@@ -67,6 +67,7 @@ $$;
 -- user_email/project_id filters; Supabase Auth JWT claims are not available here.
 drop policy if exists "user_profiles: own row" on user_profiles;
 drop policy if exists "user_profiles: own row only" on user_profiles;
+drop policy if exists "user_profiles: app managed rows" on user_profiles;
 create policy "user_profiles: app managed rows"
   on user_profiles
   for all
@@ -75,6 +76,7 @@ create policy "user_profiles: app managed rows"
 
 drop policy if exists "projects: own rows" on projects;
 drop policy if exists "projects: own row only" on projects;
+drop policy if exists "projects: app managed rows" on projects;
 create policy "projects: app managed rows"
   on projects
   for all
@@ -83,6 +85,7 @@ create policy "projects: app managed rows"
 
 drop policy if exists "project_auth: own rows" on project_auth;
 drop policy if exists "project_auth: own rows only" on project_auth;
+drop policy if exists "project_auth: app managed rows" on project_auth;
 create policy "project_auth: app managed rows"
   on project_auth
   for all
@@ -91,6 +94,7 @@ create policy "project_auth: app managed rows"
 
 drop policy if exists "autopilot_logs: own project logs" on autopilot_logs;
 drop policy if exists "autopilot_logs: own projects only" on autopilot_logs;
+drop policy if exists "autopilot_logs: app managed rows" on autopilot_logs;
 create policy "autopilot_logs: app managed rows"
   on autopilot_logs
   for all
@@ -106,6 +110,7 @@ create policy "autopilot_logs: app managed rows"
 -- Treat the anon key as public and keep the table private at the project level.
 drop policy if exists "user_settings: own row only" on user_settings;
 drop policy if exists "user_settings: own row" on user_settings;
+drop policy if exists "user_settings: app managed rows" on user_settings;
 create policy "user_settings: app managed rows"
   on user_settings
   for all
