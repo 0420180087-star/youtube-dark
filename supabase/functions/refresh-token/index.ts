@@ -49,24 +49,31 @@ serve(async (req) => {
 
     let data: any = null
 
+    const selectAuthRow = async (scopedProjectId?: string) => {
+      const baseSelect = 'project_id, user_email, youtube_refresh_token, youtube_access_token, token_expires_at, youtube_channel_id, youtube_channel_title'
+      let query = supabaseAdmin.from('project_auth').select(baseSelect).eq('user_email', user_email)
+      if (scopedProjectId) query = query.eq('project_id', scopedProjectId)
+      else query = query.not('youtube_refresh_token', 'is', null).order('updated_at', { ascending: false }).limit(1)
+      let result = await query.maybeSingle()
+
+      if (result.error && (result.error.message || '').includes('youtube_channel')) {
+        let legacy = supabaseAdmin
+          .from('project_auth')
+          .select('project_id, user_email, youtube_refresh_token, youtube_access_token, token_expires_at')
+          .eq('user_email', user_email)
+        if (scopedProjectId) legacy = legacy.eq('project_id', scopedProjectId)
+        else legacy = legacy.not('youtube_refresh_token', 'is', null).order('updated_at', { ascending: false }).limit(1)
+        result = await legacy.maybeSingle()
+      }
+
+      if (result.error) throw result.error
+      return result.data
+    }
+
     if (project_id && project_id !== 'default') {
-      const result = await supabaseAdmin
-        .from('project_auth')
-        .select('project_id, user_email, youtube_refresh_token, youtube_access_token, token_expires_at, youtube_channel_id, youtube_channel_title')
-        .eq('project_id', project_id)
-        .eq('user_email', user_email)
-        .maybeSingle()
-      data = result.data
+      data = await selectAuthRow(project_id)
     } else {
-      const result = await supabaseAdmin
-        .from('project_auth')
-        .select('project_id, user_email, youtube_refresh_token, youtube_access_token, token_expires_at, youtube_channel_id, youtube_channel_title')
-        .eq('user_email', user_email)
-        .not('youtube_refresh_token', 'is', null)
-        .order('updated_at', { ascending: false })
-        .limit(1)
-        .maybeSingle()
-      data = result.data
+      data = await selectAuthRow()
     }
 
     if (!data?.youtube_refresh_token) {
