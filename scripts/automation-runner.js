@@ -827,10 +827,11 @@ async function safeInsertAutopilotLog(payload) {
     const { error } = await supabase.from('autopilot_logs').insert(payload);
     if (!error) return;
     // Older databases may not have the new columns yet; keep logging non-fatal.
-    if ((error.message || '').includes('video_title') || (error.message || '').includes('elapsed_ms')) {
+    if ((error.message || '').includes('video_title') || (error.message || '').includes('elapsed_ms') || (error.message || '').includes('runner')) {
       const fallback = { ...payload };
       delete fallback.video_title;
       delete fallback.elapsed_ms;
+      delete fallback.runner;
       const retry = await supabase.from('autopilot_logs').insert(fallback);
       if (retry.error) log('⚠️', `Failed to write autopilot log: ${retry.error.message}`);
       return;
@@ -973,6 +974,7 @@ async function processProject(projectRow) {
       step: 'upload',
       video_title: metadata.title || idea.topic,
       elapsed_ms: duration * 1000,
+      runner: 'github-actions',
     });
 
     log('🎉', `Project complete! Duration: ${duration}s. Next run: ${nextRun.toISOString()}`);
@@ -996,6 +998,7 @@ async function processProject(projectRow) {
       message: err.message,
       step: currentStep,
       elapsed_ms: duration * 1000,
+      runner: 'github-actions',
     });
 
     return false;
