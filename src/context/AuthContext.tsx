@@ -205,16 +205,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       }
 
-      // Após login: garante que existe refresh_token salvo no Supabase.
-      // Se não houver (primeiro login ou revogado), dispara o OAuth offline
-      // para que o exchange-code salve o refresh_token em project_auth.
+      // Após login: restaura um token existente se houver. Não disparamos OAuth
+      // "default" automaticamente porque uploads são isolados por projeto/canal.
+      // O usuário deve conectar o YouTube na aba Settings do projeto.
       try {
         const check = await callRefreshTokenFull('', profile.email, googleClientId || undefined);
         if (check.accessToken) {
           await persistAccessToken(check.accessToken);
-        } else {
-          console.log('[Auth] Sem refresh_token — disparando OAuth offline');
-          await triggerYoutubeOAuth('default', profile.email);
         }
       } catch (e) {
         console.warn('[Auth] Verificação pós-login falhou:', e);
