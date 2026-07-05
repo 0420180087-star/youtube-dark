@@ -37,8 +37,12 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
 
       - name: Apply automation reliability SQL
-        if: ${{ secrets.SUPABASE_DB_URL != '' }}
-        run: psql "$SUPABASE_DB_URL" -f supabase/automation_reliability.sql
+        run: |
+          if [ -n "$SUPABASE_DB_URL" ] && command -v psql >/dev/null 2>&1; then
+            psql "$SUPABASE_DB_URL" -f supabase/automation_reliability.sql
+          else
+            echo "Skipping automation reliability SQL (SUPABASE_DB_URL or psql unavailable)."
+          fi
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
 
