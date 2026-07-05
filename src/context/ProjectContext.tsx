@@ -346,7 +346,6 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       
       const eligibleProject = projectsRef.current.find(p => {
         if (!p.scheduleSettings?.autoGenerate) return false;
-        if (!p.isYoutubeConnected && !p.youtubeChannelData) return false;
         return getNextAutoRunInfoFromRef(p).isEligible;
       });
 
@@ -406,12 +405,12 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     let runnableProject = project;
     let currentToken = accessTokenRef.current;
-    if (!currentToken && (project.youtubeChannelData || project.isYoutubeConnected)) {
+    if (!currentToken) {
       setAutoPilotStatus('Renovando sessão do YouTube...');
       currentToken = await refreshYouTubeToken(project.id);
       accessTokenRef.current = currentToken;
     }
-    if (currentToken && !runnableProject.youtubeChannelData && runnableProject.isYoutubeConnected) {
+    if (currentToken && !runnableProject.youtubeChannelData) {
       runnableProject = await repairYouTubeConnection(runnableProject, currentToken);
     }
     if (!currentToken || !runnableProject.youtubeChannelData) {
