@@ -5,7 +5,7 @@ const getCorsHeaders = (req: Request) => {
   const allowed = Deno.env.get('ALLOWED_ORIGIN') ?? ''
   const allowOrigin = !allowed || allowed === '*' ? '*'
     : origin === allowed ? origin
-    : allowed
+    : 'null'
 
   return {
     'Access-Control-Allow-Origin': allowOrigin,
@@ -32,8 +32,8 @@ serve(async (req) => {
       )
     }
 
-    const client_id = body.client_id || Deno.env.get('GOOGLE_CLIENT_ID')
-    const client_secret = body.client_secret || Deno.env.get('YOUTUBE_CLIENT_SECRET') || Deno.env.get('GOOGLE_CLIENT_SECRET')
+    const client_id = Deno.env.get('GOOGLE_CLIENT_ID') || body.client_id
+    const client_secret = Deno.env.get('YOUTUBE_CLIENT_SECRET') || Deno.env.get('GOOGLE_CLIENT_SECRET')
 
     if (!client_id || !client_secret) {
       return new Response(
@@ -92,6 +92,7 @@ serve(async (req) => {
       user_email,
       youtube_access_token: tokens.access_token,
       youtube_refresh_token: refreshTokenToStore,
+      oauth_client_id: client_id,
       token_expires_at: expiresAt,
       updated_at: new Date().toISOString(),
     }, { onConflict: 'project_id,user_email' })
