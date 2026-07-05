@@ -32,6 +32,7 @@ interface AuthContextType {
   disconnectYoutube: () => void;
   refreshYouTubeToken: (projectId?: string) => Promise<string | null>;
   setYoutubeToken: (token: string) => Promise<void>;
+  setYoutubeChannelData: (channel: YouTubeChannel | null) => Promise<void>;
   clearReconnectFlag: () => void;
 }
 
@@ -315,6 +316,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     await persistAccessToken(token);
   };
 
+  const setYoutubeChannelData = async (channel: YouTubeChannel | null) => {
+    setYoutubeChannel(channel);
+    if (channel?.id) {
+      await saveEncryptedJSON('ds_youtube_channel', channel);
+    } else {
+      localStorage.removeItem('ds_youtube_channel');
+    }
+  };
+
   const clearReconnectFlag = () => {
     setNeedsYoutubeReconnect(false);
     localStorage.removeItem(NEEDS_RECONNECT_KEY);
@@ -325,7 +335,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       user, isLoading, googleClientId, youtubeChannel, accessToken,
       needsYoutubeReconnect,
       setGoogleClientId, login, logout, connectYoutube, disconnectYoutube,
-      refreshYouTubeToken, setYoutubeToken, clearReconnectFlag,
+      refreshYouTubeToken, setYoutubeToken, setYoutubeChannelData, clearReconnectFlag,
     }}>
       {children}
     </AuthContext.Provider>
