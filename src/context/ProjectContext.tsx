@@ -429,7 +429,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       try {
         const { data: lockAcquired, error } = await supabase
           .rpc('acquire_autopilot_lock', {
-            p_project_id: project.id,
+            p_project_id: runnableProject.id,
             p_locked_by: 'browser',
             p_lock_minutes: 90,
           });
@@ -532,7 +532,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       // ALWAYS release, even on crash — without this the bot freezes until reload
       if (supabase) {
         try {
-          await supabase.rpc('release_autopilot_lock', { p_project_id: project.id });
+          await supabase.rpc('release_autopilot_lock', { p_project_id: runnableProject.id });
         } catch (e) {
           console.warn('[AutoPilot] Não foi possível liberar o lock distribuído:', e);
         }
