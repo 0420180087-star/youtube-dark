@@ -106,7 +106,7 @@ serve(async (req) => {
       console.warn('Could not fetch YouTube channel metadata:', e)
     }
 
-    await supabaseAdmin.from('project_auth').upsert({
+    const authPayload = {
       project_id,
       user_email,
       youtube_channel_id: channel?.id || null,
@@ -116,7 +116,27 @@ serve(async (req) => {
       oauth_client_id: client_id,
       token_expires_at: expiresAt,
       updated_at: new Date().toISOString(),
-    }, { onConflict: 'project_id,user_email' })
+    }
+
+    const upsertResult = await supabaseAdmin
+      .from('project_auth')
+      .upsert(authPayload, { onConflict: 'project_id,user_email' })
+
+    if (upsertResult.error) {
+      const msg = upsertResult.error.message || ''
+      if (msg.includes('youtube_channel_id') || msg.includes('youtube_channel_title') || msg.includes('oauth_client_id')) {
+        await supabaseAdmin.from('project_auth').upsert({
+          project_id,
+          user_email,
+          youtube_access_token: tokens.access_token,
+          youtube_refresh_token: refreshTokenToStore,
+          token_expires_at: expiresAt,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'project_id,user_email' })
+      } else {
+        throw upsertResult.error
+      }
+    }
 
     return new Response(
       JSON.stringify({ access_token: tokens.access_token, expires_at: expiresAt, channel }),
