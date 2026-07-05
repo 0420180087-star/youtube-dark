@@ -447,8 +447,9 @@ export async function runAutomationPipeline(
   try {
     musicUrl = await stepGenerateStudio(project, video!, script, callbacks);
   } catch (e: any) {
-    markStandby(project.id, video!.id, 'studio', e.message, callbacks);
-    return { success: false, videoId: video!.id, videoTitle: video!.title, failedStep: 'studio', errorMessage: e.message };
+    console.warn('Ambience generation failed, continuing without background music:', e.message);
+    callbacks.onProgress('studio', 'Ambiência indisponível, continuando sem música de fundo...');
+    musicUrl = '';
   }
 
   // Step 6: Thumbnail
