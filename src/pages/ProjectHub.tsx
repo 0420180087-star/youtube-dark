@@ -325,7 +325,8 @@ export const ProjectHub: React.FC = () => {
                 frequencyDays: Number(editFreq),
                 timeWindowStart: editTimeStart,
                 timeWindowEnd: editTimeEnd,
-                autoGenerate: editAutoGenerate
+                autoGenerate: editAutoGenerate,
+                nextScheduledRun: project.scheduleSettings?.nextScheduledRun
             }
         };
         updateProject(project.id, updates);
