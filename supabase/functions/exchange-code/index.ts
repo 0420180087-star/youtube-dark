@@ -87,9 +87,30 @@ serve(async (req) => {
       )
     }
 
+    let channel: any = null
+    try {
+      const chRes = await fetch('https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&mine=true', {
+        headers: { Authorization: `Bearer ${tokens.access_token}` },
+      })
+      const chData = await chRes.json()
+      const ch = chData.items?.[0]
+      if (ch?.id) {
+        channel = {
+          id: ch.id,
+          title: ch.snippet?.title || '',
+          thumbnailUrl: ch.snippet?.thumbnails?.default?.url || '',
+          subscriberCount: ch.statistics?.subscriberCount || '',
+        }
+      }
+    } catch (e) {
+      console.warn('Could not fetch YouTube channel metadata:', e)
+    }
+
     await supabaseAdmin.from('project_auth').upsert({
       project_id,
       user_email,
+      youtube_channel_id: channel?.id || null,
+      youtube_channel_title: channel?.title || null,
       youtube_access_token: tokens.access_token,
       youtube_refresh_token: refreshTokenToStore,
       oauth_client_id: client_id,
@@ -98,7 +119,7 @@ serve(async (req) => {
     }, { onConflict: 'project_id,user_email' })
 
     return new Response(
-      JSON.stringify({ access_token: tokens.access_token, expires_at: expiresAt }),
+      JSON.stringify({ access_token: tokens.access_token, expires_at: expiresAt, channel }),
       { headers: { ...CORS, 'Content-Type': 'application/json' } }
     )
 
