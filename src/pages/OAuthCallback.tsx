@@ -28,7 +28,7 @@ import { Loader2, CheckCircle, XCircle } from 'lucide-react';
  */
 export const OAuthCallback: React.FC = () => {
   const navigate = useNavigate();
-  const { setYoutubeToken } = useAuth();
+  const { setYoutubeToken, setYoutubeChannelData } = useAuth();
   const { updateProject } = useProjects();
 
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
@@ -179,24 +179,28 @@ export const OAuthCallback: React.FC = () => {
         await setYoutubeToken(data.access_token);
         setMessage('Token salvo. Buscando dados do canal...');
 
-        // Fetch channel data
-        const chRes = await fetch(
-          'https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&mine=true',
-          { headers: { Authorization: `Bearer ${data.access_token}` } }
-        );
+        let channelData = data.channel;
+        if (!channelData?.id) {
+          const chRes = await fetch(
+            'https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&mine=true',
+            { headers: { Authorization: `Bearer ${data.access_token}` } }
+          );
 
-        if (!chRes.ok) throw new Error('Falha ao buscar dados do canal YouTube.');
+          if (!chRes.ok) throw new Error('Falha ao buscar dados do canal YouTube.');
 
-        const chData = await chRes.json();
-        const ch = chData.items?.[0];
-        if (!ch) throw new Error('Nenhum canal YouTube encontrado nesta conta.');
+          const chData = await chRes.json();
+          const ch = chData.items?.[0];
+          if (!ch) throw new Error('Nenhum canal YouTube encontrado nesta conta.');
 
-        const channelData = {
-          id: ch.id,
-          title: ch.snippet.title,
-          thumbnailUrl: ch.snippet.thumbnails?.default?.url || '',
-          subscriberCount: ch.statistics?.subscriberCount,
-        };
+          channelData = {
+            id: ch.id,
+            title: ch.snippet.title,
+            thumbnailUrl: ch.snippet.thumbnails?.default?.url || '',
+            subscriberCount: ch.statistics?.subscriberCount,
+          };
+        }
+
+        await setYoutubeChannelData(channelData);
 
         // Save channel metadata into the target project
         // The projectId was saved to sessionStorage before the redirect
@@ -212,7 +216,7 @@ export const OAuthCallback: React.FC = () => {
         }
 
         setStatus('success');
-        setMessage(`Canal "${ch.snippet.title}" conectado com sucesso!`);
+        setMessage(`Canal "${channelData.title}" conectado com sucesso!`);
 
         // Redirect back to the project (or home if no project)
         const redirectTo = targetProjectId && targetProjectId !== 'default'

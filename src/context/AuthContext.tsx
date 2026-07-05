@@ -32,6 +32,7 @@ interface AuthContextType {
   disconnectYoutube: () => void;
   refreshYouTubeToken: (projectId?: string) => Promise<string | null>;
   setYoutubeToken: (token: string) => Promise<void>;
+  setYoutubeChannelData: (channel: YouTubeChannel | null) => Promise<void>;
   clearReconnectFlag: () => void;
 }
 
@@ -46,6 +47,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [needsYoutubeReconnect, setNeedsYoutubeReconnect] = useState(
     () => localStorage.getItem(NEEDS_RECONNECT_KEY) === '1'
   );
+  const configuredGoogleClientId = (import.meta.env.VITE_GOOGLE_CLIENT_ID || '').trim();
 
   const persistAccessToken = async (token: string) => {
     setAccessToken(token);
@@ -61,7 +63,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     const initAuth = async () => {
       try {
-        const clientId = await loadEncryptedString('ds_google_client_id');
+        const clientId = configuredGoogleClientId || await loadEncryptedString('ds_google_client_id');
         if (clientId) setGoogleClientIdState(clientId);
 
         const profile = await loadEncryptedJSON<UserProfile>('ds_user_profile');
@@ -122,6 +124,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const setGoogleClientId = async (id: string) => {
+    if (configuredGoogleClientId) {
+      setGoogleClientIdState(configuredGoogleClientId);
+      return;
+    }
     const cleanId = id.trim();
     await saveEncryptedString('ds_google_client_id', cleanId);
     setGoogleClientIdState(cleanId);
@@ -204,16 +210,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       }
 
-      // Após login: garante que existe refresh_token salvo no Supabase.
-      // Se não houver (primeiro login ou revogado), dispara o OAuth offline
-      // para que o exchange-code salve o refresh_token em project_auth.
+      // Após login: restaura um token existente se houver. Não disparamos OAuth
+      // "default" automaticamente porque uploads são isolados por projeto/canal.
+      // O usuário deve conectar o YouTube na aba Settings do projeto.
       try {
         const check = await callRefreshTokenFull('', profile.email, googleClientId || undefined);
         if (check.accessToken) {
           await persistAccessToken(check.accessToken);
-        } else {
-          console.log('[Auth] Sem refresh_token — disparando OAuth offline');
-          await triggerYoutubeOAuth('default', profile.email);
         }
       } catch (e) {
         console.warn('[Auth] Verificação pós-login falhou:', e);
@@ -315,6 +318,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     await persistAccessToken(token);
   };
 
+  const setYoutubeChannelData = async (channel: YouTubeChannel | null) => {
+    setYoutubeChannel(channel);
+    if (channel?.id) {
+      await saveEncryptedJSON('ds_youtube_channel', channel);
+    } else {
+      localStorage.removeItem('ds_youtube_channel');
+    }
+  };
+
   const clearReconnectFlag = () => {
     setNeedsYoutubeReconnect(false);
     localStorage.removeItem(NEEDS_RECONNECT_KEY);
@@ -325,7 +337,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       user, isLoading, googleClientId, youtubeChannel, accessToken,
       needsYoutubeReconnect,
       setGoogleClientId, login, logout, connectYoutube, disconnectYoutube,
-      refreshYouTubeToken, setYoutubeToken, clearReconnectFlag,
+      refreshYouTubeToken, setYoutubeToken, setYoutubeChannelData, clearReconnectFlag,
     }}>
       {children}
     </AuthContext.Provider>

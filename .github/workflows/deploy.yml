@@ -36,12 +36,23 @@ jobs:
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
 
+      - name: Apply automation reliability SQL
+        run: |
+          if [ -n "$SUPABASE_DB_URL" ] && command -v psql >/dev/null 2>&1; then
+            psql "$SUPABASE_DB_URL" -f supabase/automation_reliability.sql
+          else
+            echo "Skipping automation reliability SQL (SUPABASE_DB_URL or psql unavailable)."
+          fi
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+
       - name: Set Edge Function secrets
         run: |
           supabase secrets set \
             GOOGLE_CLIENT_ID=${{ secrets.VITE_GOOGLE_CLIENT_ID }} \
+            YOUTUBE_CLIENT_SECRET=${{ secrets.YOUTUBE_CLIENT_SECRET }} \
             GOOGLE_CLIENT_SECRET=${{ secrets.YOUTUBE_CLIENT_SECRET }} \
-            ALLOWED_ORIGIN=https://0420180087-star.github.io
+            ALLOWED_ORIGIN=${{ secrets.ALLOWED_ORIGIN || 'https://0420180087-star.github.io' }}
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
 
@@ -74,11 +85,11 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Instalar dependências
-        run: npm install
+        run: npm ci
 
       - name: Build
         env:

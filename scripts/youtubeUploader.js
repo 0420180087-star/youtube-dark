@@ -5,7 +5,6 @@
 
 // fetch é nativo no Node 18+ — node-fetch removido
 import fs from 'fs';
-import FormData from 'form-data';
 
 // Renova o access token usando o refresh token
 export async function refreshAccessToken(clientId, clientSecret, refreshToken) {
@@ -84,18 +83,30 @@ export async function uploadVideoFile(accessToken, videoPath, metadata) {
 export async function uploadThumbnail(accessToken, videoId, thumbnailBase64) {
   if (!thumbnailBase64) return;
   try {
-    const buffer = Buffer.from(thumbnailBase64, 'base64');
-    const form = new FormData();
-    form.append('image', buffer, { filename: 'thumbnail.jpg', contentType: 'image/jpeg' });
+    const cleanBase64 = thumbnailBase64.includes(',')
+      ? thumbnailBase64.split(',').pop()
+      : thumbnailBase64;
+    const buffer = Buffer.from(cleanBase64, 'base64');
 
-    await fetch(
-      `https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=${videoId}`,
+    const res = await fetch(
+      `https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=${videoId}&uploadType=media`,
       {
         method: 'POST',
-        headers: { Authorization: `Bearer ${accessToken}`, ...form.getHeaders() },
-        body: form,
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'image/jpeg',
+          'Content-Length': String(buffer.length),
+        },
+        body: buffer,
       }
     );
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      console.warn(`  ⚠️ Thumbnail upload falhou: HTTP ${res.status} ${text.slice(0, 300)}`);
+      return;
+    }
+
     console.log('  🖼️ Thumbnail do YouTube atualizada');
   } catch (err) {
     console.warn('  ⚠️ Thumbnail upload falhou:', err.message);

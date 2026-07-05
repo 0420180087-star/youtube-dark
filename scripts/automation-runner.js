@@ -25,10 +25,13 @@ const {
   SUPABASE_SERVICE_KEY,
   GEMINI_API_KEY: ENV_GEMINI_API_KEY,
   PEXELS_API_KEY: ENV_PEXELS_API_KEY,
-  YOUTUBE_CLIENT_ID,
+  YOUTUBE_CLIENT_ID: ENV_YOUTUBE_CLIENT_ID,
+  GOOGLE_CLIENT_ID,
   YOUTUBE_CLIENT_SECRET,
   PROJECT_ID,
 } = process.env;
+
+const YOUTUBE_CLIENT_ID = ENV_YOUTUBE_CLIENT_ID || GOOGLE_CLIENT_ID;
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   console.error('❌ Missing required environment variables (SUPABASE_URL, SUPABASE_SERVICE_KEY)');
@@ -83,6 +86,58 @@ async function loadUserKeys(userEmail) {
 
 function log(emoji, msg) {
   console.log(`${emoji} [${new Date().toISOString()}] ${msg}`);
+}
+
+function makeProjectIdea(raw, status = 'new') {
+  return {
+    id: `idea_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    topic: String(raw?.topic || '').trim(),
+    context: String(raw?.context || '').trim(),
+    specificContext: String(raw?.specificContext || raw?.context || '').trim(),
+    status,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function normalizeIdeaBatch(raw) {
+  const list = Array.isArray(raw) ? raw : Array.isArray(raw?.ideas) ? raw.ideas : raw ? [raw] : [];
+  return list
+    .map((i) => makeProjectIdea(i, 'new'))
+    .filter((i) => i.topic.length > 0);
+}
+
+function runFfmpeg(args, label = 'ffmpeg') {
+  return new Promise((resolve, reject) => {
+    const p = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    p.stderr.on('data', (d) => { stderr += d.toString(); });
+    p.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${label} exit ${code}: ${stderr.slice(-500)}`));
+    });
+  });
+}
+
+async function normalizeAudioChunkToPcm(audioBuffer, mimeType, tmpDir, index) {
+  const inputPath = path.join(tmpDir, `tts_${index}`);
+  const outputPath = path.join(tmpDir, `tts_${index}.pcm`);
+  fs.writeFileSync(inputPath, audioBuffer);
+  const isRawPcm = !mimeType || mimeType.includes('pcm') || mimeType.includes('L16');
+
+  if (isRawPcm) {
+    return audioBuffer;
+  }
+
+  await runFfmpeg([
+    '-y',
+    '-i', inputPath,
+    '-f', 's16le',
+    '-ar', '24000',
+    '-ac', '1',
+    outputPath,
+  ], `normalize tts ${index}`);
+
+  return fs.readFileSync(outputPath);
 }
 
 async function geminiGenerate(prompt, maxTokens = 4096) {
@@ -380,31 +435,43 @@ async function stepIdea(projectData) {
     return { topic: unused.topic, context: unused.context, specificContext: unused.specificContext, updatedIdeas: ideas };
   }
 
-  log('🔄', 'No unused ideas, generating new one...');
-  const prompt = `You are a YouTube content strategist. Generate 1 unique video idea for a channel about "${projectData.channelTheme}".
+  log('🔄', 'No unused ideas, generating new brainstorm batch...');
+  const usedTopics = [
+    ...(projectData.ideas || []).map((i) => i.topic),
+    ...(projectData.videos || []).map((v) => v.title),
+  ].filter(Boolean).slice(-50);
+  const prompt = `You are a YouTube content strategist. Generate 5 unique video ideas for a channel about "${projectData.channelTheme}".
 Tone: ${projectData.defaultTone || 'Engaging'}.
 Language: ${projectData.language || 'en'}.
+Avoid these already-used topics: ${usedTopics.join(' | ') || 'none'}.
 
-Return JSON: { "topic": "video title", "context": "brief description", "specificContext": "detailed angle" }`;
+Return JSON: { "ideas": [{ "topic": "video title", "context": "brief description", "specificContext": "detailed angle" }] }`;
 
-  let idea;
+  let generatedIdeas = [];
   try {
-    idea = await geminiGenerateJSON(prompt);
-    if (!idea || !idea.topic) throw new Error('AI returned no topic');
+    generatedIdeas = normalizeIdeaBatch(await geminiGenerateJSON(prompt));
+    if (!generatedIdeas.length) throw new Error('AI returned no ideas');
   } catch (e) {
     // Fallback: never block autopilot just because brainstorm failed
     log('⚠️', `Brainstorm fallback (IA falhou: ${e.message}). Gerando ideia automática.`);
     const seeds = ['The Untold Story of', 'The Hidden Truth Behind', 'What Nobody Tells You About', 'Why Everyone is Wrong About'];
-    const seed = seeds[Math.floor(Math.random() * seeds.length)];
-    idea = {
+    generatedIdeas = seeds.slice(0, 3).map((seed) => makeProjectIdea({
       topic: `${seed} ${projectData.channelTheme}`,
       context: `An engaging deep-dive about ${projectData.channelTheme}.`,
       specificContext: `Explore ${projectData.channelTheme} from a fresh, click-worthy angle. ${projectData.description || ''}`.trim(),
-    };
+    }, 'new'));
   }
 
-  log('✅', `Generated idea: "${idea.topic}"`);
-  return { topic: idea.topic, context: idea.context, specificContext: idea.specificContext, updatedIdeas: ideas };
+  const existingTopics = new Set(ideas.map((i) => i.topic));
+  const freshIdeas = generatedIdeas.filter((i) => !existingTopics.has(i.topic));
+  const chosen = freshIdeas[0] || generatedIdeas[0];
+  const updatedIdeas = [
+    ...ideas,
+    ...freshIdeas.map((i, idx) => ({ ...i, status: i.topic === chosen.topic && idx === 0 ? 'used' : 'new' })),
+  ];
+
+  log('✅', `Generated brainstorm batch (${freshIdeas.length}) and selected: "${chosen.topic}"`);
+  return { topic: chosen.topic, context: chosen.context, specificContext: chosen.specificContext, updatedIdeas };
 }
 
 async function stepScript(topic, projectData) {
@@ -459,48 +526,50 @@ async function stepVoice(script, projectData) {
   if (segments.length === 0) throw new Error('No segments in script for TTS');
 
   const audioChunks = [];
-  let firstMimeType = 'audio/pcm';
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'autopost_tts_'));
 
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i];
-    const text = seg.narratorText;
-    if (!text || !text.trim()) {
-      log('⚠️', `  Segment ${i + 1} has no text, skipping`);
-      continue;
+  try {
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const text = seg.narratorText;
+      if (!text || !text.trim()) {
+        log('⚠️', `  Segment ${i + 1} has no text, skipping`);
+        continue;
+      }
+
+      log('🎤', `  Generating TTS for segment ${i + 1}/${segments.length} (${text.length} chars)...`);
+
+      const ttsResult = await geminiWithRetry(() =>
+        geminiTTS(text, projectData.defaultVoice || 'Fenrir', projectData.defaultTone || 'Cinematic')
+      );
+
+      // ttsResult pode ser { data, mimeType } ou string (compatibilidade)
+      const audioData = typeof ttsResult === 'string' ? ttsResult : ttsResult.data;
+      const mimeType = typeof ttsResult === 'string' ? 'audio/pcm' : (ttsResult.mimeType || 'audio/pcm');
+
+      const normalizedPcm = await normalizeAudioChunkToPcm(Buffer.from(audioData, 'base64'), mimeType, tmpDir, i);
+      audioChunks.push(normalizedPcm);
+
+      // Small delay between segments to avoid rate limits
+      if (i < segments.length - 1) {
+        const silence = Buffer.alloc(Math.floor(24000 * 2 * 0.35));
+        audioChunks.push(silence);
+        await new Promise(r => setTimeout(r, 2000));
+      }
     }
 
-    log('🎤', `  Generating TTS for segment ${i + 1}/${segments.length} (${text.length} chars)...`);
+    if (audioChunks.length === 0) throw new Error('No audio generated for any segment');
 
-    const ttsResult = await geminiWithRetry(() =>
-      geminiTTS(text, projectData.defaultVoice || 'Fenrir', projectData.defaultTone || 'Cinematic')
-    );
+    // Concatenate normalized raw PCM buffers into one renderable stream.
+    const combined = Buffer.concat(audioChunks);
+    const combinedBase64 = combined.toString('base64');
+    const mimeType = 'audio/pcm';
 
-    // ttsResult pode ser { data, mimeType } ou string (compatibilidade)
-    const audioData = typeof ttsResult === 'string' ? ttsResult : ttsResult.data;
-    const mimeType = typeof ttsResult === 'string' ? 'audio/pcm' : (ttsResult.mimeType || 'audio/pcm');
-
-    if (audioChunks.length === 0) {
-      // Guarda o mimeType do primeiro chunk real para passar ao renderer
-      firstMimeType = mimeType;
-    }
-
-    audioChunks.push(Buffer.from(audioData, 'base64'));
-
-    // Small delay between segments to avoid rate limits
-    if (i < segments.length - 1) {
-      await new Promise(r => setTimeout(r, 2000));
-    }
+    log('✅', `Voice generated: ${(segments.length)} segments, ${(combined.length / 1024 / 1024).toFixed(1)}MB total, normalized=${mimeType}`);
+    return { audioBase64: combinedBase64, mimeType };
+  } finally {
+    try { cleanupTmp(tmpDir); } catch {}
   }
-
-  if (audioChunks.length === 0) throw new Error('No audio generated for any segment');
-
-  // Concatenate all audio buffers into one
-  const combined = Buffer.concat(audioChunks);
-  const combinedBase64 = combined.toString('base64');
-  const mimeType = firstMimeType;
-
-  log('✅', `Voice generated: ${audioChunks.length} segments, ${(combined.length / 1024 / 1024).toFixed(1)}MB total, mimeType=${mimeType}`);
-  return { audioBase64: combinedBase64, mimeType };
 }
 
 async function stepVisuals(script, projectData) {
@@ -669,49 +738,25 @@ async function stepUploadYouTube(projectData, metadata, renderResult, thumbnailB
     throw new Error('YouTube credentials not configured');
   }
 
-  // ── Resolve refresh_token + cached access_token from project_auth ──
-  // Priority:
-  //  1. project-specific row (project_id + user_email)
-  //  2. project-specific row (project_id only)
-  //  3. most-recent row for this user_email (any project)
+  // Resolve refresh_token strictly from this project. Falling back to another
+  // project can post to the wrong channel in multi-channel setups.
   const projectId = projectData.id || projectData.projectId || '';
   let authRow = null;
 
   if (projectId && userEmail) {
-    const r = await supabase
+    const { data, error } = await supabase
       .from('project_auth')
       .select('youtube_refresh_token, youtube_access_token, token_expires_at, project_id, user_email')
       .eq('project_id', projectId)
       .eq('user_email', userEmail)
       .maybeSingle();
-    authRow = r.data;
-  }
-  if (!authRow?.youtube_refresh_token && projectId) {
-    const r = await supabase
-      .from('project_auth')
-      .select('youtube_refresh_token, youtube_access_token, token_expires_at, project_id, user_email')
-      .eq('project_id', projectId)
-      .not('youtube_refresh_token', 'is', null)
-      .order('updated_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    authRow = r.data;
-  }
-  if (!authRow?.youtube_refresh_token && userEmail) {
-    const r = await supabase
-      .from('project_auth')
-      .select('youtube_refresh_token, youtube_access_token, token_expires_at, project_id, user_email')
-      .eq('user_email', userEmail)
-      .not('youtube_refresh_token', 'is', null)
-      .order('updated_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    authRow = r.data;
+    if (error) throw new Error(`Falha ao buscar auth do projeto: ${error.message}`);
+    authRow = data;
   }
 
-  const refreshToken = authRow?.youtube_refresh_token || projectData.youtubeRefreshToken;
+  const refreshToken = authRow?.youtube_refresh_token;
   if (!refreshToken) {
-    throw new Error('No YouTube refresh token found. Open the app, go to Project Settings and reconnect YouTube to authorize offline access.');
+    throw new Error('Nenhum refresh_token do YouTube encontrado para este projeto. Reconecte o canal na aba Settings do projeto.');
   }
 
   // Reuse cached access_token if it still has >5min of life
@@ -785,10 +830,11 @@ async function safeInsertAutopilotLog(payload) {
     const { error } = await supabase.from('autopilot_logs').insert(payload);
     if (!error) return;
     // Older databases may not have the new columns yet; keep logging non-fatal.
-    if ((error.message || '').includes('video_title') || (error.message || '').includes('elapsed_ms')) {
+    if ((error.message || '').includes('video_title') || (error.message || '').includes('elapsed_ms') || (error.message || '').includes('runner')) {
       const fallback = { ...payload };
       delete fallback.video_title;
       delete fallback.elapsed_ms;
+      delete fallback.runner;
       const retry = await supabase.from('autopilot_logs').insert(fallback);
       if (retry.error) log('⚠️', `Failed to write autopilot log: ${retry.error.message}`);
       return;
@@ -828,6 +874,12 @@ async function processProject(projectRow) {
   await loadUserKeys(projectRow.user_email);
   if (!GEMINI_API_KEY) {
     log('❌', `No Gemini key configured for user ${projectRow.user_email}. Skipping.`);
+    await safeInsertAutopilotLog({
+      project_id: projectId,
+      status: 'error',
+      message: 'Gemini API key ausente. Salve a chave em Configurações ou no GitHub Actions.',
+      step: 'idea',
+    });
     try { await supabase.rpc('release_autopilot_lock', { p_project_id: projectId }); } catch {}
     return false;
   }
@@ -925,6 +977,7 @@ async function processProject(projectRow) {
       step: 'upload',
       video_title: metadata.title || idea.topic,
       elapsed_ms: duration * 1000,
+      runner: 'github-actions',
     });
 
     log('🎉', `Project complete! Duration: ${duration}s. Next run: ${nextRun.toISOString()}`);
@@ -948,6 +1001,7 @@ async function processProject(projectRow) {
       message: err.message,
       step: currentStep,
       elapsed_ms: duration * 1000,
+      runner: 'github-actions',
     });
 
     return false;

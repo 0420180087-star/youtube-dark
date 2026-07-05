@@ -5,7 +5,7 @@ const getCorsHeaders = (req: Request) => {
   const allowed = Deno.env.get('ALLOWED_ORIGIN') ?? ''
   const allowOrigin = !allowed || allowed === '*' ? '*'
     : origin === allowed ? origin
-    : allowed
+    : 'null'
 
   return {
     'Access-Control-Allow-Origin': allowOrigin,
@@ -32,8 +32,8 @@ serve(async (req) => {
       )
     }
 
-    const client_id = body.client_id || Deno.env.get('GOOGLE_CLIENT_ID')
-    const client_secret = body.client_secret || Deno.env.get('YOUTUBE_CLIENT_SECRET') || Deno.env.get('GOOGLE_CLIENT_SECRET')
+    const client_id = Deno.env.get('GOOGLE_CLIENT_ID') || body.client_id
+    const client_secret = Deno.env.get('YOUTUBE_CLIENT_SECRET') || Deno.env.get('GOOGLE_CLIENT_SECRET')
 
     if (!client_id || !client_secret) {
       return new Response(
@@ -87,17 +87,59 @@ serve(async (req) => {
       )
     }
 
-    await supabaseAdmin.from('project_auth').upsert({
+    let channel: any = null
+    try {
+      const chRes = await fetch('https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&mine=true', {
+        headers: { Authorization: `Bearer ${tokens.access_token}` },
+      })
+      const chData = await chRes.json()
+      const ch = chData.items?.[0]
+      if (ch?.id) {
+        channel = {
+          id: ch.id,
+          title: ch.snippet?.title || '',
+          thumbnailUrl: ch.snippet?.thumbnails?.default?.url || '',
+          subscriberCount: ch.statistics?.subscriberCount || '',
+        }
+      }
+    } catch (e) {
+      console.warn('Could not fetch YouTube channel metadata:', e)
+    }
+
+    const authPayload = {
       project_id,
       user_email,
+      youtube_channel_id: channel?.id || null,
+      youtube_channel_title: channel?.title || null,
       youtube_access_token: tokens.access_token,
       youtube_refresh_token: refreshTokenToStore,
+      oauth_client_id: client_id,
       token_expires_at: expiresAt,
       updated_at: new Date().toISOString(),
-    }, { onConflict: 'project_id,user_email' })
+    }
+
+    const upsertResult = await supabaseAdmin
+      .from('project_auth')
+      .upsert(authPayload, { onConflict: 'project_id,user_email' })
+
+    if (upsertResult.error) {
+      const msg = upsertResult.error.message || ''
+      if (msg.includes('youtube_channel_id') || msg.includes('youtube_channel_title') || msg.includes('oauth_client_id')) {
+        await supabaseAdmin.from('project_auth').upsert({
+          project_id,
+          user_email,
+          youtube_access_token: tokens.access_token,
+          youtube_refresh_token: refreshTokenToStore,
+          token_expires_at: expiresAt,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'project_id,user_email' })
+      } else {
+        throw upsertResult.error
+      }
+    }
 
     return new Response(
-      JSON.stringify({ access_token: tokens.access_token, expires_at: expiresAt }),
+      JSON.stringify({ access_token: tokens.access_token, expires_at: expiresAt, channel }),
       { headers: { ...CORS, 'Content-Type': 'application/json' } }
     )
 

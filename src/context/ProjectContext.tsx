@@ -312,7 +312,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     // If the project has a connected channel but we have no token in memory,
     // attempt a refresh before giving up. This handles the case where the
     // token expired since the last page load.
-    if (project.isYoutubeConnected && project.youtubeChannelData && !accessTokenRef.current) {
+    if ((project.isYoutubeConnected || project.youtubeChannelData) && !accessTokenRef.current) {
       setAutoPilotStatus("Renovando token do YouTube...");
       try {
         const freshToken = await refreshYouTubeToken(projectId);
@@ -346,7 +346,6 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       
       const eligibleProject = projectsRef.current.find(p => {
         if (!p.scheduleSettings?.autoGenerate) return false;
-        if (!p.isYoutubeConnected || !p.youtubeChannelData) return false;
         return getNextAutoRunInfoFromRef(p).isEligible;
       });
 
@@ -376,17 +375,46 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return { nextRunDate: next, isEligible: next <= new Date() };
   };
 
+  const repairYouTubeConnection = async (project: Project, token: string): Promise<Project> => {
+    if (project.youtubeChannelData) return project;
+    try {
+      const res = await fetch('https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&mine=true', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return project;
+      const data = await res.json();
+      const ch = data.items?.[0];
+      if (!ch?.id) return project;
+      const youtubeChannelData = {
+        id: ch.id,
+        title: ch.snippet?.title || '',
+        thumbnailUrl: ch.snippet?.thumbnails?.default?.url || '',
+        subscriberCount: ch.statistics?.subscriberCount || '',
+      };
+      const repaired = { ...project, isYoutubeConnected: true, youtubeChannelData };
+      updateProject(project.id, { isYoutubeConnected: true, youtubeChannelData });
+      return repaired;
+    } catch (e) {
+      console.warn('[AutoPilot] Não foi possível reparar dados do canal:', e);
+      return project;
+    }
+  };
+
   const runFullPipeline = async (project: Project) => {
     if (isRunningAutomation.current) return;
 
+    let runnableProject = project;
     let currentToken = accessTokenRef.current;
-    if (!currentToken && project.youtubeChannelData) {
+    if (!currentToken) {
       setAutoPilotStatus('Renovando sessão do YouTube...');
       currentToken = await refreshYouTubeToken(project.id);
       accessTokenRef.current = currentToken;
     }
-    if (!currentToken || !project.youtubeChannelData) {
-      const reason = !project.youtubeChannelData
+    if (currentToken && !runnableProject.youtubeChannelData) {
+      runnableProject = await repairYouTubeConnection(runnableProject, currentToken);
+    }
+    if (!currentToken || !runnableProject.youtubeChannelData) {
+      const reason = !runnableProject.youtubeChannelData
         ? "canal YouTube não configurado neste projeto"
         : "não foi possível renovar o login do YouTube automaticamente";
       setAutoPilotStatus(`Auto-Pilot Pausado: ${reason}`);
@@ -400,16 +428,16 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       try {
         const { data: lockAcquired, error } = await supabase
           .rpc('acquire_autopilot_lock', {
-            p_project_id: project.id,
+            p_project_id: runnableProject.id,
             p_locked_by: 'browser',
             p_lock_minutes: 90,
           });
 
         if (error || !lockAcquired) {
           console.info(
-            `[AutoPilot] Lock não obtido para "${project.title}" — provavelmente em execução pelo GitHub Actions.`
+            `[AutoPilot] Lock não obtido para "${runnableProject.title}" — provavelmente em execução pelo GitHub Actions.`
           );
-          setAutoPilotStatus(`Auto-Pilot: "${project.title}" em execução em outro runner`);
+          setAutoPilotStatus(`Auto-Pilot: "${runnableProject.title}" em execução em outro runner`);
           return;
         }
       } catch (e) {
@@ -426,8 +454,8 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       isRunning: true, currentStep: null, stepMessage: 'Iniciando...', 
       stepStartTime: pipelineStart, pipelineStartTime: pipelineStart
     });
-    setAutoPilotStatus(`Iniciando Auto-Pilot: ${project.title}`);
-    addLogEntry({ projectId: project.id, projectTitle: project.title, status: 'running', message: 'Pipeline iniciado' });
+    setAutoPilotStatus(`Iniciando Auto-Pilot: ${runnableProject.title}`);
+    addLogEntry({ projectId: runnableProject.id, projectTitle: runnableProject.title, status: 'running', message: 'Pipeline iniciado' });
 
     const callbacks: PipelineCallbacks = {
       onStepStart: (step, message) => {
@@ -435,11 +463,11 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
           ...prev, currentStep: step, stepMessage: message, stepStartTime: Date.now()
         }));
         setAutoPilotStatus(message);
-        addLogEntry({ projectId: project.id, projectTitle: project.title, status: 'running', message, step });
+        addLogEntry({ projectId: runnableProject.id, projectTitle: runnableProject.title, status: 'running', message, step });
       },
       onStepComplete: (step) => {
         const label = STEP_LABELS[step];
-        addLogEntry({ projectId: project.id, projectTitle: project.title, status: 'success', message: `${label} concluído`, step });
+        addLogEntry({ projectId: runnableProject.id, projectTitle: runnableProject.title, status: 'success', message: `${label} concluído`, step });
       },
       onProgress: (step, detail) => {
         setAutoPilotProgress(prev => ({ ...prev, stepMessage: detail }));
@@ -454,7 +482,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       // even if the pipeline has been running for many minutes.
       getYoutubeAccessToken: () => accessTokenRef.current,
       refreshYoutubeAccessToken: async () => {
-        const token = await refreshYouTubeToken(project.id);
+        const token = await refreshYouTubeToken(runnableProject.id);
         accessTokenRef.current = token;
         return token;
       },
@@ -465,12 +493,12 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     // Without this, any uncaught exception from runAutomationPipeline permanently
     // sets the lock to true — the Auto-Pilot becomes unresponsive until page reload.
     try {
-      const result: PipelineResult = await runAutomationPipeline(project, callbacks);
+      const result: PipelineResult = await runAutomationPipeline(runnableProject, callbacks);
 
       if (result.success) {
         setAutoPilotStatus("Auto-Pilot Completo!");
         addLogEntry({ 
-          projectId: project.id, projectTitle: project.title, 
+          projectId: runnableProject.id, projectTitle: runnableProject.title, 
           videoTitle: result.videoTitle, status: 'success', 
           message: `Vídeo publicado: ${result.videoTitle}`,
           elapsedMs: Date.now() - pipelineStart
@@ -479,7 +507,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
         const stepLabel = result.failedStep ? STEP_LABELS[result.failedStep] : 'desconhecido';
         setAutoPilotStatus(`STANDBY: Falha em ${stepLabel}`);
         addLogEntry({ 
-          projectId: project.id, projectTitle: project.title,
+          projectId: runnableProject.id, projectTitle: runnableProject.title,
           videoTitle: result.videoTitle, status: 'error',
           message: `Falha em ${stepLabel}: ${result.errorMessage}`,
           step: result.failedStep,
@@ -488,13 +516,13 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
 
       // Schedule next run regardless of success/failure
-      scheduleNextRun(project.id);
+      scheduleNextRun(runnableProject.id);
     } catch (fatalErr: any) {
       // Unexpected pipeline crash — log it and surface to the user
       console.error('[AutoPilot] Pipeline crash:', fatalErr);
       setAutoPilotStatus('STANDBY: Erro inesperado no pipeline');
       addLogEntry({
-        projectId: project.id, projectTitle: project.title,
+        projectId: runnableProject.id, projectTitle: runnableProject.title,
         status: 'error',
         message: `Erro inesperado: ${fatalErr?.message || 'Desconhecido'}`,
         elapsedMs: Date.now() - pipelineStart
@@ -503,7 +531,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       // ALWAYS release, even on crash — without this the bot freezes until reload
       if (supabase) {
         try {
-          await supabase.rpc('release_autopilot_lock', { p_project_id: project.id });
+          await supabase.rpc('release_autopilot_lock', { p_project_id: runnableProject.id });
         } catch (e) {
           console.warn('[AutoPilot] Não foi possível liberar o lock distribuído:', e);
         }

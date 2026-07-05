@@ -5,7 +5,7 @@ const getCorsHeaders = (req: Request) => {
   const allowed = Deno.env.get('ALLOWED_ORIGIN') ?? ''
   const allowOrigin = !allowed || allowed === '*' ? '*'
     : origin === allowed ? origin
-    : allowed
+    : 'null'
 
   return {
     'Access-Control-Allow-Origin': allowOrigin,
@@ -23,12 +23,11 @@ serve(async (req) => {
 
   try {
     const clientId = Deno.env.get('GOOGLE_CLIENT_ID')
-    const clientSecret = Deno.env.get('YOUTUBE_CLIENT_SECRET')
 
-    if (!clientId || !clientSecret) {
+    if (!clientId) {
       return new Response(
         JSON.stringify({ 
-          error: 'Configurações do YouTube não encontradas. Configure as secrets no Supabase.',
+          error: 'Google Client ID não encontrado. Configure GOOGLE_CLIENT_ID nas secrets.',
           needsSetup: true 
         }),
         { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } }
@@ -36,7 +35,7 @@ serve(async (req) => {
     }
 
     return new Response(
-      JSON.stringify({ client_id: clientId, client_secret: clientSecret }),
+      JSON.stringify({ client_id: clientId }),
       { headers: { ...CORS, 'Content-Type': 'application/json' } }
     )
 
