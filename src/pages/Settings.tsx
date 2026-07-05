@@ -6,7 +6,7 @@ import { Settings as SettingsIcon, User, Key, Shield, LogOut, Save, CheckCircle,
 import { getKeyStatus, clearExhaustedKeys } from '../services/geminiService';
 
 export const Settings: React.FC = () => {
-    const { user, login, logout, googleClientId, setGoogleClientId, isLoading: isAuthLoading, youtubeChannel, connectYoutube, disconnectYoutube } = useAuth();
+    const { user, login, logout, googleClientId, setGoogleClientId, isLoading: isAuthLoading, youtubeChannel, disconnectYoutube } = useAuth();
     
     // Storage keys
     const singleKeyStorageKey = user?.email ? `ds_api_key_${user.email}` : 'ds_api_key';
@@ -415,7 +415,7 @@ export const Settings: React.FC = () => {
                                         ) : (
                                             <>
                                                 <div className="flex items-center gap-4"><div className="w-12 h-12 bg-slate-800 rounded-lg flex items-center justify-center border border-slate-700"><Link2 className="w-6 h-6 text-slate-500" /></div><div><h3 className="font-bold text-white text-lg">Sem Canal</h3><p className="text-sm text-slate-400">Vincule para upload automático.</p></div></div>
-                                                <button onClick={() => connectYoutube()} disabled={isAuthLoading} className="px-5 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-bold shadow-lg flex items-center gap-2">{isAuthLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Youtube className="w-4 h-4" />} Conectar</button>
+                                                <button onClick={() => alert('Conecte o YouTube dentro da aba Settings de cada projeto. Isso garante que cada canal use o refresh token correto.')} disabled={isAuthLoading} className="px-5 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-bold shadow-lg flex items-center gap-2">{isAuthLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Youtube className="w-4 h-4" />} Conectar por projeto</button>
                                             </>
                                         )}
                                     </div>
