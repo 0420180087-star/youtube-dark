@@ -47,6 +47,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [needsYoutubeReconnect, setNeedsYoutubeReconnect] = useState(
     () => localStorage.getItem(NEEDS_RECONNECT_KEY) === '1'
   );
+  const configuredGoogleClientId = (import.meta.env.VITE_GOOGLE_CLIENT_ID || '').trim();
 
   const persistAccessToken = async (token: string) => {
     setAccessToken(token);
@@ -62,7 +63,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     const initAuth = async () => {
       try {
-        const clientId = await loadEncryptedString('ds_google_client_id');
+        const clientId = configuredGoogleClientId || await loadEncryptedString('ds_google_client_id');
         if (clientId) setGoogleClientIdState(clientId);
 
         const profile = await loadEncryptedJSON<UserProfile>('ds_user_profile');
@@ -123,6 +124,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const setGoogleClientId = async (id: string) => {
+    if (configuredGoogleClientId) {
+      setGoogleClientIdState(configuredGoogleClientId);
+      return;
+    }
     const cleanId = id.trim();
     await saveEncryptedString('ds_google_client_id', cleanId);
     setGoogleClientIdState(cleanId);
