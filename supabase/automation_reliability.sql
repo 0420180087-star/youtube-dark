@@ -9,6 +9,10 @@ alter table public.project_auth
   add column if not exists youtube_channel_title text,
   add column if not exists oauth_client_id text;
 
+alter table public.projects
+  add column if not exists autopilot_locked_until timestamptz default null,
+  add column if not exists autopilot_locked_by text default null;
+
 alter table public.project_auth
   alter column youtube_refresh_token drop not null;
 

@@ -700,6 +700,8 @@ Return JSON:
 }`;
 
   const metadata = await geminiWithRetry(() => geminiGenerateJSON(prompt));
+  const rawVisibility = String(metadata.visibility || 'public').toLowerCase();
+  metadata.visibility = ['public', 'private', 'unlisted'].includes(rawVisibility) ? rawVisibility : 'public';
   log('✅', `Metadata: "${metadata.title}"`);
   return metadata;
 }

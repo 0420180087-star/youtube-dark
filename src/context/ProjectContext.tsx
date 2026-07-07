@@ -634,7 +634,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   };
 
   const saveGeneratedIdeas = (projectId: string, ideas: GeminiVideoIdea[]) => {
-    setProjects(prev => prev.map(p => {
+    const nextProjects = projectsRef.current.map(p => {
       if (p.id === projectId) {
         const newProjectIdeas: ProjectIdea[] = ideas.map(i => ({
           id: crypto.randomUUID(), topic: i.topic, context: i.context, specificContext: i.specificContext,
@@ -642,22 +642,24 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }));
         const existingTopics = new Set(p.ideas?.map(pi => pi.topic) || []);
         const updatedProject = { ...p, ideas: [...(p.ideas || []), ...newProjectIdeas.filter(ni => !existingTopics.has(ni.topic))] };
-        projectsRef.current = projectsRef.current.map(rp => rp.id === projectId ? updatedProject : rp);
         return updatedProject;
       }
       return p;
-    }));
+    });
+    projectsRef.current = nextProjects;
+    setProjects(nextProjects);
   };
 
   const updateIdeaStatus = (projectId: string, ideaId: string, status: 'used' | 'dismissed' | 'new') => {
-    setProjects(prev => prev.map(p => {
+    const nextProjects = projectsRef.current.map(p => {
       if (p.id === projectId && p.ideas) {
         const updatedProject = { ...p, ideas: p.ideas.map(i => i.id === ideaId ? { ...i, status } : i) };
-        projectsRef.current = projectsRef.current.map(rp => rp.id === projectId ? updatedProject : rp);
         return updatedProject;
       }
       return p;
-    }));
+    });
+    projectsRef.current = nextProjects;
+    setProjects(nextProjects);
   };
 
   // Marks an idea as 'used' by matching its topic string.
@@ -749,16 +751,14 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   };
 
   const updateVideo = (projectId: string, videoId: string, updates: Partial<Video>) => {
-    setProjects(prev => {
-      const updated = prev.map(p => {
+    const updated = projectsRef.current.map(p => {
       if (p.id === projectId) {
         return { ...p, videos: p.videos.map(v => v.id === videoId ? { ...v, ...updates, updatedAt: new Date().toISOString() } : v) };
       }
       return p;
-      });
-      projectsRef.current = updated;
-      return updated;
     });
+    projectsRef.current = updated;
+    setProjects(updated);
   };
 
   const deleteVideo = (projectId: string, videoId: string) => {
