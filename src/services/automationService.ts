@@ -384,9 +384,13 @@ export async function stepUploadToYouTube(
 }
 
 async function resolveYoutubeAccessToken(callbacks: PipelineCallbacks): Promise<string | null> {
-  const current = callbacks.getYoutubeAccessToken?.() || callbacks.youtubeAccessToken || null;
-  if (current) return current;
-  return await callbacks.refreshYoutubeAccessToken?.() || null;
+  // Upload is the only step that truly needs YouTube. Always try a project-scoped
+  // refresh first so long-running creation pipelines do not reuse an expired
+  // access token captured at startup. Fall back to the cached token only if the
+  // refresh path is unavailable.
+  const refreshed = await callbacks.refreshYoutubeAccessToken?.();
+  if (refreshed) return refreshed;
+  return callbacks.getYoutubeAccessToken?.() || callbacks.youtubeAccessToken || null;
 }
 
 // --- FULL PIPELINE ORCHESTRATOR ---

@@ -52,7 +52,11 @@ export const uploadVideoToYouTube = async (
         if (!description.toLowerCase().includes('#shorts')) description = `#Shorts\n\n${description}`.trim();
     }
 
-    const privacyStatus = scheduledDate ? "private" : (metadata?.visibility || "private");
+    const rawVisibility = String(metadata?.visibility || "public").toLowerCase();
+    const normalizedVisibility = ["public", "private", "unlisted"].includes(rawVisibility)
+        ? rawVisibility
+        : "public";
+    const privacyStatus = scheduledDate ? "private" : normalizedVisibility;
 
     const body: Record<string, any> = {
         snippet: {

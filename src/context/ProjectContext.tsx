@@ -415,10 +415,10 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
     if (!currentToken || !runnableProject.youtubeChannelData) {
       const reason = !runnableProject.youtubeChannelData
-        ? "canal YouTube não configurado neste projeto"
-        : "não foi possível renovar o login do YouTube automaticamente";
-      setAutoPilotStatus(`Auto-Pilot Pausado: ${reason}`);
-      return;
+        ? "canal YouTube ainda não configurado; o vídeo será criado e ficará em STANDBY no upload"
+        : "YouTube será renovado novamente no upload; o vídeo será criado primeiro";
+      setAutoPilotStatus(`Auto-Pilot: ${reason}`);
+      addLogEntry({ projectId: runnableProject.id, projectTitle: runnableProject.title, status: 'running', message: reason, step: 'upload' });
     }
 
     // Acquire distributed lock before starting.
@@ -438,6 +438,12 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
             `[AutoPilot] Lock não obtido para "${runnableProject.title}" — provavelmente em execução pelo GitHub Actions.`
           );
           setAutoPilotStatus(`Auto-Pilot: "${runnableProject.title}" em execução em outro runner`);
+          addLogEntry({
+            projectId: runnableProject.id,
+            projectTitle: runnableProject.title,
+            status: 'retrying',
+            message: error ? `Lock não obtido: ${error.message}` : 'Lock não obtido: outro runner está processando este projeto',
+          });
           return;
         }
       } catch (e) {
@@ -515,8 +521,6 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
         });
       }
 
-      // Schedule next run regardless of success/failure
-      scheduleNextRun(runnableProject.id);
     } catch (fatalErr: any) {
       // Unexpected pipeline crash — log it and surface to the user
       console.error('[AutoPilot] Pipeline crash:', fatalErr);
@@ -528,6 +532,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
         elapsedMs: Date.now() - pipelineStart
       });
     } finally {
+      scheduleNextRun(runnableProject.id);
       // ALWAYS release, even on crash — without this the bot freezes until reload
       if (supabase) {
         try {
@@ -556,7 +561,11 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       visualPacing: { minImagesPer5Sec: 1, maxImagesPer5Sec: 2, style: 'dynamic' },
       scheduleSettings: { frequencyDays: 1, timeWindowStart: '12:00', timeWindowEnd: '18:00', autoGenerate: false }
     };
-    setProjects(prev => [newProject, ...prev]);
+    setProjects(prev => {
+      const next = [newProject, ...prev];
+      projectsRef.current = next;
+      return next;
+    });
 
     // Immediately persist to Supabase (don't wait for the 1.5s debounce).
     // Without this, quickly closing/refreshing the tab after creation loses
@@ -579,6 +588,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const updateProject = (id: string, updates: Partial<Project>) => {
     setProjects(prev => {
       const updated = prev.map(p => p.id === id ? { ...p, ...updates } : p);
+      projectsRef.current = updated;
 
       // Immediately persist to Supabase on settings changes (non-blob fields).
       // Check the MERGED project videos (not just 'updates') because updates.videos
@@ -631,7 +641,9 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
           status: 'new', createdAt: new Date().toISOString()
         }));
         const existingTopics = new Set(p.ideas?.map(pi => pi.topic) || []);
-        return { ...p, ideas: [...(p.ideas || []), ...newProjectIdeas.filter(ni => !existingTopics.has(ni.topic))] };
+        const updatedProject = { ...p, ideas: [...(p.ideas || []), ...newProjectIdeas.filter(ni => !existingTopics.has(ni.topic))] };
+        projectsRef.current = projectsRef.current.map(rp => rp.id === projectId ? updatedProject : rp);
+        return updatedProject;
       }
       return p;
     }));
@@ -640,7 +652,9 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const updateIdeaStatus = (projectId: string, ideaId: string, status: 'used' | 'dismissed' | 'new') => {
     setProjects(prev => prev.map(p => {
       if (p.id === projectId && p.ideas) {
-        return { ...p, ideas: p.ideas.map(i => i.id === ideaId ? { ...i, status } : i) };
+        const updatedProject = { ...p, ideas: p.ideas.map(i => i.id === ideaId ? { ...i, status } : i) };
+        projectsRef.current = projectsRef.current.map(rp => rp.id === projectId ? updatedProject : rp);
+        return updatedProject;
       }
       return p;
     }));
@@ -720,23 +734,31 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       targetDuration: effectiveDuration, format: format, specificContext: context || '',
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     };
-    setProjects(prev => prev.map(p => {
+    setProjects(prev => {
+      const updated = prev.map(p => {
       if (p.id === projectId) {
         const updatedIdeas = p.ideas?.map(i => i.topic === topic ? { ...i, status: 'used' as const } : i);
         return { ...p, videos: [newVideo, ...p.videos], ideas: updatedIdeas || p.ideas };
       }
       return p;
-    }));
+      });
+      projectsRef.current = updated;
+      return updated;
+    });
     return newVideo;
   };
 
   const updateVideo = (projectId: string, videoId: string, updates: Partial<Video>) => {
-    setProjects(prev => prev.map(p => {
+    setProjects(prev => {
+      const updated = prev.map(p => {
       if (p.id === projectId) {
         return { ...p, videos: p.videos.map(v => v.id === videoId ? { ...v, ...updates, updatedAt: new Date().toISOString() } : v) };
       }
       return p;
-    }));
+      });
+      projectsRef.current = updated;
+      return updated;
+    });
   };
 
   const deleteVideo = (projectId: string, videoId: string) => {
