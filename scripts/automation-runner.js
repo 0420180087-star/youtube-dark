@@ -1142,11 +1142,11 @@ async function main() {
 
   const eligible = projects.filter((p) => {
     const d = p.data;
+    if (PROJECT_ID) return true;
     if (!d?.scheduleSettings?.autoGenerate) {
       log('⏭️', `"${d?.channelTheme || p.id}" pulado: autoGenerate não está ativado`);
       return false;
     }
-    if (PROJECT_ID) return true;
     const nextRun = d.scheduleSettings?.nextScheduledRun
       ? new Date(d.scheduleSettings.nextScheduledRun)
       : new Date(0);

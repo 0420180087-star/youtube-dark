@@ -79,7 +79,9 @@ export async function uploadVideoFile(accessToken, videoPath, metadata) {
     body: fileBuffer,
   });
 
-  const result = await uploadRes.json().catch(async () => ({ error: await uploadRes.text().catch(() => '') }));
+  const uploadBody = await uploadRes.text().catch(() => '');
+  let result = {};
+  try { result = uploadBody ? JSON.parse(uploadBody) : {}; } catch { result = { error: uploadBody }; }
   if (!result.id) throw new Error(`Upload falhou: ${JSON.stringify(result)}`);
 
   console.log(`  ✅ Upload concluído: https://youtube.com/watch?v=${result.id}`);

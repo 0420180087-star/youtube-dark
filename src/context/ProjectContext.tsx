@@ -738,11 +738,11 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
     setProjects(prev => {
       const updated = prev.map(p => {
-      if (p.id === projectId) {
-        const updatedIdeas = p.ideas?.map(i => i.topic === topic ? { ...i, status: 'used' as const } : i);
-        return { ...p, videos: [newVideo, ...p.videos], ideas: updatedIdeas || p.ideas };
-      }
-      return p;
+        if (p.id === projectId) {
+          const updatedIdeas = p.ideas?.map(i => i.topic === topic ? { ...i, status: 'used' as const } : i);
+          return { ...p, videos: [newVideo, ...p.videos], ideas: updatedIdeas || p.ideas };
+        }
+        return p;
       });
       projectsRef.current = updated;
       return updated;
