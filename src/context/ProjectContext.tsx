@@ -669,7 +669,29 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   };
 
   const getProject = (id: string) => projects.find(p => p.id === id);
-  const deleteProject = (id: string) => { setProjects(prev => prev.filter(p => p.id !== id)); };
+  const deleteProject = (id: string) => {
+    setProjects(prev => prev.filter(p => p.id !== id));
+    lastSyncSnapshotRef.current.delete(id);
+
+    // Also delete from Supabase so the project doesn't re-sync on next load.
+    // Without this, the load effect merges the stale remote row back in and
+    // the "deleted" project reappears after a refresh.
+    if (supabase && userEmailRef.current) {
+      (async () => {
+        try {
+          await supabase.from('projects').delete().eq('id', id).eq('user_email', userEmailRef.current);
+        } catch (e) {
+          console.warn('[Supabase] Falha ao excluir projeto remoto:', id, e);
+        }
+        try {
+          await supabase.from('project_auth').delete().eq('project_id', id).eq('user_email', userEmailRef.current);
+        } catch {}
+        try {
+          await supabase.from('autopilot_logs').delete().eq('project_id', id);
+        } catch {}
+      })();
+    }
+  };
 
   const addVideo = (projectId: string, topic: string, duration: VideoDuration, format: VideoFormat, context?: string) => {
     // Auto-detect Shorts from format — Portrait 9:16 always means YouTube Shorts
