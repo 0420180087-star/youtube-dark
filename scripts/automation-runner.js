@@ -1065,6 +1065,9 @@ async function processProject(projectRow) {
       failedAt: new Date().toISOString(),
     };
     data.standbyInfo = standbyInfo;
+    if (data.scheduleSettings?.autoGenerate) {
+      data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
+    }
     if (videoId) {
       await updateRunnerVideo(projectId, data, videoId, {
         status: 'STANDBY',
