@@ -74,15 +74,15 @@ async function loadUserKeys(userEmail) {
       GEMINI_KEY_INDEX = 0;
       GEMINI_API_KEY = GEMINI_API_KEYS[0];
       log('🔑', `Loaded ${GEMINI_API_KEYS.length} Gemini key(s) for ${userEmail}`);
-    } else if (ENV_GEMINI_API_KEY) {
-      GEMINI_API_KEYS = [ENV_GEMINI_API_KEY];
-      GEMINI_API_KEY = ENV_GEMINI_API_KEY;
+    } else if (ENV_GEMINI_API_KEY || VITE_GEMINI_API_KEY) {
+      GEMINI_API_KEYS = [ENV_GEMINI_API_KEY || VITE_GEMINI_API_KEY];
+      GEMINI_API_KEY = GEMINI_API_KEYS[0];
     }
     if (data?.pexels_api_key) {
       PEXELS_API_KEY = data.pexels_api_key;
       log('🔑', `Loaded Pexels key for ${userEmail}`);
-    } else if (ENV_PEXELS_API_KEY) {
-      PEXELS_API_KEY = ENV_PEXELS_API_KEY;
+    } else if (ENV_PEXELS_API_KEY || VITE_PEXELS_API_KEY) {
+      PEXELS_API_KEY = ENV_PEXELS_API_KEY || VITE_PEXELS_API_KEY;
     }
   } catch (e) {
     log('⚠️', `Failed to load user_settings for ${userEmail}: ${e.message}`);
@@ -179,7 +179,15 @@ async function geminiWithRetry(fn, retries = 3) {
 async function geminiGenerateJSON(prompt, maxTokens = 4096) {
   const raw = await geminiWithRetry(() => geminiGenerate(prompt, maxTokens));
   const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const jsonStr = match ? match[1].trim() : raw.trim();
+  let jsonStr = match ? match[1].trim() : raw.trim();
+  if (!match) {
+    const firstObj = jsonStr.indexOf('{');
+    const lastObj = jsonStr.lastIndexOf('}');
+    const firstArr = jsonStr.indexOf('[');
+    const lastArr = jsonStr.lastIndexOf(']');
+    if (firstObj >= 0 && lastObj > firstObj) jsonStr = jsonStr.slice(firstObj, lastObj + 1);
+    else if (firstArr >= 0 && lastArr > firstArr) jsonStr = jsonStr.slice(firstArr, lastArr + 1);
+  }
   return JSON.parse(jsonStr);
 }
 
