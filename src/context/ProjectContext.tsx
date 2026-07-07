@@ -557,6 +557,22 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       scheduleSettings: { frequencyDays: 1, timeWindowStart: '12:00', timeWindowEnd: '18:00', autoGenerate: false }
     };
     setProjects(prev => [newProject, ...prev]);
+
+    // Immediately persist to Supabase (don't wait for the 1.5s debounce).
+    // Without this, quickly closing/refreshing the tab after creation loses
+    // the project — locally it survives via IndexedDB, but on another device
+    // or after cache clear it never made it to the cloud.
+    if (supabase && userEmailRef.current) {
+      supabase.from('projects').upsert({
+        id: newProject.id,
+        user_email: userEmailRef.current,
+        data: newProject,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'id' }).then(({ error }) => {
+        if (error) console.warn('[Supabase] Falha ao criar projeto remoto:', error);
+      });
+    }
+
     return newProject;
   };
 
