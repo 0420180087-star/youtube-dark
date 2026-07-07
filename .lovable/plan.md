@@ -1,170 +1,193 @@
-## Diagnóstico das causas-raiz
+## Diagnóstico profundo
 
-A automação não está falhando por um único bug; existem quebras em cadeia entre autenticação YouTube, persistência no banco, scheduler do navegador e runner do GitHub.
+A automação não está falhando em um único ponto; ela está quebrada por uma cadeia de dependências frágeis. O maior problema é que a criação do vídeo, o brainstorm, o scheduler e o upload estão acoplados demais, então uma falha de token, agendamento, lock ou persistência impede até a criação da ideia/vídeo.
 
-### Bloqueadores principais
+### 5 Porquês — criação não começa / brainstorm não cria ideias
 
-1. **Canal conectado não vira estado confiável do projeto**
-   - O OAuth salva token, mas nem sempre atualiza `youtubeChannelData`/`isYoutubeConnected` no projeto.
-   - O scheduler manual só inicia se o projeto tiver `youtubeChannelData`; se o usuário conectou pelo Settings global ou a volta do OAuth não atualizou o projeto, a automação para antes de criar o vídeo.
+1. **Por que a criação automática não começa?**
+   Porque o Auto-Pilot do navegador retorna antes do passo de ideia quando não encontra token/canal do YouTube no projeto.
 
-2. **Client ID/secret do YouTube estão inconsistentes entre app, Cloud e GitHub**
-   - O refresh token do Google só funciona com o mesmo OAuth Client ID/secret usado na autorização.
-   - Hoje há caminhos diferentes: campo editável no frontend, secrets do deploy, secrets do runner e função `get-youtube-config` lendo nomes diferentes.
-   - Resultado provável: `invalid_grant`, token ausente ou upload nunca começa.
+2. **Por que o YouTube bloqueia a criação, se ele só deveria ser necessário no upload?**
+   Porque `runFullPipeline` valida YouTube antes de executar o pipeline inteiro, em vez de validar YouTube apenas no passo de postagem.
 
-3. **GitHub Actions depende do banco, mas o banco pode estar inacessível ou incompleto**
-   - As migrations criam tabelas públicas sem `GRANT` explícito para Data API.
-   - A migration 005 tentou resolver abrindo RLS com `using (true)`, o que faz funcionar parcialmente, mas é inseguro e ainda não garante grants.
-   - Se projetos, chaves ou tokens não sincronizam, o runner não encontra nada para processar.
+3. **Por que o projeto muitas vezes não tem canal/token válido?**
+   Porque a conexão do YouTube depende de estado temporário de sessão e de metadados salvos no projeto; se o callback OAuth não atualiza o projeto corretamente, `youtubeChannelData` fica ausente.
 
-4. **Runner automático gera ideia mas não mantém o fluxo Brainstorm corretamente**
-   - Quando não há ideias, ele cria uma ideia para o vídeo, mas não persiste um lote de novas ideias no brainstorm como o fluxo manual esperado.
-   - Isso quebra o fluxo “verificar ideias → se não tiver criar ideias novas → usar uma ideia”.
+4. **Por que isso vira falha silenciosa?**
+   Porque retornos antecipados não geram log persistente nem reagendam corretamente a próxima tentativa.
 
-5. **Render server-side pode quebrar na etapa de voz**
-   - O runner concatena chunks de áudio diretamente em bytes. Se o Gemini retornar WAV/L16 com headers por segmento, o arquivo final pode ficar inválido ou só tocar parcialmente.
-   - Isso pode impedir a renderização antes do upload.
+5. **Raiz máxima:**
+   O pipeline mistura pré-condições de criação com pré-condições de postagem, e não tem uma camada única de “saúde da automação” que registre o motivo real do bloqueio e permita continuar até onde for possível.
 
-6. **Upload de thumbnail no runner ainda usa formato errado**
-   - `scripts/youtubeUploader.js` ainda importa `form-data` e envia multipart; o endpoint do YouTube para thumbnail espera mídia bruta.
-   - Não bloqueia o vídeo, mas deixa a automação incompleta.
+### 5 Porquês — GitHub Actions não cria/posta
 
-7. **Falhas silenciosas dificultam saber onde parou**
-   - Alguns erros ficam só em console/standby local, sem log persistente claro.
-   - GitHub e navegador não compartilham um mesmo checklist de saúde: chaves, projeto conectado, token, próxima execução, render e upload.
+1. **Por que o runner do GitHub não cria vídeos visíveis?**
+   Porque ele só salva o novo vídeo no projeto depois do upload bem-sucedido.
 
-## Plano de correção
+2. **Por que isso é grave?**
+   Se falhar no upload, render, token ou thumbnail, todo o trabalho anterior fica invisível e parece que nada foi criado.
 
-### 1. Padronizar OAuth YouTube como fonte única de verdade
+3. **Por que as ideias se repetem?**
+   Porque a ideia escolhida é persistida tarde demais; no runner, o estado de brainstorm só é salvo no final do pipeline.
 
-- Usar um único OAuth Client ID configurado pela plataforma/build secrets, não um Client ID arbitrário por usuário.
-- Corrigir `get-youtube-config`, `exchange-code`, `refresh-token`, `.github/workflows/deploy.yml` e `.github/workflows/auto-post.yml` para usarem os mesmos nomes:
-  - `GOOGLE_CLIENT_ID`
-  - `YOUTUBE_CLIENT_SECRET`
-- Remover/neutralizar caminhos que aceitam `client_secret` vindo do browser.
-- Salvar no `project_auth` também:
-  - `youtube_channel_id`
-  - `youtube_channel_title`
-  - `oauth_client_id`
-  - `token_expires_at`
+4. **Por que o job parece “sucesso” mesmo sem entregar vídeo?**
+   Porque muitos skips são tratados como retorno normal, com logs insuficientes para diferenciar “não havia nada para rodar” de “não consegui rodar”.
 
-### 2. Corrigir callback OAuth para marcar o projeto como conectado
+5. **Raiz máxima:**
+   O runner não possui persistência incremental por etapa. Ele trata o pipeline como transação única, mas o fluxo real é longo e propenso a falhas; qualquer falha depois da ideia apaga evidências de progresso.
 
-- Atualizar `AuthContext.tsx` para expor método de salvar canal atual em memória/local seguro.
-- Atualizar `OAuthCallback.tsx` para, após buscar o canal:
-  - salvar token em AuthContext;
-  - salvar dados do canal no AuthContext;
-  - marcar o projeto alvo com `isYoutubeConnected: true` e `youtubeChannelData`;
-  - persistir isso imediatamente no banco.
-- Se OAuth vier de Settings global sem projeto, mostrar aviso para conectar o canal dentro do projeto ou aplicar ao projeto selecionado quando existir `yt_oauth_target_project`.
+### 5 Porquês — postagem automática falha
 
-### 3. Tornar refresh token estritamente por projeto
+1. **Por que a postagem falha depois da criação?**
+   Porque o upload depende de refresh token, client id/secret e metadados do projeto estarem perfeitamente alinhados.
 
-- Ajustar `refresh-token` para buscar primeiro e obrigatoriamente por `project_id + user_email` quando o projeto for informado.
-- Remover fallback silencioso para “qualquer projeto do usuário” durante upload automático, porque isso pode postar no canal errado.
-- Se não houver token daquele projeto, retornar erro claro: “reconecte este projeto ao YouTube”.
-- Ajustar `automation-runner.js` para usar a mesma regra.
+2. **Por que o token pode estar desalinhado?**
+   Porque existem caminhos diferentes para token global, token por projeto, callback OAuth e runner do GitHub.
 
-### 4. Adicionar migration de confiabilidade do banco
+3. **Por que isso não é detectado cedo?**
+   Porque não há preflight compartilhado entre navegador e GitHub verificando: projeto, brainstorm, chaves de IA, lock, refresh token do projeto e credenciais YouTube.
 
-Criar uma nova migration para:
+4. **Por que a falha bloqueia o vídeo inteiro?**
+   Porque o fluxo salva o vídeo publicado só depois do upload; se o upload falha, o vídeo criado não é registrado como `STANDBY` de upload.
 
-- adicionar `GRANT` explícito para todas as tabelas usadas pela automação;
-- adicionar índices em `projects(user_email)`, `project_auth(project_id,user_email)`, `autopilot_logs(project_id)` e `user_settings(user_email)`;
-- adicionar colunas faltantes em `project_auth` se necessário;
-- permitir `youtube_refresh_token` nullable apenas para linhas parciais, mas bloquear upload quando refresh token estiver ausente;
-- recriar RPCs de lock com `project_id text` e logs claros.
+5. **Raiz máxima:**
+   Falta separar “criar vídeo” de “postar vídeo” como fases independentes, com estado persistente e recuperação por etapa.
 
-### 5. Fechar o checklist antes de iniciar qualquer pipeline
+## Causas-raiz consolidadas
 
-Criar uma validação única usada por navegador e GitHub:
+1. **Acoplamento indevido:** criação depende de YouTube antes da hora.
+2. **Persistência tardia:** ideias e vídeos só são salvos no final, então falhas geram repetição e invisibilidade.
+3. **Scheduler frágil:** `nextScheduledRun` pode não ser criado/recriado em abortos precoces.
+4. **Logs insuficientes:** skips e retornos antecipados não viram diagnóstico persistente.
+5. **Divergência navegador vs GitHub:** existem dois pipelines com regras diferentes para token, agendamento e persistência.
+6. **Risco de banco/configuração:** as permissões/GRANTs e funções de lock precisam ser idempotentes e aplicadas como migration real, não apenas SQL manual opcional.
+7. **Render/upload ainda têm pontos frágeis:** data URLs no renderer, crossfade, upload de stream e tratamento de erro precisam ser endurecidos.
+
+## Plano de implementação
+
+### 1. Criar uma camada única de diagnóstico da automação
+
+Adicionar um helper compartilhado para navegador e runner com checagens em fases:
 
 ```text
-Projeto existe
-AutoGenerate ativo ou execução manual forçada
-Ideia disponível ou geração de ideias habilitada
-Gemini API key disponível
-YouTube conectado neste projeto
-Refresh token válido para este projeto
-FFmpeg disponível no runner GitHub
-Próxima execução vencida ou Run Now acionado
+Fase criação:
+- projeto existe
+- autoGenerate ativo ou execução manual
+- usuário/proprietário definido
+- chave Gemini disponível
+- brainstorm acessível
+
+Fase postagem:
+- refresh_token do projeto existe
+- YouTube client id/secret disponíveis
+- canal do projeto conhecido ou reparável
+- token renovável
 ```
 
-- Se algo faltar, registrar em `autopilot_logs` com passo e mensagem acionável.
-- Mostrar o mesmo motivo no Scheduler dentro da plataforma.
+Resultado esperado:
+- criação pode prosseguir mesmo se postagem estiver sem token;
+- upload falha como `STANDBY: upload`, não como “nada aconteceu”.
 
-### 6. Corrigir fluxo Brainstorm → vídeo no runner
+### 2. Desacoplar criação de upload no navegador
 
-- Quando não houver ideias:
-  - gerar um lote de ideias;
-  - salvar todas no projeto;
-  - marcar apenas a escolhida como `used`;
-  - continuar criação do vídeo.
-- Evitar repetir título já publicado ou ideia já usada.
+Alterar `ProjectContext.tsx` e `automationService.ts` para:
+- não abortar o pipeline inteiro por ausência de YouTube antes da ideia/script/voz/visual/render;
+- validar/renovar YouTube somente no passo `upload`;
+- se YouTube falhar, manter o vídeo criado em `STANDBY` com erro claro;
+- registrar log persistente para token ausente, canal ausente, lock negado e refresh falho;
+- sempre reagendar ou marcar próxima tentativa após abortos controlados.
 
-### 7. Corrigir render e áudio server-side
+### 3. Tornar brainstorm e vídeo persistidos por etapa
 
-- Ajustar `stepVoice`/`videoRenderer.js` para normalizar cada chunk de TTS antes de concatenar.
-- Se o áudio vier WAV, concatenar com FFmpeg ou converter cada segmento para PCM/AAC antes de juntar.
-- Manter fallback de ambiência como não bloqueante.
-- Garantir que falha em thumbnail/ambience não derrube upload do vídeo principal.
+No navegador:
+- `saveGeneratedIdeas` deve retornar/confirmar as ideias criadas antes de marcar uma como usada;
+- evitar depender de React state imediatamente após `setProjects`;
+- atualizar `projectsRef.current` de forma síncrona dentro dos mutators críticos.
 
-### 8. Corrigir upload YouTube no GitHub
+No GitHub runner:
+- salvar `data.ideas` imediatamente após escolher/gerar ideia;
+- criar um registro de vídeo logo após escolher a ideia, com status inicial;
+- atualizar esse vídeo a cada etapa: script, voice, visuals, thumbnail, metadata, render, upload;
+- se falhar no upload, salvar o vídeo como `STANDBY` em vez de descartá-lo.
 
-- Atualizar `scripts/youtubeUploader.js`:
-  - thumbnail com corpo bruto e `uploadType=media`;
-  - checar `res.ok` e logar erro sem falhar o vídeo;
-  - remover `form-data` se ficar sem uso.
-- Padronizar metadata e privacidade com o mesmo comportamento do upload manual.
+### 4. Corrigir scheduler e lock
 
-### 9. Corrigir scheduler manual dentro da plataforma
+- Quando `autoGenerate` for ativado, gravar `nextScheduledRun` imediatamente.
+- Se `nextScheduledRun` estiver ausente em projeto ativo, criar uma data determinística em vez de recalcular aleatoriamente a cada checagem.
+- Em falha/skip de lock, registrar log persistente.
+- Garantir que `scheduleNextRun` rode em `finally` para falhas controladas.
+- No runner, diferenciar claramente:
+  - sem projetos;
+  - projetos não elegíveis;
+  - projeto elegível mas bloqueado por lock;
+  - projeto elegível mas sem credencial.
 
-- Se o projeto tem token salvo no Cloud mas não tem `youtubeChannelData`, tentar reparar automaticamente buscando o canal via refresh token.
-- Ao ativar Auto-Generate, calcular e persistir `nextScheduledRun` de forma previsível.
-- O botão “Executar Agora” deve ignorar agenda, mas não ignorar checklist de chaves/token.
-- Falhas de Studio/thumbnail devem virar warning, não impedir publicação.
+### 5. Endurecer o runner do GitHub
 
-### 10. Melhorar observabilidade
-
-- Persistir logs com:
-  - projeto;
-  - título do vídeo;
-  - etapa;
-  - erro resumido;
-  - duração;
-  - origem: `browser` ou `github-actions`.
-- No Scheduler, mostrar último erro real do GitHub também, não só logs locais do navegador.
-
-## Arquivos que serão modificados
-
+Arquivos principais:
 - `.github/workflows/auto-post.yml`
-- `.github/workflows/deploy.yml`
 - `scripts/automation-runner.js`
 - `scripts/videoRenderer.js`
 - `scripts/youtubeUploader.js`
-- `src/context/AuthContext.tsx`
-- `src/context/ProjectContext.tsx`
-- `src/pages/OAuthCallback.tsx`
-- `src/pages/ProjectHub.tsx`
-- `src/pages/Settings.tsx`
-- `src/pages/Scheduler.tsx`
-- `src/services/automationService.ts`
-- `src/services/youtubeAuthService.ts`
-- `supabase/functions/exchange-code/index.ts`
-- `supabase/functions/refresh-token/index.ts`
-- `supabase/functions/get-youtube-config/index.ts`
-- nova migration `supabase/migrations/006_automation_reliability.sql`
 
-## Validação após implementar
+Mudanças planejadas:
+- aumentar timeout do job;
+- adicionar preflight de envs com mensagens explícitas;
+- persistir progresso incremental no banco;
+- tratar `PROJECT_ID` manual como execução forçada com diagnóstico completo;
+- corrigir render de `data:image/...` salvando data URLs em arquivo antes do FFmpeg;
+- corrigir cadeia de crossfade para múltiplos clipes;
+- fazer upload do vídeo com corpo compatível com Node atual e erro detalhado;
+- normalizar `privacyStatus` para `public/private/unlisted`.
 
-- Rodar checagem estática dos scripts Node.
-- Validar que o fluxo manual cria: ideia → vídeo → script → voz → visuais → ambiência → thumbnail → metadata → upload.
-- Validar que o runner GitHub consegue:
-  - encontrar projetos elegíveis;
-  - carregar chaves do usuário ou fallback;
-  - renovar token do projeto;
-  - renderizar MP4;
-  - postar no YouTube;
-  - salvar vídeo publicado e próxima execução.
-- Se eu não tiver acesso direto ao banco real, vou deixar logs e mensagens suficientes para você colar o output do GitHub Actions e identificarmos qualquer secret/migration ausente em uma rodada curta.
+### 6. Aplicar migration idempotente de confiabilidade
+
+Criar uma migration real para garantir, no Cloud/banco:
+- permissões explícitas para tabelas usadas pela automação;
+- colunas necessárias em `autopilot_logs`;
+- colunas/índices de `project_auth`;
+- funções `acquire_autopilot_lock` e `release_autopilot_lock` com assinatura `text`;
+- grants de execução das funções;
+- índices para busca por usuário/projeto.
+
+Observação: nesta sessão o acesso direto ao banco não está disponível, então a correção deve ser idempotente e segura para rodar mesmo se parte dela já existir.
+
+### 7. Unificar estado de postagem por projeto
+
+- O refresh token usado no upload deve ser sempre o do `project_id` atual.
+- O callback OAuth deve salvar canal e auth no projeto alvo de forma confiável.
+- Se o canal estiver ausente mas o refresh token existir, reparar metadados do canal antes do upload.
+- Remover dependência de token global para decidir se o pipeline de criação pode começar.
+
+### 8. Validação final
+
+Depois de implementar, validar estes cenários:
+
+```text
+1. Projeto novo sem ideias:
+   auto/manual cria brainstorm novo e escolhe uma ideia.
+
+2. Projeto com ideia existente:
+   usa a ideia nova e marca como used sem repetir.
+
+3. YouTube desconectado:
+   cria vídeo até onde possível e para em STANDBY/upload com log claro.
+
+4. YouTube conectado:
+   cria, renderiza e posta usando refresh_token do projeto.
+
+5. GitHub workflow manual com PROJECT_ID:
+   ignora agenda, roda projeto específico e mostra motivo real se falhar.
+
+6. GitHub workflow agendado:
+   processa apenas projetos elegíveis, registra logs e agenda próxima execução.
+```
+
+## Ordem de correção recomendada
+
+1. Migration/Cloud e diagnóstico compartilhado.
+2. Persistência incremental de brainstorm/vídeo.
+3. Desacoplamento criação vs upload no navegador.
+4. Hardening do runner GitHub.
+5. Correções de render/upload.
+6. Teste manual e teste via workflow forçado.
