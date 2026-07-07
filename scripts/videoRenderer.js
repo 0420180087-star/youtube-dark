@@ -15,6 +15,19 @@ const streamPipeline = promisify(pipeline);
 
 // ─── Download file with retries and validation ───────────────────────────────
 export async function downloadFile(url, destPath, retries = 3) {
+  if (/^data:/i.test(url)) {
+    const match = String(url).match(/^data:([^;,]+)?(;base64)?,(.*)$/s);
+    if (!match) throw new Error('Invalid data URL');
+    const isBase64 = Boolean(match[2]);
+    const payload = match[3] || '';
+    const buffer = isBase64
+      ? Buffer.from(payload, 'base64')
+      : Buffer.from(decodeURIComponent(payload), 'utf8');
+    if (buffer.length < 100) throw new Error(`Data URL too small: ${buffer.length} bytes`);
+    fs.writeFileSync(destPath, buffer);
+    return;
+  }
+
   for (let attempt = 1; attempt <= retries; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 45000);
@@ -28,9 +41,10 @@ export async function downloadFile(url, destPath, retries = 3) {
       const body = typeof res.body?.getReader === 'function' ? Readable.fromWeb(res.body) : res.body;
       await streamPipeline(body, fs.createWriteStream(destPath));
 
-      // Validate: file must be > 10KB to be a real video/image
+      // Validate: file must be non-empty. Some generated SVG/JPEG fallbacks are
+      // legitimately small, so do not reject them solely for being under 10KB.
       const stat = fs.statSync(destPath);
-      if (stat.size < 10000) throw new Error(`File too small: ${stat.size} bytes`);
+      if (stat.size < 100) throw new Error(`File too small: ${stat.size} bytes`);
       return;
     } catch (err) {
       clearTimeout(timer);
@@ -39,6 +53,21 @@ export async function downloadFile(url, destPath, retries = 3) {
       await new Promise(r => setTimeout(r, 1000 * attempt));
     }
   }
+}
+
+function extensionForUrl(url, fallback = '.jpg') {
+  const dataMime = String(url || '').match(/^data:([^;,]+)/i)?.[1]?.toLowerCase() || '';
+  if (dataMime.includes('svg')) return '.svg';
+  if (dataMime.includes('png')) return '.png';
+  if (dataMime.includes('webp')) return '.webp';
+  if (dataMime.includes('gif')) return '.gif';
+  if (dataMime.includes('jpeg') || dataMime.includes('jpg')) return '.jpg';
+  try {
+    const pathname = new URL(url).pathname.toLowerCase();
+    const ext = path.extname(pathname);
+    if (['.jpg', '.jpeg', '.png', '.webp', '.gif', '.svg', '.mp4', '.mov', '.webm'].includes(ext)) return ext;
+  } catch {}
+  return fallback;
 }
 
 // ─── Check if a file is a valid video (has video stream) ─────────────────────
@@ -261,8 +290,8 @@ export async function renderVideo({ visuals, segments, audioBase64, audioMimeTyp
       } else {
         // It's an image — apply Ken Burns animation
         console.log(`    🖼️ Imagem detectada — aplicando Ken Burns`);
-        // Rename to add extension so ffmpeg handles it correctly
-        const imgPath = rawPath + '.jpg';
+        // Rename to add extension so ffmpeg handles the real image type correctly
+        const imgPath = rawPath + extensionForUrl(visual.url, '.jpg');
         fs.renameSync(rawPath, imgPath);
         await imageToVideoClip(imgPath, outPath, duration, visual.effect || 'zoom-in');
       }

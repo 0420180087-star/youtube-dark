@@ -28,6 +28,9 @@ export async function uploadVideoFile(accessToken, videoPath, metadata) {
   const fileSize = fs.statSync(videoPath).size;
   console.log(`  📤 Iniciando upload — ${(fileSize / 1024 / 1024).toFixed(1)}MB`);
 
+  const rawVisibility = String(metadata.visibility || 'public').toLowerCase();
+  const privacyStatus = ['public', 'private', 'unlisted'].includes(rawVisibility) ? rawVisibility : 'public';
+
   // Etapa 1: inicia o upload resumável
   const initRes = await fetch(
     'https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
@@ -47,12 +50,17 @@ export async function uploadVideoFile(accessToken, videoPath, metadata) {
           categoryId: metadata.categoryId || '22',
         },
         status: {
-          privacyStatus: metadata.visibility || 'public',
+          privacyStatus,
           selfDeclaredMadeForKids: false,
         },
       }),
     }
   );
+
+  if (!initRes.ok) {
+    const errBody = await initRes.text().catch(() => '');
+    throw new Error(`Falha ao iniciar upload YouTube: HTTP ${initRes.status} ${errBody}`);
+  }
 
   const uploadUrl = initRes.headers.get('location');
   if (!uploadUrl) {
@@ -61,18 +69,19 @@ export async function uploadVideoFile(accessToken, videoPath, metadata) {
   }
 
   // Etapa 2: envia o arquivo
-  const fileStream = fs.createReadStream(videoPath);
+  const fileBuffer = fs.readFileSync(videoPath);
   const uploadRes = await fetch(uploadUrl, {
     method: 'PUT',
     headers: {
       'Content-Type': 'video/mp4',
       'Content-Length': String(fileSize),
     },
-    body: fileStream,
-    duplex: 'half',
+    body: fileBuffer,
   });
 
-  const result = await uploadRes.json();
+  const uploadBody = await uploadRes.text().catch(() => '');
+  let result = {};
+  try { result = uploadBody ? JSON.parse(uploadBody) : {}; } catch { result = { error: uploadBody }; }
   if (!result.id) throw new Error(`Upload falhou: ${JSON.stringify(result)}`);
 
   console.log(`  ✅ Upload concluído: https://youtube.com/watch?v=${result.id}`);

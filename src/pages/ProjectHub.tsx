@@ -5,6 +5,7 @@ import { useProjects } from '../context/ProjectContext';
 import { useAuth } from '../context/AuthContext';
 import { ProjectStatus, VideoDuration, ProjectIdea, LibraryItemType, VideoFormat, VisualPacingStyle } from '../types';
 import { generateVoiceover, decodeAudioData, generateVideoIdeas, VideoIdea } from '../services/geminiService';
+import { calculateNextRunTime } from '../services/automationService';
 import { 
     ArrowLeft, Film, Clock, FileText, Mic, Image as ImageIcon, 
     MoreVertical, Play, Calendar, Save, Trash2, AlertOctagon, 
@@ -301,6 +302,18 @@ export const ProjectHub: React.FC = () => {
 
     const handleSaveSettings = () => {
         setIsSaving(true);
+        const wasAutoGenerate = project.scheduleSettings?.autoGenerate || false;
+        const nextScheduleSettings = {
+            frequencyDays: Number(editFreq),
+            timeWindowStart: editTimeStart,
+            timeWindowEnd: editTimeEnd,
+            autoGenerate: editAutoGenerate,
+            nextScheduledRun: project.scheduleSettings?.nextScheduledRun
+        };
+        if (editAutoGenerate && !wasAutoGenerate) {
+            nextScheduleSettings.nextScheduledRun = calculateNextRunTime(nextScheduleSettings).toISOString();
+        }
+
         const updates = {
             title: editTitle,
             channelTheme: editTheme,
@@ -321,13 +334,7 @@ export const ProjectHub: React.FC = () => {
                 style: editStyle
             },
             maxMediaDurationSeconds: Number(editMaxMediaDur),
-            scheduleSettings: {
-                frequencyDays: Number(editFreq),
-                timeWindowStart: editTimeStart,
-                timeWindowEnd: editTimeEnd,
-                autoGenerate: editAutoGenerate,
-                nextScheduledRun: project.scheduleSettings?.nextScheduledRun
-            }
+            scheduleSettings: nextScheduleSettings
         };
         updateProject(project.id, updates);
         setTimeout(() => setIsSaving(false), 800);
