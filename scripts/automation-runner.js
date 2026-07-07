@@ -860,10 +860,61 @@ async function safeInsertAutopilotLog(payload) {
   }
 }
 
+function lightVideoRecord(video) {
+  if (!video) return video;
+  return {
+    ...video,
+    audioUrl: video.audioUrl ? '__runner_audio__' : undefined,
+    backgroundMusicUrl: video.backgroundMusicUrl ? '__runner_music__' : undefined,
+    thumbnailUrl: video.thumbnailUrl?.startsWith?.('data:') ? '__runner_thumbnail__' : video.thumbnailUrl,
+    visualScenes: video.visualScenes?.map((scene) => ({
+      ...scene,
+      imageUrl: scene.imageUrl?.startsWith?.('data:') ? '__runner_image__' : scene.imageUrl,
+    })),
+  };
+}
+
+function calculateNextRunIso(settings = {}) {
+  const freqDays = Math.max(1, Number(settings.frequencyDays) || 1);
+  const [startH = 9, startM = 0] = String(settings.timeWindowStart || '09:00').split(':').map(Number);
+  const [endH = 21, endM = 0] = String(settings.timeWindowEnd || '21:00').split(':').map(Number);
+  const startMinutes = startH * 60 + startM;
+  const endMinutes = endH * 60 + endM;
+  const windowSize = Math.max(0, endMinutes - startMinutes);
+  const offset = windowSize > 0 ? Math.floor(Math.random() * windowSize) : 0;
+  const total = startMinutes + offset;
+  const nextRun = new Date();
+  nextRun.setDate(nextRun.getDate() + freqDays);
+  nextRun.setHours(Math.floor(total / 60), total % 60, 0, 0);
+  return nextRun.toISOString();
+}
+
+async function persistProjectData(projectId, data, message = 'Project data persisted') {
+  const { error } = await supabase
+    .from('projects')
+    .update({ data, updated_at: new Date().toISOString() })
+    .eq('id', projectId);
+  if (error) log('⚠️', `${message} failed: ${error.message}`);
+}
+
+async function updateRunnerVideo(projectId, data, videoId, updates, logMessage) {
+  if (!data.videos) data.videos = [];
+  const idx = data.videos.findIndex((v) => v.id === videoId);
+  if (idx === -1) return;
+  data.videos[idx] = lightVideoRecord({
+    ...data.videos[idx],
+    ...updates,
+    updatedAt: new Date().toISOString(),
+  });
+  await persistProjectData(projectId, data, logMessage || `Video ${videoId} updated`);
+}
+
 async function processProject(projectRow) {
   const projectId = projectRow.id;
-  const data = projectRow.data;
+  const data = projectRow.data || {};
   const startTime = Date.now();
+  let videoId = null;
+  let videoTitle = data.channelTheme || projectId;
 
   // Acquire distributed lock — prevents browser scheduler from running
   // the same project at the same time as this GitHub Actions runner.
@@ -911,21 +962,41 @@ async function processProject(projectRow) {
     // Update ideas in Supabase
     if (idea.updatedIdeas) {
       data.ideas = idea.updatedIdeas;
+      await persistProjectData(projectId, data, 'Brainstorm saved');
     }
+
+    videoTitle = idea.topic;
+    videoId = `auto_${Date.now()}`;
+    if (!data.videos) data.videos = [];
+    data.videos.unshift({
+      id: videoId,
+      projectId,
+      title: idea.topic,
+      status: 'DRAFT',
+      targetDuration: data.defaultDuration || 'Standard (5-8 min)',
+      format: data.defaultFormat || 'Landscape 16:9',
+      specificContext: idea.specificContext || idea.context || '',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    await persistProjectData(projectId, data, 'Draft video saved');
 
     // Step 2: Script
     currentStep = 'script';
     const script = await stepScript(idea.topic, data);
+    await updateRunnerVideo(projectId, data, videoId, { script, status: 'SCRIPTING' }, 'Script saved');
 
     // Step 3: Voice/Narration
     currentStep = 'voice';
     const voiceResult = await stepVoice(script, data);
     const audioBase64 = voiceResult.audioBase64;
     const audioMimeType = voiceResult.mimeType;
+    await updateRunnerVideo(projectId, data, videoId, { audioUrl: '__runner_audio__', status: 'AUDIO_GENERATED' }, 'Voice state saved');
 
     // Step 4: Visuals
     currentStep = 'visuals';
     const scenes = await stepVisuals(script, data);
+    await updateRunnerVideo(projectId, data, videoId, { visualScenes: scenes, status: 'VIDEO_GENERATED' }, 'Visuals saved');
 
     // Step 5: Thumbnail (optional — does not break pipeline)
     currentStep = 'thumbnail';
@@ -933,6 +1004,7 @@ async function processProject(projectRow) {
     try {
       const thumbResult = await stepThumbnail(idea.topic, script, data);
       thumbnailBase64 = thumbResult?.thumbnailBase64 || null;
+      if (thumbnailBase64) await updateRunnerVideo(projectId, data, videoId, { thumbnailUrl: `data:image/jpeg;base64,${thumbnailBase64}` }, 'Thumbnail saved');
       if (thumbnailBase64) log('🖼️', 'Thumbnail image generated');
       else log('⚠️', 'Thumbnail not generated, continuing without it');
     } catch {
@@ -942,6 +1014,14 @@ async function processProject(projectRow) {
     // Step 6: Metadata
     currentStep = 'metadata';
     const metadata = await stepMetadata(idea.topic, script, data);
+    videoTitle = metadata.youtubeTitle || metadata.title || idea.topic;
+    await updateRunnerVideo(projectId, data, videoId, { title: videoTitle, videoMetadata: {
+      youtubeTitle: metadata.youtubeTitle || metadata.title || idea.topic,
+      youtubeDescription: metadata.youtubeDescription || metadata.description || '',
+      tags: metadata.tags || [],
+      categoryId: metadata.categoryId || '22',
+      visibility: 'public',
+    } }, 'Metadata saved');
 
     // Step 7: Render Video (now receives audio!)
     currentStep = 'render';
@@ -951,37 +1031,13 @@ async function processProject(projectRow) {
     currentStep = 'upload';
     const uploadResult = await stepUploadYouTube(data, metadata, renderResult, thumbnailBase64, projectRow.user_email);
 
-    // Save video record into project data
-    const newVideo = {
-      id: `auto_${Date.now()}`,
-      projectId,
-      title: metadata.title || idea.topic,
-      status: 'PUBLISHED',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      youtubeUrl: uploadResult?.videoUrl || null,
-    };
-
-    if (!data.videos) data.videos = [];
-    data.videos.push(newVideo);
-
-    // Calculate next run
-    const settings = data.scheduleSettings || {};
-    const freqDays = settings.frequencyDays || 1;
-    const startH = parseInt((settings.timeWindowStart || '09:00').split(':')[0]);
-    const endH = parseInt((settings.timeWindowEnd || '21:00').split(':')[0]);
-    const randomH = startH + Math.floor(Math.random() * (endH - startH));
-    const randomM = Math.floor(Math.random() * 60);
-
-    const nextRun = new Date();
-    nextRun.setDate(nextRun.getDate() + freqDays);
-    nextRun.setHours(randomH, randomM, 0, 0);
-
     if (!data.scheduleSettings) data.scheduleSettings = {};
-    data.scheduleSettings.nextScheduledRun = nextRun.toISOString();
+    data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
 
-    // Save updated project data
-    await supabase.from('projects').update({ data, updated_at: new Date().toISOString() }).eq('id', projectId);
+    await updateRunnerVideo(projectId, data, videoId, {
+      status: 'PUBLISHED',
+      youtubeUrl: uploadResult?.videoUrl || null,
+    }, 'Published video saved');
 
     // Log success
     const duration = Math.round((Date.now() - startTime) / 1000);
@@ -990,24 +1046,31 @@ async function processProject(projectRow) {
       status: 'success',
       message: `Publicado: ${uploadResult?.videoUrl || 'sem URL'}`,
       step: 'upload',
-      video_title: metadata.title || idea.topic,
+      video_title: videoTitle,
       elapsed_ms: duration * 1000,
       runner: 'github-actions',
     });
 
-    log('🎉', `Project complete! Duration: ${duration}s. Next run: ${nextRun.toISOString()}`);
+    log('🎉', `Project complete! Duration: ${duration}s. Next run: ${data.scheduleSettings.nextScheduledRun}`);
     return true;
   } catch (err) {
     const duration = Math.round((Date.now() - startTime) / 1000);
     log('❌', `Failed at step "${currentStep}": ${err.message}`);
 
-    // Save standby info
-    data.standbyInfo = {
+    const standbyInfo = {
       failedStep: currentStep,
       errorMessage: err.message,
       failedAt: new Date().toISOString(),
     };
-    await supabase.from('projects').update({ data, updated_at: new Date().toISOString() }).eq('id', projectId);
+    data.standbyInfo = standbyInfo;
+    if (videoId) {
+      await updateRunnerVideo(projectId, data, videoId, {
+        status: 'STANDBY',
+        standbyInfo,
+      }, 'Standby video saved');
+    } else {
+      await persistProjectData(projectId, data, 'Standby project saved');
+    }
 
     // Log error
     await safeInsertAutopilotLog({
@@ -1015,12 +1078,17 @@ async function processProject(projectRow) {
       status: 'error',
       message: err.message,
       step: currentStep,
+      video_title: videoTitle,
       elapsed_ms: duration * 1000,
       runner: 'github-actions',
     });
 
     return false;
   } finally {
+    if (data.scheduleSettings?.autoGenerate && !data.scheduleSettings.nextScheduledRun) {
+      data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
+      await persistProjectData(projectId, data, 'Next run saved');
+    }
     // Always release the lock — even on crash — so the project isn't
     // permanently blocked from future runs.
     try {
