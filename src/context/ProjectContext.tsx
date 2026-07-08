@@ -126,10 +126,19 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
         // STEP 3: Sync with Supabase in background (non-blocking)
         if (supabase && user?.email) {
-          const { data, error } = await supabase
+          let { data, error } = await supabase
             .from("projects")
             .select("data, autopilot_locked_until, autopilot_locked_by")
             .eq("user_email", user.email);
+
+          if (error && (error.message || '').includes('column')) {
+            const fallback = await supabase
+              .from("projects")
+              .select("data")
+              .eq("user_email", user.email);
+            data = fallback.data as any;
+            error = fallback.error;
+          }
 
           if (!error && data && data.length > 0) {
             const remoteProjects: Project[] = data.map((row: any) => ({

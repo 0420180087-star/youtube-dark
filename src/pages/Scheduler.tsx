@@ -148,12 +148,14 @@ const AutoPilotProjects: React.FC = () => {
     if (!supabase || projects.length === 0) return;
     const loadRemoteLogs = async () => {
       const ids = projects.map(p => p.id);
-      let { data, error } = await supabase
+      let response: any = await supabase
         .from('autopilot_logs')
         .select('project_id,status,message,step,video_title,elapsed_ms,runner,created_at')
         .in('project_id', ids)
         .order('created_at', { ascending: false })
         .limit(50);
+      let data = response.data;
+      let error = response.error;
 
       if (error && (error.message || '').includes('column')) {
         const fallback = await supabase
@@ -162,7 +164,7 @@ const AutoPilotProjects: React.FC = () => {
           .in('project_id', ids)
           .order('created_at', { ascending: false })
           .limit(50);
-        data = fallback.data;
+        data = fallback.data as any;
         error = fallback.error;
       }
 
