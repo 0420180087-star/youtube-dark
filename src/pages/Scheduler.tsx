@@ -148,12 +148,24 @@ const AutoPilotProjects: React.FC = () => {
     if (!supabase || projects.length === 0) return;
     const loadRemoteLogs = async () => {
       const ids = projects.map(p => p.id);
-      const { data, error } = await supabase
+      let { data, error } = await supabase
         .from('autopilot_logs')
         .select('project_id,status,message,step,video_title,elapsed_ms,runner,created_at')
         .in('project_id', ids)
         .order('created_at', { ascending: false })
         .limit(50);
+
+      if (error && (error.message || '').includes('column')) {
+        const fallback = await supabase
+          .from('autopilot_logs')
+          .select('project_id,status,message,step,created_at')
+          .in('project_id', ids)
+          .order('created_at', { ascending: false })
+          .limit(50);
+        data = fallback.data;
+        error = fallback.error;
+      }
+
       if (error || !data) return;
       setRemoteLogs(data.map((row: any) => {
         const project = projects.find(p => p.id === row.project_id);
@@ -167,7 +179,7 @@ const AutoPilotProjects: React.FC = () => {
           timestamp: row.created_at || new Date().toISOString(),
           step: row.step,
           elapsedMs: row.elapsed_ms || undefined,
-          runner: row.runner || 'github-actions',
+          runner: row.runner || undefined,
         } as AutoPilotLogEntry;
       }));
     };
