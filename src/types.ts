@@ -9,7 +9,7 @@ export enum ProjectStatus {
 }
 
 export type AutoPilotStep = 
-  | 'idea' | 'script' | 'voice' | 'visuals' | 'studio' | 'thumbnail' | 'metadata' | 'upload' | 'shorts';
+  | 'idea' | 'script' | 'voice' | 'visuals' | 'studio' | 'thumbnail' | 'metadata' | 'render' | 'upload' | 'shorts';
 
 export interface StandbyInfo {
   failedStep: AutoPilotStep;
@@ -179,6 +179,8 @@ export interface Project {
   
   isYoutubeConnected?: boolean;
   youtubeChannelData?: YouTubeChannel;
+  autopilotLockedUntil?: string | null;
+  autopilotLockedBy?: string | null;
   // NOTE: youtubeAccessToken was removed from Project.
   // OAuth tokens are NOT domain data — they live exclusively in AuthContext
   // and are never serialized into projects or synced to Supabase.

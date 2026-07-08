@@ -25,6 +25,7 @@ export interface AutoPilotLogEntry {
   timestamp: string;
   step?: AutoPilotStep;
   elapsedMs?: number;
+  runner?: string;
 }
 
 export interface AutoPilotProgress {
@@ -58,6 +59,7 @@ interface ProjectContextType {
   getVideo: (projectId: string, videoId: string) => Video | undefined;
 
   autoPilotStatus: string;
+  isAutoPilotRunning: boolean;
   autoPilotLog: AutoPilotLogEntry[];
   autoPilotProgress: AutoPilotProgress;
   triggerAutoPilotNow: (projectId: string) => Promise<void>;
@@ -71,6 +73,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [projects, setProjects] = useState<Project[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [autoPilotStatus, setAutoPilotStatus] = useState<string>('Idle');
+  const [isAutoPilotRunning, setIsAutoPilotRunning] = useState(false);
   const [autoPilotLog, setAutoPilotLog] = useState<AutoPilotLogEntry[]>([]);
   const [autoPilotProgress, setAutoPilotProgress] = useState<AutoPilotProgress>({
     isRunning: false, currentStep: null, stepMessage: '', stepStartTime: null, pipelineStartTime: null
@@ -83,6 +86,27 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const accessTokenRef = useRef<string | null>(null);
 
   const storageKey = user?.email ? `darkstream_projects_${user.email}` : 'darkstream_projects_guest';
+
+  const buildCloudProject = (project: Project) => {
+    const { autopilotLockedUntil, autopilotLockedBy, ...domainProject } = project;
+    return {
+      ...domainProject,
+      videos: project.videos.map(v => ({
+        ...v,
+        audioUrl: v.audioUrl ? '__has_audio__' : undefined,
+        backgroundMusicUrl: v.backgroundMusicUrl ? '__has_music__' : undefined,
+        visualScenes: v.visualScenes?.map(scene => ({
+          ...scene,
+          imageUrl: scene.imageUrl?.startsWith('data:') ? '__has_image__' : scene.imageUrl,
+        })),
+        thumbnailUrl: v.thumbnailUrl?.startsWith('data:') ? '__has_thumbnail__' : v.thumbnailUrl,
+      })),
+    };
+  };
+
+  const returnStatusToIdle = (delayMs = 5000) => {
+    window.setTimeout(() => setAutoPilotStatus('Idle'), delayMs);
+  };
 
   // Load projects — IndexedDB first (instant), then Supabase in background (sync)
   // This prevents blank pages while Supabase is slow to respond
@@ -102,13 +126,26 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
         // STEP 3: Sync with Supabase in background (non-blocking)
         if (supabase && user?.email) {
-          const { data, error } = await supabase
+          let { data, error } = await supabase
             .from("projects")
-            .select("data")
+            .select("data, autopilot_locked_until, autopilot_locked_by")
             .eq("user_email", user.email);
 
+          if (error && (error.message || '').includes('column')) {
+            const fallback = await supabase
+              .from("projects")
+              .select("data")
+              .eq("user_email", user.email);
+            data = fallback.data as any;
+            error = fallback.error;
+          }
+
           if (!error && data && data.length > 0) {
-            const remoteProjects: Project[] = data.map((row: any) => row.data);
+            const remoteProjects: Project[] = data.map((row: any) => ({
+              ...row.data,
+              autopilotLockedUntil: row.autopilot_locked_until ?? null,
+              autopilotLockedBy: row.autopilot_locked_by ?? null,
+            }));
 
             const mergeBlobs = (remote: Project, local: Project | undefined): Project => {
               if (!local) return remote;
@@ -203,23 +240,9 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
 
     supabaseSyncTimerRef.current = window.setTimeout(async () => {
-      const buildLight = (project: Project) => ({
-        ...project,
-        videos: project.videos.map(v => ({
-          ...v,
-          audioUrl: v.audioUrl ? '__has_audio__' : undefined,
-          backgroundMusicUrl: v.backgroundMusicUrl ? '__has_music__' : undefined,
-          visualScenes: v.visualScenes?.map(scene => ({
-            ...scene,
-            imageUrl: scene.imageUrl?.startsWith('data:') ? '__has_image__' : scene.imageUrl,
-          })),
-          thumbnailUrl: v.thumbnailUrl?.startsWith('data:') ? '__has_thumbnail__' : v.thumbnailUrl,
-        })),
-      });
-
       for (const project of projects) {
         try {
-          const lightProject = buildLight(project);
+          const lightProject = buildCloudProject(project);
           const signature = JSON.stringify(lightProject);
           const previous = lastSyncSnapshotRef.current.get(project.id);
           if (previous === signature) continue; // unchanged — skip
@@ -306,28 +329,58 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     if (!project) return;
     if (isRunningAutomation.current) {
       setAutoPilotStatus("Já está em execução...");
+      returnStatusToIdle();
       return;
     }
 
-    // If the project has a connected channel but we have no token in memory,
-    // attempt a refresh before giving up. This handles the case where the
-    // token expired since the last page load.
-    if ((project.isYoutubeConnected || project.youtubeChannelData) && !accessTokenRef.current) {
-      setAutoPilotStatus("Renovando token do YouTube...");
+    if (supabase && userEmailRef.current) {
       try {
-        const freshToken = await refreshYouTubeToken(projectId);
-        if (!freshToken) {
-          setAutoPilotStatus(
-            "Auto-Pilot Pausado: token do YouTube expirou. Vá em Configurações → desconecte e reconecte o canal."
-          );
-          return;
-        }
-        accessTokenRef.current = freshToken;
-      } catch {
-        setAutoPilotStatus(
-          "Auto-Pilot Pausado: não foi possível renovar o token. Reconecte o canal YouTube."
-        );
+        const queuedAt = new Date(Date.now() - 1000).toISOString();
+        const queuedProject: Project = {
+          ...project,
+          scheduleSettings: {
+            frequencyDays: project.scheduleSettings?.frequencyDays || 1,
+            timeWindowStart: project.scheduleSettings?.timeWindowStart || '12:00',
+            timeWindowEnd: project.scheduleSettings?.timeWindowEnd || '18:00',
+            autoGenerate: true,
+            nextScheduledRun: queuedAt,
+          },
+        };
+        const updated = projectsRef.current.map(p => p.id === projectId ? queuedProject : p);
+        projectsRef.current = updated;
+        setProjects(updated);
+
+        const { error } = await supabase.from('projects').upsert({
+          id: queuedProject.id,
+          user_email: userEmailRef.current,
+          data: buildCloudProject(queuedProject),
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'id' });
+        if (error) throw error;
+
+        await supabase.from('autopilot_logs').insert({
+          project_id: queuedProject.id,
+          status: 'running',
+          message: 'Execução manual enfileirada para o runner headless. Pode sair da página; o GitHub Actions assumirá no próximo ciclo.',
+          step: 'idea',
+        }).then(({ error: logError }) => {
+          if (logError) console.warn('[AutoPilot] Não foi possível registrar fila remota:', logError.message);
+        });
+
+        setAutoPilotStatus('Execução enfileirada para o runner headless');
+        addLogEntry({
+          projectId: queuedProject.id,
+          projectTitle: queuedProject.title,
+          status: 'retrying',
+          message: 'Execução enfileirada. A automação continuará pelo GitHub Actions mesmo com a página fechada.',
+          step: 'idea',
+          runner: 'github-actions',
+        });
+        returnStatusToIdle();
         return;
+      } catch (e) {
+        console.warn('[AutoPilot] Falha ao enfileirar runner headless; usando execução local:', e);
+        setAutoPilotStatus('Fila headless indisponível; executando localmente nesta aba');
       }
     }
 
@@ -349,7 +402,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
         return getNextAutoRunInfoFromRef(p).isEligible;
       });
 
-      if (eligibleProject) {
+      if (eligibleProject && !(supabase && userEmailRef.current)) {
         await runFullPipeline(eligibleProject);
       }
     }, 60000);
@@ -407,8 +460,13 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     let currentToken = accessTokenRef.current;
     if (!currentToken) {
       setAutoPilotStatus('Renovando sessão do YouTube...');
-      currentToken = await refreshYouTubeToken(project.id);
-      accessTokenRef.current = currentToken;
+      try {
+        currentToken = await refreshYouTubeToken(project.id);
+        accessTokenRef.current = currentToken;
+      } catch (e) {
+        console.warn('[AutoPilot] Refresh do YouTube falhou antes da criação; seguindo até STANDBY no upload:', e);
+        currentToken = null;
+      }
     }
     if (currentToken && !runnableProject.youtubeChannelData) {
       runnableProject = await repairYouTubeConnection(runnableProject, currentToken);
@@ -444,6 +502,8 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
             status: 'retrying',
             message: error ? `Lock não obtido: ${error.message}` : 'Lock não obtido: outro runner está processando este projeto',
           });
+          setIsAutoPilotRunning(false);
+          returnStatusToIdle();
           return;
         }
       } catch (e) {
@@ -454,6 +514,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
 
     isRunningAutomation.current = true;
+    setIsAutoPilotRunning(true);
     const pipelineStart = Date.now();
     
     setAutoPilotProgress({
@@ -545,7 +606,8 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
         isRunning: false, currentStep: null, stepMessage: '', stepStartTime: null, pipelineStartTime: null
       });
       isRunningAutomation.current = false;
-      setTimeout(() => setAutoPilotStatus("Idle"), 5000);
+      setIsAutoPilotRunning(false);
+      returnStatusToIdle();
     }
   };
 
@@ -605,19 +667,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (!hasBlob && supabase && userEmailRef.current) {
         const project = updated.find(p => p.id === id);
         if (project) {
-          const lightProject = {
-            ...project,
-            videos: project.videos.map(v => ({
-              ...v,
-              audioUrl: v.audioUrl ? '__has_audio__' : undefined,
-              backgroundMusicUrl: v.backgroundMusicUrl ? '__has_music__' : undefined,
-              thumbnailUrl: v.thumbnailUrl?.startsWith('data:') ? '__has_thumbnail__' : v.thumbnailUrl,
-              visualScenes: v.visualScenes?.map(s => ({
-                ...s,
-                imageUrl: s.imageUrl?.startsWith('data:') ? '__has_image__' : s.imageUrl,
-              })),
-            })),
-          };
+          const lightProject = buildCloudProject(project);
           supabase.from('projects').upsert({
             id: project.id,
             user_email: userEmailRef.current,
@@ -773,7 +823,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   return (
     <ProjectContext.Provider value={{ 
-      projects, isLoading, autoPilotStatus, autoPilotLog, autoPilotProgress,
+      projects, isLoading, autoPilotStatus, isAutoPilotRunning, autoPilotLog, autoPilotProgress,
       addProject, updateProject, getProject, deleteProject, 
       saveGeneratedIdeas, updateIdeaStatus, markIdeaAsUsed, removeIdeaFromHistory,
       addLibraryItem, deleteLibraryItem,

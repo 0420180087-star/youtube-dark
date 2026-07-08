@@ -560,6 +560,7 @@ export const STEP_LABELS: Record<AutoPilotStep, string> = {
   studio: '🎵 Música',
   thumbnail: '🖼️ Thumbnail',
   metadata: '📊 SEO/Metadata',
+  render: '🎬 Renderização',
   upload: '📤 Upload YouTube',
   shorts: '⚡ Auto-Shorts'
 };

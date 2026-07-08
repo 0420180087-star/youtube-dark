@@ -1,9 +1,13 @@
 name: Auto Post Video
 
+concurrency:
+  group: darkstream-auto-post
+  cancel-in-progress: false
+
 on:
   schedule:
-    # Runs every 3 hours — checks which projects are due for a new video
-    - cron: '0 */3 * * *'
+    # Runs every 15 minutes — checks queued/due projects without requiring the page to stay open
+    - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       project_id:

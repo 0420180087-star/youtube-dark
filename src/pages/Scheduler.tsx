@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useProjects, AutoPilotLogEntry } from '../context/ProjectContext';
 import { ProjectStatus } from '../types';
 import { STEP_LABELS } from '../services/automationService';
+import { supabase } from '../lib/supabaseClient';
 import { 
   Calendar as CalendarIcon, Clock, ListOrdered, PlayCircle, Bot, Zap, 
   CheckCircle, XCircle, Loader2, Timer, ArrowRight, AlertTriangle, 
@@ -28,7 +29,7 @@ const formatElapsed = (ms: number): string => {
   return `${Math.floor(secs / 60)}m ${secs % 60}s`;
 };
 
-const ALL_STEPS = ['idea', 'script', 'voice', 'visuals', 'studio', 'thumbnail', 'metadata', 'upload', 'shorts'] as const;
+const ALL_STEPS = ['idea', 'script', 'voice', 'visuals', 'studio', 'thumbnail', 'metadata', 'render', 'upload', 'shorts'] as const;
 
 const ProgressPanel: React.FC = () => {
   const { autoPilotProgress } = useProjects();
@@ -138,9 +139,59 @@ const StandbyVideos: React.FC = () => {
 };
 
 const AutoPilotProjects: React.FC = () => {
-  const { projects, autoPilotStatus, autoPilotLog, triggerAutoPilotNow, getNextAutoRunInfo } = useProjects();
+  const { projects, autoPilotLog, isAutoPilotRunning, triggerAutoPilotNow, getNextAutoRunInfo } = useProjects();
+  const [remoteLogs, setRemoteLogs] = useState<AutoPilotLogEntry[]>([]);
   const autoProjects = projects.filter(p => p.scheduleSettings?.autoGenerate);
-  const isRunning = autoPilotStatus !== 'Idle';
+  const isRunning = isAutoPilotRunning;
+
+  useEffect(() => {
+    if (!supabase || projects.length === 0) return;
+    const loadRemoteLogs = async () => {
+      const ids = projects.map(p => p.id);
+      let response: any = await supabase
+        .from('autopilot_logs')
+        .select('project_id,status,message,step,video_title,elapsed_ms,runner,created_at')
+        .in('project_id', ids)
+        .order('created_at', { ascending: false })
+        .limit(50);
+      let data = response.data;
+      let error = response.error;
+
+      if (error && (error.message || '').includes('column')) {
+        const fallback = await supabase
+          .from('autopilot_logs')
+          .select('project_id,status,message,step,created_at')
+          .in('project_id', ids)
+          .order('created_at', { ascending: false })
+          .limit(50);
+        data = fallback.data as any;
+        error = fallback.error;
+      }
+
+      if (error || !data) return;
+      setRemoteLogs(data.map((row: any) => {
+        const project = projects.find(p => p.id === row.project_id);
+        return {
+          id: `remote_${row.project_id}_${row.created_at}_${row.step || 'log'}`,
+          projectId: row.project_id,
+          projectTitle: project?.title || project?.channelTheme || row.project_id,
+          videoTitle: row.video_title || undefined,
+          status: ['running', 'success', 'error', 'retrying'].includes(row.status) ? row.status : 'running',
+          message: row.message || '',
+          timestamp: row.created_at || new Date().toISOString(),
+          step: row.step,
+          elapsedMs: row.elapsed_ms || undefined,
+          runner: row.runner || undefined,
+        } as AutoPilotLogEntry;
+      }));
+    };
+    loadRemoteLogs();
+    const interval = window.setInterval(loadRemoteLogs, 30000);
+    return () => window.clearInterval(interval);
+  }, [projects]);
+
+  const mergedLog = [...remoteLogs, ...autoPilotLog]
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
   if (autoProjects.length === 0) return null;
 
@@ -195,6 +246,12 @@ const AutoPilotProjects: React.FC = () => {
                   <span className="text-slate-500">Sem agendamento</span>
                 )}
               </div>
+              {p.autopilotLockedUntil && new Date(p.autopilotLockedUntil) > new Date() && (
+                <div className="flex items-center gap-2 text-[11px] text-orange-300 bg-orange-500/10 border border-orange-500/20 rounded-lg px-2.5 py-2">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Runner ativo: {p.autopilotLockedBy || 'processando'}</span>
+                </div>
+              )}
               
               <div className="flex gap-2">
                 <button
@@ -203,7 +260,7 @@ const AutoPilotProjects: React.FC = () => {
                   className="flex-1 flex items-center justify-center gap-1.5 bg-orange-600 hover:bg-orange-500 disabled:bg-slate-700 disabled:text-slate-500 text-white text-xs font-bold py-2 rounded-lg transition-colors"
                 >
                   <Zap className="w-3.5 h-3.5" />
-                  {isRunning ? 'Executando...' : 'Executar Agora'}
+                  {isRunning ? 'Executando local...' : 'Executar Agora'}
                 </button>
                 <Link 
                   to={`/project/${p.id}`}
@@ -218,17 +275,18 @@ const AutoPilotProjects: React.FC = () => {
       </div>
 
       {/* Activity Log */}
-      {autoPilotLog.length > 0 && (
+      {mergedLog.length > 0 && (
         <div className="mt-4 space-y-2">
           <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Atividade Recente</h3>
           <div className="max-h-40 overflow-y-auto custom-scrollbar space-y-1.5">
-            {autoPilotLog.slice(0, 20).map(entry => (
+            {mergedLog.slice(0, 20).map(entry => (
               <div key={entry.id} className="flex items-start gap-2 text-xs bg-slate-950/50 px-3 py-2 rounded-lg border border-slate-800/50">
                 {logIcon(entry.status)}
                 <div className="flex-1 min-w-0">
                   <span className="text-slate-300 font-medium">{entry.projectTitle}</span>
                   {entry.videoTitle && <span className="text-slate-500"> — {entry.videoTitle}</span>}
                   {entry.step && <span className="text-slate-600 text-[10px]"> [{STEP_LABELS[entry.step]}]</span>}
+                  {entry.runner && <span className="text-slate-600 text-[10px]"> [{entry.runner}]</span>}
                   <p className="text-slate-500 truncate">{entry.message}</p>
                   {entry.elapsedMs && (
                     <span className="text-[10px] text-slate-600">Duração: {formatElapsed(entry.elapsedMs)}</span>
