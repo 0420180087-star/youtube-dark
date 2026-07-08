@@ -25,6 +25,7 @@ export interface AutoPilotLogEntry {
   timestamp: string;
   step?: AutoPilotStep;
   elapsedMs?: number;
+  runner?: string;
 }
 
 export interface AutoPilotProgress {
@@ -58,6 +59,7 @@ interface ProjectContextType {
   getVideo: (projectId: string, videoId: string) => Video | undefined;
 
   autoPilotStatus: string;
+  isAutoPilotRunning: boolean;
   autoPilotLog: AutoPilotLogEntry[];
   autoPilotProgress: AutoPilotProgress;
   triggerAutoPilotNow: (projectId: string) => Promise<void>;
@@ -71,6 +73,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [projects, setProjects] = useState<Project[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [autoPilotStatus, setAutoPilotStatus] = useState<string>('Idle');
+  const [isAutoPilotRunning, setIsAutoPilotRunning] = useState(false);
   const [autoPilotLog, setAutoPilotLog] = useState<AutoPilotLogEntry[]>([]);
   const [autoPilotProgress, setAutoPilotProgress] = useState<AutoPilotProgress>({
     isRunning: false, currentStep: null, stepMessage: '', stepStartTime: null, pipelineStartTime: null
@@ -83,6 +86,27 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const accessTokenRef = useRef<string | null>(null);
 
   const storageKey = user?.email ? `darkstream_projects_${user.email}` : 'darkstream_projects_guest';
+
+  const buildCloudProject = (project: Project) => {
+    const { autopilotLockedUntil, autopilotLockedBy, ...domainProject } = project;
+    return {
+      ...domainProject,
+      videos: project.videos.map(v => ({
+        ...v,
+        audioUrl: v.audioUrl ? '__has_audio__' : undefined,
+        backgroundMusicUrl: v.backgroundMusicUrl ? '__has_music__' : undefined,
+        visualScenes: v.visualScenes?.map(scene => ({
+          ...scene,
+          imageUrl: scene.imageUrl?.startsWith('data:') ? '__has_image__' : scene.imageUrl,
+        })),
+        thumbnailUrl: v.thumbnailUrl?.startsWith('data:') ? '__has_thumbnail__' : v.thumbnailUrl,
+      })),
+    };
+  };
+
+  const returnStatusToIdle = (delayMs = 5000) => {
+    window.setTimeout(() => setAutoPilotStatus('Idle'), delayMs);
+  };
 
   // Load projects — IndexedDB first (instant), then Supabase in background (sync)
   // This prevents blank pages while Supabase is slow to respond
