@@ -460,8 +460,13 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     let currentToken = accessTokenRef.current;
     if (!currentToken) {
       setAutoPilotStatus('Renovando sessão do YouTube...');
-      currentToken = await refreshYouTubeToken(project.id);
-      accessTokenRef.current = currentToken;
+      try {
+        currentToken = await refreshYouTubeToken(project.id);
+        accessTokenRef.current = currentToken;
+      } catch (e) {
+        console.warn('[AutoPilot] Refresh do YouTube falhou antes da criação; seguindo até STANDBY no upload:', e);
+        currentToken = null;
+      }
     }
     if (currentToken && !runnableProject.youtubeChannelData) {
       runnableProject = await repairYouTubeConnection(runnableProject, currentToken);
