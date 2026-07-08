@@ -929,24 +929,51 @@ async function processProject(projectRow) {
 
   if (lockError) {
     log('❌', `Lock RPC error: ${lockError.message} — aplique as migrations 003 e 005 no Supabase`);
+    await safeInsertAutopilotLog({
+      project_id: projectId,
+      status: 'error',
+      message: `Lock RPC error: ${lockError.message}`,
+      step: 'idea',
+      runner: 'github-actions',
+    });
     return false;
   }
   if (!lockAcquired) {
     log('⏭️', `Lock não adquirido para "${data.channelTheme}" — já rodando em outro lugar`);
+    await safeInsertAutopilotLog({
+      project_id: projectId,
+      status: 'retrying',
+      message: 'Lock não obtido: outro runner está processando este projeto',
+      step: 'idea',
+      runner: 'github-actions',
+    });
     return false;
   }
 
   log('🚀', `Processing project: "${data.channelTheme}" (${projectId})`);
+  await safeInsertAutopilotLog({
+    project_id: projectId,
+    status: 'running',
+    message: 'Runner headless iniciou o pipeline',
+    step: 'idea',
+    runner: 'github-actions',
+  });
 
   // Load per-user API keys (Gemini/Pexels) — owner of this project
   await loadUserKeys(projectRow.user_email);
   if (!GEMINI_API_KEY) {
     log('❌', `No Gemini key configured for user ${projectRow.user_email}. Skipping.`);
+    if (!data.scheduleSettings) data.scheduleSettings = {};
+    if (data.scheduleSettings.autoGenerate) {
+      data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
+      await persistProjectData(projectId, data, 'Next run saved after missing Gemini key');
+    }
     await safeInsertAutopilotLog({
       project_id: projectId,
       status: 'error',
       message: 'Gemini API key ausente. Salve a chave em Configurações ou no GitHub Actions.',
       step: 'idea',
+      runner: 'github-actions',
     });
     try { await supabase.rpc('release_autopilot_lock', { p_project_id: projectId }); } catch {}
     return false;
@@ -959,6 +986,7 @@ async function processProject(projectRow) {
   try {
     // Step 1: Idea
     currentStep = 'idea';
+    await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Buscando/criando ideia no Brainstorm', step: currentStep, runner: 'github-actions' });
     const idea = await stepIdea(data);
 
     // Update ideas in Supabase
@@ -985,11 +1013,13 @@ async function processProject(projectRow) {
 
     // Step 2: Script
     currentStep = 'script';
+    await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Gerando roteiro', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
     const script = await stepScript(idea.topic, data);
     await updateRunnerVideo(projectId, data, videoId, { script, status: 'SCRIPTING' }, 'Script saved');
 
     // Step 3: Voice/Narration
     currentStep = 'voice';
+    await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Gerando narração', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
     const voiceResult = await stepVoice(script, data);
     const audioBase64 = voiceResult.audioBase64;
     const audioMimeType = voiceResult.mimeType;
@@ -997,11 +1027,13 @@ async function processProject(projectRow) {
 
     // Step 4: Visuals
     currentStep = 'visuals';
+    await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Buscando/gerando visuais', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
     const scenes = await stepVisuals(script, data);
     await updateRunnerVideo(projectId, data, videoId, { visualScenes: scenes, status: 'VIDEO_GENERATED' }, 'Visuals saved');
 
     // Step 5: Thumbnail (optional — does not break pipeline)
     currentStep = 'thumbnail';
+    await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Gerando thumbnail', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
     let thumbnailBase64 = null;
     try {
       const thumbResult = await stepThumbnail(idea.topic, script, data);
@@ -1015,6 +1047,7 @@ async function processProject(projectRow) {
 
     // Step 6: Metadata
     currentStep = 'metadata';
+    await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Gerando título, descrição e tags', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
     const metadata = await stepMetadata(idea.topic, script, data);
     videoTitle = metadata.youtubeTitle || metadata.title || idea.topic;
     await updateRunnerVideo(projectId, data, videoId, { title: videoTitle, videoMetadata: {
@@ -1027,10 +1060,12 @@ async function processProject(projectRow) {
 
     // Step 7: Render Video (now receives audio!)
     currentStep = 'render';
+    await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Renderizando vídeo no runner headless', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
     const renderResult = await stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, data, audioMimeType);
 
     // Step 8: Upload
     currentStep = 'upload';
+    await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Enviando vídeo para o YouTube', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
     const uploadResult = await stepUploadYouTube(data, metadata, renderResult, thumbnailBase64, projectRow.user_email);
 
     if (!data.scheduleSettings) data.scheduleSettings = {};

@@ -38,6 +38,7 @@ create index if not exists idx_project_auth_project_user on public.project_auth(
 create index if not exists idx_project_auth_user_updated on public.project_auth(user_email, updated_at desc);
 create index if not exists idx_autopilot_logs_project_created on public.autopilot_logs(project_id, created_at desc);
 create index if not exists idx_user_settings_email on public.user_settings(user_email);
+create index if not exists idx_projects_autopilot_lock on public.projects(autopilot_locked_until) where autopilot_locked_until is not null;
 
 create or replace function public.acquire_autopilot_lock(
     p_project_id text,
