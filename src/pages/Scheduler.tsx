@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useProjects, AutoPilotLogEntry } from '../context/ProjectContext';
 import { ProjectStatus } from '../types';
 import { STEP_LABELS } from '../services/automationService';
+import { supabase } from '../lib/supabaseClient';
 import { 
   Calendar as CalendarIcon, Clock, ListOrdered, PlayCircle, Bot, Zap, 
   CheckCircle, XCircle, Loader2, Timer, ArrowRight, AlertTriangle, 
@@ -28,7 +29,7 @@ const formatElapsed = (ms: number): string => {
   return `${Math.floor(secs / 60)}m ${secs % 60}s`;
 };
 
-const ALL_STEPS = ['idea', 'script', 'voice', 'visuals', 'studio', 'thumbnail', 'metadata', 'upload', 'shorts'] as const;
+const ALL_STEPS = ['idea', 'script', 'voice', 'visuals', 'studio', 'thumbnail', 'metadata', 'render', 'upload', 'shorts'] as const;
 
 const ProgressPanel: React.FC = () => {
   const { autoPilotProgress } = useProjects();
