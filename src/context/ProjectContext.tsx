@@ -63,6 +63,7 @@ interface ProjectContextType {
   autoPilotLog: AutoPilotLogEntry[];
   autoPilotProgress: AutoPilotProgress;
   triggerAutoPilotNow: (projectId: string) => Promise<void>;
+  releaseAutoPilotLock: (projectId: string) => Promise<void>;
   getNextAutoRunInfo: (projectId: string) => { nextRunDate: Date | null; isEligible: boolean };
 }
 
