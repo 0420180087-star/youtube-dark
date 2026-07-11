@@ -139,7 +139,7 @@ const StandbyVideos: React.FC = () => {
 };
 
 const AutoPilotProjects: React.FC = () => {
-  const { projects, autoPilotLog, isAutoPilotRunning, triggerAutoPilotNow, getNextAutoRunInfo } = useProjects();
+  const { projects, autoPilotLog, isAutoPilotRunning, triggerAutoPilotNow, releaseAutoPilotLock, getNextAutoRunInfo } = useProjects();
   const [remoteLogs, setRemoteLogs] = useState<AutoPilotLogEntry[]>([]);
   const autoProjects = projects.filter(p => p.scheduleSettings?.autoGenerate);
   const isRunning = isAutoPilotRunning;
