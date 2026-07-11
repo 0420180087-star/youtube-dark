@@ -886,7 +886,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       saveGeneratedIdeas, updateIdeaStatus, markIdeaAsUsed, removeIdeaFromHistory,
       addLibraryItem, deleteLibraryItem,
       addVideo, updateVideo, deleteVideo, getVideo,
-      triggerAutoPilotNow, getNextAutoRunInfo
+      triggerAutoPilotNow, releaseAutoPilotLock, getNextAutoRunInfo
     }}>
       {children}
     </ProjectContext.Provider>
