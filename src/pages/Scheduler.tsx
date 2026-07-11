@@ -193,6 +193,13 @@ const AutoPilotProjects: React.FC = () => {
   const mergedLog = [...remoteLogs, ...autoPilotLog]
     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
+  // Has the GitHub Actions runner produced any log in the last 60 min?
+  // If not, warn the user that "enqueued for headless" won't actually run.
+  const headlessRunnerRecentlySeen = remoteLogs.some(l =>
+    l.runner === 'github-actions' &&
+    Date.now() - new Date(l.timestamp).getTime() < 60 * 60 * 1000
+  );
+
   if (autoProjects.length === 0) return null;
 
   const logIcon = (status: AutoPilotLogEntry['status']) => {
