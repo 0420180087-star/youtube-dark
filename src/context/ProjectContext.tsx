@@ -289,9 +289,23 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   }, [autoPilotLog, storageKey]);
 
   const addLogEntry = (entry: Omit<AutoPilotLogEntry, 'id' | 'timestamp'>) => {
-    setAutoPilotLog(prev => [{
-      ...entry, id: crypto.randomUUID(), timestamp: new Date().toISOString()
-    }, ...prev].slice(0, 100));
+    setAutoPilotLog(prev => {
+      // Dedupe: skip if the last entry for this project has the same message within 10s.
+      // Prevents the log from being spammed with identical "Execução enfileirada" lines
+      // when the user clicks "Executar Agora" repeatedly.
+      const last = prev[0];
+      if (
+        last &&
+        last.projectId === entry.projectId &&
+        last.message === entry.message &&
+        Date.now() - new Date(last.timestamp).getTime() < 10_000
+      ) {
+        return prev;
+      }
+      return [{
+        ...entry, id: crypto.randomUUID(), timestamp: new Date().toISOString()
+      }, ...prev].slice(0, 100);
+    });
   };
 
   // --- SCHEDULER with persistent next-run ---
