@@ -524,12 +524,30 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     // project simultaneously. Only one runner wins the DB update.
     if (supabase) {
       try {
-        const { data: lockAcquired, error } = await supabase
+        let { data: lockAcquired, error } = await supabase
           .rpc('acquire_autopilot_lock', {
             p_project_id: runnableProject.id,
             p_locked_by: 'browser',
             p_lock_minutes: 90,
           });
+
+        // If the lock is held, force-release and retry ONCE. This recovers
+        // from previous browser runs that crashed without releasing.
+        if (!error && !lockAcquired) {
+          try {
+            await supabase.rpc('release_autopilot_lock', { p_project_id: runnableProject.id });
+            const retry = await supabase.rpc('acquire_autopilot_lock', {
+              p_project_id: runnableProject.id,
+              p_locked_by: 'browser',
+              p_lock_minutes: 90,
+            });
+            lockAcquired = retry.data;
+            error = retry.error;
+          } catch (retryErr) {
+            console.warn('[AutoPilot] Retry de lock falhou:', retryErr);
+          }
+        }
+
 
         if (error || !lockAcquired) {
           console.info(
