@@ -139,7 +139,7 @@ const StandbyVideos: React.FC = () => {
 };
 
 const AutoPilotProjects: React.FC = () => {
-  const { projects, autoPilotLog, isAutoPilotRunning, triggerAutoPilotNow, getNextAutoRunInfo } = useProjects();
+  const { projects, autoPilotLog, isAutoPilotRunning, triggerAutoPilotNow, releaseAutoPilotLock, getNextAutoRunInfo } = useProjects();
   const [remoteLogs, setRemoteLogs] = useState<AutoPilotLogEntry[]>([]);
   const autoProjects = projects.filter(p => p.scheduleSettings?.autoGenerate);
   const isRunning = isAutoPilotRunning;
@@ -192,6 +192,13 @@ const AutoPilotProjects: React.FC = () => {
 
   const mergedLog = [...remoteLogs, ...autoPilotLog]
     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+  // Has the GitHub Actions runner produced any log in the last 60 min?
+  // If not, warn the user that "enqueued for headless" won't actually run.
+  const headlessRunnerRecentlySeen = remoteLogs.some(l =>
+    l.runner === 'github-actions' &&
+    Date.now() - new Date(l.timestamp).getTime() < 60 * 60 * 1000
+  );
 
   if (autoProjects.length === 0) return null;
 
@@ -247,12 +254,21 @@ const AutoPilotProjects: React.FC = () => {
                 )}
               </div>
               {p.autopilotLockedUntil && new Date(p.autopilotLockedUntil) > new Date() && (
-                <div className="flex items-center gap-2 text-[11px] text-orange-300 bg-orange-500/10 border border-orange-500/20 rounded-lg px-2.5 py-2">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  <span>Runner ativo: {p.autopilotLockedBy || 'processando'}</span>
+                <div className="flex items-center justify-between gap-2 text-[11px] text-orange-300 bg-orange-500/10 border border-orange-500/20 rounded-lg px-2.5 py-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
+                    <span className="truncate">Lock ativo: {p.autopilotLockedBy || 'processando'}</span>
+                  </div>
+                  <button
+                    onClick={() => releaseAutoPilotLock(p.id)}
+                    className="text-[10px] font-bold text-orange-200 hover:text-white bg-orange-500/20 hover:bg-orange-500/40 px-2 py-0.5 rounded flex-shrink-0"
+                    title="Liberar lock preso (use se um runner travou)"
+                  >
+                    Liberar
+                  </button>
                 </div>
               )}
-              
+
               <div className="flex gap-2">
                 <button
                   onClick={() => triggerAutoPilotNow(p.id)}
@@ -262,7 +278,7 @@ const AutoPilotProjects: React.FC = () => {
                   <Zap className="w-3.5 h-3.5" />
                   {isRunning ? 'Executando local...' : 'Executar Agora'}
                 </button>
-                <Link 
+                <Link
                   to={`/project/${p.id}`}
                   className="flex items-center gap-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs px-3 py-2 rounded-lg transition-colors"
                 >
@@ -273,6 +289,19 @@ const AutoPilotProjects: React.FC = () => {
           );
         })}
       </div>
+
+      {!headlessRunnerRecentlySeen && (
+        <div className="flex items-start gap-2 text-[11px] text-yellow-300 bg-yellow-500/5 border border-yellow-500/20 rounded-lg px-3 py-2">
+          <AlertTriangle className="w-3.5 h-3.5 text-yellow-400 flex-shrink-0 mt-0.5" />
+          <span>
+            Runner headless (GitHub Actions) não deu sinal nos últimos 60 min.
+            "Executar Agora" continuará rodando localmente enquanto esta aba estiver aberta.
+            Para rodar com a página fechada, configure os secrets do workflow no repositório.
+          </span>
+        </div>
+      )}
+
+
 
       {/* Activity Log */}
       {mergedLog.length > 0 && (
