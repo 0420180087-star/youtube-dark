@@ -339,6 +339,65 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     });
   };
 
+  // Best-effort headless enqueue: writes queue intent to Supabase so the GitHub
+  // Actions runner (if configured) picks it up when the tab is closed. Never
+  // blocks or replaces the local run — the browser pipeline always starts too.
+  const enqueueHeadlessRun = (project: Project) => {
+    if (!supabase || !userEmailRef.current) return;
+    const queuedAt = new Date(Date.now() - 1000).toISOString();
+    const queuedProject: Project = {
+      ...project,
+      scheduleSettings: {
+        frequencyDays: project.scheduleSettings?.frequencyDays || 1,
+        timeWindowStart: project.scheduleSettings?.timeWindowStart || '12:00',
+        timeWindowEnd: project.scheduleSettings?.timeWindowEnd || '18:00',
+        autoGenerate: true,
+        nextScheduledRun: queuedAt,
+      },
+    };
+    (async () => {
+      try {
+        await supabase.from('projects').upsert({
+          id: queuedProject.id,
+          user_email: userEmailRef.current,
+          data: buildCloudProject(queuedProject),
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'id' });
+        await supabase.from('autopilot_logs').insert({
+          project_id: queuedProject.id,
+          status: 'running',
+          message: 'Execução enfileirada em paralelo para o runner headless (GitHub Actions).',
+          step: 'idea',
+        });
+      } catch (e) {
+        console.warn('[AutoPilot] Enqueue headless falhou (execução local segue):', e);
+      }
+    })();
+  };
+
+  // Clear a stuck distributed lock. Exposed to the UI so the user can unblock
+  // themselves without waiting for the 90-min TTL.
+  const releaseAutoPilotLock = async (projectId: string) => {
+    if (supabase) {
+      try {
+        await supabase.rpc('release_autopilot_lock', { p_project_id: projectId });
+      } catch (e) {
+        console.warn('[AutoPilot] Falha ao liberar lock remoto:', e);
+      }
+    }
+    const updated = projectsRef.current.map(p =>
+      p.id === projectId ? { ...p, autopilotLockedUntil: null, autopilotLockedBy: null } : p
+    );
+    projectsRef.current = updated;
+    setProjects(updated);
+    addLogEntry({
+      projectId,
+      projectTitle: projectsRef.current.find(p => p.id === projectId)?.title || projectId,
+      status: 'retrying',
+      message: 'Lock liberado manualmente pelo usuário.',
+    });
+  };
+
   const triggerAutoPilotNow = async (projectId: string) => {
     const project = projectsRef.current.find(p => p.id === projectId);
     if (!project) return;
@@ -348,60 +407,26 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       return;
     }
 
-    if (supabase && userEmailRef.current) {
-      try {
-        const queuedAt = new Date(Date.now() - 1000).toISOString();
-        const queuedProject: Project = {
-          ...project,
-          scheduleSettings: {
-            frequencyDays: project.scheduleSettings?.frequencyDays || 1,
-            timeWindowStart: project.scheduleSettings?.timeWindowStart || '12:00',
-            timeWindowEnd: project.scheduleSettings?.timeWindowEnd || '18:00',
-            autoGenerate: true,
-            nextScheduledRun: queuedAt,
-          },
-        };
-        const updated = projectsRef.current.map(p => p.id === projectId ? queuedProject : p);
-        projectsRef.current = updated;
-        setProjects(updated);
-
-        const { error } = await supabase.from('projects').upsert({
-          id: queuedProject.id,
-          user_email: userEmailRef.current,
-          data: buildCloudProject(queuedProject),
-          updated_at: new Date().toISOString(),
-        }, { onConflict: 'id' });
-        if (error) throw error;
-
-        await supabase.from('autopilot_logs').insert({
-          project_id: queuedProject.id,
-          status: 'running',
-          message: 'Execução manual enfileirada para o runner headless. Pode sair da página; o GitHub Actions assumirá no próximo ciclo.',
-          step: 'idea',
-        }).then(({ error: logError }) => {
-          if (logError) console.warn('[AutoPilot] Não foi possível registrar fila remota:', logError.message);
-        });
-
-        setAutoPilotStatus('Execução enfileirada para o runner headless');
-        addLogEntry({
-          projectId: queuedProject.id,
-          projectTitle: queuedProject.title,
-          status: 'retrying',
-          message: 'Execução enfileirada. A automação continuará pelo GitHub Actions mesmo com a página fechada.',
-          step: 'idea',
-          runner: 'github-actions',
-        });
-        returnStatusToIdle();
-        return;
-      } catch (e) {
-        console.warn('[AutoPilot] Falha ao enfileirar runner headless; usando execução local:', e);
-        setAutoPilotStatus('Fila headless indisponível; executando localmente nesta aba');
+    // If a stale lock is holding the project (>15 min since last update or
+    // simply "in the future"), auto-release it so the click actually works.
+    // Without this, the user is stuck up to 90 min after any crashed run.
+    if (project.autopilotLockedUntil) {
+      const lockUntil = new Date(project.autopilotLockedUntil).getTime();
+      const stale = lockUntil < Date.now() + 75 * 60 * 1000; // acquired >15 min ago (90-min TTL)
+      if (stale || lockUntil < Date.now()) {
+        await releaseAutoPilotLock(projectId);
       }
     }
 
+    // Fire-and-forget enqueue for the headless runner so the pipeline continues
+    // if the user closes the tab (assuming GitHub Actions is configured).
+    enqueueHeadlessRun(project);
+
+    // Always run locally in this tab so the user sees immediate progress.
     const latestProject = projectsRef.current.find(p => p.id === projectId) || project;
     runFullPipeline(latestProject);
   };
+
 
   // --- AUTO-PILOT ENGINE ---
   useEffect(() => {
