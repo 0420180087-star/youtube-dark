@@ -1,55 +1,42 @@
 
-## Diagnóstico (causa raiz)
+## Causa raiz (reproduzida)
 
-O vídeo em Standby mostra: **Falhou em Narração — "Audio generation failed: OTHER"**.
+`src/pages/ProjectHub.tsx:15` define `statusConfig` só com 6 status: DRAFT, SCRIPTING, AUDIO_GENERATED, VIDEO_GENERATED, SCHEDULED, PUBLISHED.
 
-Rastreando o código:
+O enum `ProjectStatus` em `src/types.ts` inclui **um sétimo: `STANDBY`** (adicionado quando um vídeo falha na automação e vai para reprocessamento manual).
 
-- `stepGenerateVoice` (`src/services/automationService.ts:148`) chama `generateVoiceover` **uma vez por segmento**, sem retry.
-- `generateVoiceover` (`src/services/geminiCore.ts:1023`) usa `gemini-2.5-flash-preview-tts`. Quando a resposta vem sem áudio, ele lê `finishReason` e joga um erro imediato — **inclusive para `OTHER`**, que na API do Gemini TTS é o código genérico usado para:
-  - falhas transitórias do modelo (o mais comum — resolve na 2ª tentativa),
-  - texto acima do limite prático (~4-5k caracteres num único segmento),
-  - trecho que dispara o classificador de segurança (o vídeo que falhou é sobre finanças + Bíblia, campo sensível),
-  - caracteres/emoji que o TTS não consome.
+No render da lista de vídeos:
 
-Como não há nenhuma tentativa de retry, split ou fallback, **um único segmento problemático mata o vídeo inteiro** e ele vai para Standby. Isso bate com "falhando na maioria das execuções".
+```tsx
+const status = statusConfig[video.status];         // undefined para STANDBY
+// ...
+className={`... ${status.bg} ${status.color} ${status.border}`}  // 💥 TypeError
+```
 
-`executeGeminiRequest` retenta por chave/quota, mas **não retenta por finishReason** — do ponto de vista dele a chamada foi um sucesso (retornou 200), então nada é retentado.
+Qualquer vídeo com `status === STANDBY` derruba o React na aba Videos do ProjectHub → tela branca **em todo projeto que tenha um vídeo em standby**. Como o vídeo "O Sacrifício Financeiro..." já está em STANDBY, todos os projetos do usuário com essa situação quebram — bate com "em todos os projetos, sempre".
 
-## Correção
+## Correção definitiva
 
-### 1. `src/services/geminiCore.ts` — `generateVoiceover` mais resiliente
+### 1. `src/pages/ProjectHub.tsx` — completar o `statusConfig`
 
-- Sanitizar texto antes de enviar: remover emojis e caracteres de controle, colapsar espaços, cortar aspas curly problemáticas. Mantém pontuação e travessão (que já ajudam prosódia).
-- Retry interno em `OTHER` / `MAX_TOKENS` / resposta vazia: até **3 tentativas** com backoff (800ms, 1.6s, 3.2s) + jitter. Cada tentativa passa por `executeGeminiRequest` — se `OTHER` for de sobrecarga momentânea, resolve.
-- Se as 3 tentativas falharem **e** o texto for maior que 1.200 caracteres: fazer **split recursivo** por frase (`. ! ?`), gerar áudio dos pedaços e concatenar os `ArrayBuffer` PCM (mesmo sample rate 24kHz mono, então concat é seguro).
-- Se `finishReason === 'SAFETY'`: lançar erro específico "Bloqueado por filtro de segurança do TTS neste trecho" para ficar transparente na UI (não fica escondido como "OTHER").
-- Logar `finishReason` real e o começo do texto (primeiros 80 chars) para diagnóstico.
+- Adicionar entrada `STANDBY` (rótulo "Standby", laranja para indicar atenção) no mapa.
+- Tornar o acesso à pragmática: `const status = statusConfig[video.status] ?? statusConfig[ProjectStatus.DRAFT];` — assim qualquer status futuro que for adicionado ao enum e esquecido no mapa **não derruba mais a página**, só cai num visual neutro. É a defesa que garante que o bug não volte.
 
-### 2. `src/services/automationService.ts` — `stepGenerateVoice` com fallback por segmento
+### 2. `src/components/ProjectCard.tsx` — mesma proteção
 
-- Envolver a chamada `generateVoiceover` em retry de segmento: até **2 tentativas** adicionais com backoff.
-- Se ainda falhar, tentar **uma vez com voz alternativa** (`Charon` se a atual não for Charon; `Fenrir` como último recurso). Muitas falhas `OTHER` somem trocando o preset de voz.
-- Se todas as tentativas falharem, o erro final inclui número do segmento + primeiros caracteres do texto — mais útil que "OTHER".
-- Callback `onProgress` reporta "Segmento X: tentativa Y/3" para o usuário ver.
+- Verificar se este card também referencia `statusConfig` sem STANDBY (uso indireto na lista de projetos). Se sim, aplicar o mesmo `??` fallback.
 
-### 3. Sem mudanças em
+### 3. Sem outras mudanças
 
-- `videoRenderer.js`, `youtubeUploader.js`, `automation-runner.js`, SQL, workflow — o problema está exclusivamente no cliente TTS.
-- Sem mudança de modelo/API — mesma chave, mesmo endpoint.
+- Não mexer no pipeline, no runner nem no SQL — o crash é puramente de render.
 
 ## Arquivos editados
 
-- `src/services/geminiCore.ts` — reescrever `generateVoiceover` com sanitização, retry por finishReason, split recursivo e mensagens claras.
-- `src/services/automationService.ts` — envolver `stepGenerateVoice` com retry por segmento + fallback de voz.
+- `src/pages/ProjectHub.tsx` — adicionar `STANDBY` ao `statusConfig` + fallback defensivo no acesso.
+- `src/components/ProjectCard.tsx` — mesma verificação (só se estiver afetado).
 
-## Limitação transparente
+## Validação
 
-- Se o trecho realmente violar política de segurança do Gemini TTS, nenhum retry resolve — nesse caso o erro dirá "SAFETY" para você editar o texto do segmento manualmente em vez de ficar em loop.
-- Cota/rate-limit continua sendo tratado pelo `executeGeminiRequest` já existente (rotação de chaves) — não mudamos isso.
-
-## Validação após implementar
-
-1. Reprocessar o vídeo em Standby "O Sacrifício Financeiro..." → esperar 1-2 retries silenciosos, deve concluir.
-2. Se falhar de novo, log agora mostrará se foi `SAFETY` (conteúdo) ou `OTHER` persistente após 3 tentativas + split — em ambos os casos, mensagem clara em vez de "OTHER".
-3. Rodar automação nova → taxa de falha em Narração cai (esperado: >90% dos "OTHER" transitórios resolvem na 2ª tentativa).
+1. Abrir `/project/:id` de um projeto com vídeo em STANDBY → renderiza normalmente, mostrando o badge "Standby" laranja no card do vídeo.
+2. Abrir projeto sem STANDBY → continua funcionando igual.
+3. Reproduzir automatizado via Playwright com um vídeo mock `status: 'STANDBY'` para confirmar que não há mais `TypeError`.
