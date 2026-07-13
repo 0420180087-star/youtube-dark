@@ -1009,6 +1009,13 @@ const getVoiceStyleInstruction = (tone: string): string => {
 // ─── Pre-process text to help TTS sound more natural ─────────────────────────
 const preprocessTextForTTS = (text: string): string => {
     return text
+        // Remove emojis and other symbol/pictographic characters that Gemini TTS often rejects with finishReason=OTHER
+        .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{1F000}-\u{1F2FF}]/gu, '')
+        // Strip control chars
+        .replace(/[\u0000-\u001F\u007F]/g, ' ')
+        // Normalize curly quotes to straight quotes
+        .replace(/[\u2018\u2019]/g, "'")
+        .replace(/[\u201C\u201D]/g, '"')
         // Replace ellipsis with pause markers the TTS understands
         .replace(/\.\.\./g, '...')
         // Ensure em-dashes create pauses
@@ -1016,8 +1023,104 @@ const preprocessTextForTTS = (text: string): string => {
         // Add slight pause after colons in narrative context
         .replace(/: /g, ': ')
         // Clean up multiple spaces
-        .replace(/  +/g, ' ')
+        .replace(/\s+/g, ' ')
         .trim();
+};
+
+const jitterDelay = (baseMs: number) => delay(baseMs + Math.floor(Math.random() * 400));
+
+// Split text into halves at the nearest sentence boundary near the middle
+const splitTextAtSentence = (text: string): [string, string] | null => {
+    if (text.length < 40) return null;
+    const mid = Math.floor(text.length / 2);
+    const terminators = ['. ', '! ', '? ', '; '];
+    let bestIdx = -1;
+    for (let offset = 0; offset < text.length / 2; offset++) {
+        for (const t of terminators) {
+            if (text.substr(mid - offset, t.length) === t) { bestIdx = mid - offset + t.length; break; }
+            if (text.substr(mid + offset, t.length) === t) { bestIdx = mid + offset + t.length; break; }
+        }
+        if (bestIdx !== -1) break;
+    }
+    if (bestIdx === -1) {
+        const spaceIdx = text.lastIndexOf(' ', mid);
+        if (spaceIdx <= 0) return null;
+        bestIdx = spaceIdx + 1;
+    }
+    return [text.slice(0, bestIdx).trim(), text.slice(bestIdx).trim()];
+};
+
+const concatArrayBuffers = (buffers: ArrayBuffer[]): ArrayBuffer => {
+    const total = buffers.reduce((a, b) => a + b.byteLength, 0);
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const b of buffers) {
+        out.set(new Uint8Array(b), offset);
+        offset += b.byteLength;
+    }
+    return out.buffer;
+};
+
+const ttsOnce = async (
+    text: string,
+    voiceName: string,
+    styleInstruction: string,
+    sessionId?: string,
+): Promise<ArrayBuffer> => {
+    return executeGeminiRequest(async (ai) => {
+        const ttsPrompt = `${styleInstruction}
+
+Now narrate the following passage with full expression and natural rhythm:
+
+${text}`;
+
+        const response = await ai.models.generateContent({
+            model: "gemini-2.5-flash-preview-tts",
+            contents: [{ parts: [{ text: ttsPrompt }] }],
+            config: {
+                responseModalities: [Modality.AUDIO],
+                speechConfig: {
+                    voiceConfig: {
+                        prebuiltVoiceConfig: { voiceName: voiceName as any },
+                    },
+                },
+            },
+        });
+
+        const audioPart = response.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData?.data);
+        const base64Audio = audioPart?.inlineData?.data;
+
+        if (!base64Audio) {
+            const textRefusal = response.candidates?.[0]?.content?.parts?.find((p: any) => p.text)?.text;
+            if (textRefusal) {
+                const err = new Error(`Model Refusal: ${textRefusal}`);
+                (err as any).ttsReason = 'REFUSAL';
+                throw err;
+            }
+
+            const finishReason = response.candidates?.[0]?.finishReason || 'EMPTY';
+            const preview = text.slice(0, 80).replace(/\s+/g, ' ');
+            console.warn(`[TTS] finishReason=${finishReason} voice=${voiceName} text="${preview}..."`);
+
+            if (finishReason === 'SAFETY') {
+                const err = new Error(`Bloqueado por filtro de segurança do TTS neste trecho (edite o texto: "${preview}...")`);
+                (err as any).ttsReason = 'SAFETY';
+                (err as any).status = 500;
+                throw err;
+            }
+
+            const err = new Error(`Audio generation failed: ${finishReason}`);
+            (err as any).ttsReason = finishReason;
+            (err as any).status = 500;
+            throw err;
+        }
+
+        const binaryString = atob(base64Audio);
+        const len = binaryString.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) { bytes[i] = binaryString.charCodeAt(i); }
+        return bytes.buffer;
+    }, sessionId);
 };
 
 export const generateVoiceover = async (
@@ -1025,15 +1128,12 @@ export const generateVoiceover = async (
     voiceName: string = 'Fenrir',
     tone: string = 'Cinematic',
     sessionId?: string,
-): Promise<ArrayBuffer> => { 
-    if (!text || !text.trim()) return new ArrayBuffer(0); 
-    
-    // Gemini TTS supported voices as of 2025
+): Promise<ArrayBuffer> => {
+    if (!text || !text.trim()) return new ArrayBuffer(0);
+
     const SUPPORTED_VOICES = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr', 'Aoede', 'Leda', 'Orus', 'Schedar'];
-    const VOICE_MAPPING: Record<string, string> = {
-        'Default': 'Fenrir',
-    };
-    
+    const VOICE_MAPPING: Record<string, string> = { 'Default': 'Fenrir' };
+
     let finalVoice = voiceName;
     if (!SUPPORTED_VOICES.includes(voiceName)) {
         finalVoice = VOICE_MAPPING[voiceName] || 'Fenrir';
@@ -1042,52 +1142,35 @@ export const generateVoiceover = async (
     const styleInstruction = getVoiceStyleInstruction(tone);
     const cleanText = preprocessTextForTTS(text);
 
-    return executeGeminiRequest(async (ai) => {
-        // Craft the prompt to guide natural delivery
-        // DO NOT wrap text in quotes — that signals "read this literally" to the TTS model
-        // Instead, give acting direction then present the text as a continuation
-        const ttsPrompt = `${styleInstruction}
-
-Now narrate the following passage with full expression and natural rhythm:
-
-${cleanText}`;
-        
-        const response = await ai.models.generateContent({ 
-            model: "gemini-2.5-flash-preview-tts", 
-            contents: [{ parts: [{ text: ttsPrompt }] }], 
-            config: { 
-                responseModalities: [Modality.AUDIO], 
-                speechConfig: { 
-                    voiceConfig: { 
-                        prebuiltVoiceConfig: { voiceName: finalVoice as any }, 
-                    }, 
-                }, 
-            }, 
-        }); 
-        
-        const audioPart = response.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData?.data);
-        const base64Audio = audioPart?.inlineData?.data; 
-        
-        if (!base64Audio) { 
-            const textRefusal = response.candidates?.[0]?.content?.parts?.find((p: any) => p.text)?.text; 
-            if (textRefusal) throw new Error(`Model Refusal: ${textRefusal}`); 
-            
-            const finishReason = response.candidates?.[0]?.finishReason;
-            if (finishReason && finishReason !== 'STOP') {
-                const err = new Error(`Audio generation failed: ${finishReason}`);
-                (err as any).status = 500;
-                throw err;
+    // Retry against transient OTHER / MAX_TOKENS / EMPTY failures
+    const MAX_ATTEMPTS = 3;
+    let lastErr: any = null;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        try {
+            return await ttsOnce(cleanText, finalVoice, styleInstruction, sessionId);
+        } catch (err: any) {
+            lastErr = err;
+            const reason = err?.ttsReason;
+            if (reason === 'SAFETY' || reason === 'REFUSAL') throw err;
+            if (attempt < MAX_ATTEMPTS) {
+                await jitterDelay(800 * Math.pow(2, attempt - 1));
+                continue;
             }
+        }
+    }
 
-            const err = new Error("No audio generated (Empty response)"); 
-            (err as any).status = 500;
-            throw err;
-        } 
-        const binaryString = atob(base64Audio); 
-        const len = binaryString.length; 
-        const bytes = new Uint8Array(len); 
-        for (let i = 0; i < len; i++) { bytes[i] = binaryString.charCodeAt(i); } 
-        return bytes.buffer;
-    }, sessionId);
+    // Still failing → try splitting long text recursively
+    if (cleanText.length > 1200) {
+        const parts = splitTextAtSentence(cleanText);
+        if (parts) {
+            console.warn(`[TTS] Split recursivo (${cleanText.length} chars → ${parts[0].length} + ${parts[1].length})`);
+            const a = await generateVoiceover(parts[0], finalVoice, tone, sessionId);
+            const b = await generateVoiceover(parts[1], finalVoice, tone, sessionId);
+            return concatArrayBuffers([a, b]);
+        }
+    }
+
+    throw lastErr || new Error('Audio generation failed after retries');
 };
+
 
