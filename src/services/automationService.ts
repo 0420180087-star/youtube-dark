@@ -164,17 +164,46 @@ export async function stepGenerateVoice(
     for (let i = 0; i < script.segments.length; i++) {
       callbacks.onProgress('voice', `Gerando voz: segmento ${i + 1}/${script.segments.length}...`);
       const seg = script.segments[i];
-
-      // Pass tone for style-aware narration
       const tone = project.defaultTone || 'Cinematic';
-      const ab = await decodeAudioData(
-        await generateVoiceover(seg.narratorText, project.defaultVoice || 'Fenrir', tone),
-        ctx
-      );
+      const primaryVoice = project.defaultVoice || 'Fenrir';
+      const fallbackVoice = primaryVoice === 'Charon' ? 'Fenrir' : 'Charon';
+
+      let ab: AudioBuffer | null = null;
+      let lastErr: any = null;
+      const attempts: Array<{ voice: string; label: string }> = [
+        { voice: primaryVoice, label: 'principal' },
+        { voice: primaryVoice, label: 'retry' },
+        { voice: fallbackVoice, label: `fallback ${fallbackVoice}` },
+      ];
+
+      for (let t = 0; t < attempts.length; t++) {
+        const { voice, label } = attempts[t];
+        try {
+          if (t > 0) {
+            callbacks.onProgress('voice', `Segmento ${i + 1}: tentativa ${t + 1}/${attempts.length} (${label})...`);
+            await new Promise(r => setTimeout(r, 700 * t + Math.random() * 400));
+          }
+          ab = await decodeAudioData(
+            await generateVoiceover(seg.narratorText, voice, tone),
+            ctx
+          );
+          break;
+        } catch (err: any) {
+          lastErr = err;
+          // SAFETY / REFUSAL are terminal — do not waste retries
+          const msg = String(err?.message || '');
+          if (msg.includes('segurança') || msg.includes('Refusal')) break;
+        }
+      }
+
+      if (!ab) {
+        const preview = String(seg.narratorText || '').slice(0, 60).replace(/\s+/g, ' ');
+        throw new Error(`Segmento ${i + 1}/${script.segments.length} falhou: ${lastErr?.message || 'desconhecido'} (texto: "${preview}...")`);
+      }
+
       audioBuffers.push(ab);
       totalDur += ab.duration;
 
-      // Add natural pause between segments (not after the last one)
       if (i < script.segments.length - 1) {
         timestamps.push(totalDur);
         const silence = createSilence(ctx, SEGMENT_PAUSE);
@@ -182,6 +211,7 @@ export async function stepGenerateVoice(
         totalDur += SEGMENT_PAUSE;
       }
     }
+
 
     const finalAudio = mergeAudioBuffers(audioBuffers, ctx);
     const audioUrl = audioBufferToBase64(finalAudio);
