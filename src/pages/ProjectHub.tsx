@@ -573,7 +573,7 @@ export const ProjectHub: React.FC = () => {
 
                     {/* List Videos */}
                     {project.videos.map((video) => {
-                        const status = statusConfig[video.status];
+                        const status = statusConfig[video.status] ?? statusConfig[ProjectStatus.DRAFT];
                         const hasThumbnail = video.visualScenes && video.visualScenes.length > 0;
                         const thumbnail = hasThumbnail ? video.visualScenes![0].imageUrl : null;
                         const isShort = video.format && video.format.includes('9:16');
