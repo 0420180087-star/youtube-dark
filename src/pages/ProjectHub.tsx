@@ -12,13 +12,14 @@ import {
     User, LogOut, CheckCircle, Youtube, Plus, X, Loader2, Volume2, Globe, Timer, BarChart3, MessageSquare, Sparkles, Lightbulb, ArrowRight, Ban, RefreshCw, History, BrainCircuit, Bot, BookOpen, Link as LinkIcon, File, UploadCloud, MonitorPlay, ChevronDown, ChevronUp, Zap
 } from 'lucide-react';
 
-const statusConfig = {
+const statusConfig: Record<ProjectStatus, { color: string; bg: string; border: string; label: string }> = {
   [ProjectStatus.DRAFT]: { color: 'text-slate-400', bg: 'bg-slate-500/10', border: 'border-slate-700/50', label: 'Draft' },
   [ProjectStatus.SCRIPTING]: { color: 'text-blue-400', bg: 'bg-blue-500/10', border: 'border-blue-500/20', label: 'Scripting' },
   [ProjectStatus.AUDIO_GENERATED]: { color: 'text-purple-400', bg: 'bg-purple-500/10', border: 'border-purple-500/20', label: 'Audio Ready' },
   [ProjectStatus.VIDEO_GENERATED]: { color: 'text-pink-400', bg: 'bg-pink-500/10', border: 'border-pink-500/20', label: 'Video Ready' },
   [ProjectStatus.SCHEDULED]: { color: 'text-yellow-400', bg: 'bg-yellow-500/10', border: 'border-yellow-500/20', label: 'Scheduled' },
   [ProjectStatus.PUBLISHED]: { color: 'text-green-400', bg: 'bg-green-500/10', border: 'border-green-500/20', label: 'Published' },
+  [ProjectStatus.STANDBY]: { color: 'text-orange-400', bg: 'bg-orange-500/10', border: 'border-orange-500/30', label: 'Standby' },
 };
 
 const VOICE_OPTIONS = [
