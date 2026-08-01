@@ -391,11 +391,15 @@ export const Scheduler: React.FC = () => {
         </div>
       </div>
 
+      {/* HEALTH — sempre o primeiro lugar para diagnosticar a automação */}
+      <AutomationHealth />
+
       {/* PROGRESS PANEL (only visible during execution) */}
       <ProgressPanel />
 
       {/* STANDBY VIDEOS */}
       <StandbyVideos />
+
 
       {/* AUTO-PILOT PROJECTS */}
       <AutoPilotProjects />
