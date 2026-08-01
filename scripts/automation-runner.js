@@ -1056,10 +1056,22 @@ function retryBackoffMs(retryCount) {
   return RETRY_BACKOFF_MS[Math.min(retryCount, RETRY_BACKOFF_MS.length - 1)];
 }
 
-// A STANDBY video is retryable when it still has attempts left and its
-// nextRetryAt has elapsed.
-function findRetryableVideo(data, now = Date.now()) {
+// A video is retryable when:
+//   • está em STANDBY, com tentativas restantes e backoff vencido; ou
+//   • está em SCHEDULED por falta de canal do YouTube (upload pendente) —
+//     nesse caso é retomado sem gastar tentativa, assim que o token voltar.
+const PENDING_UPLOAD_MARK = 'Upload pendente';
+
+function findRetryableVideo(data, now = Date.now(), youtubeReady = false) {
   const videos = Array.isArray(data?.videos) ? data.videos : [];
+
+  if (youtubeReady) {
+    const pendingUpload = videos.find(
+      (v) => v?.status === 'SCHEDULED' && String(v.lastError || '').startsWith(PENDING_UPLOAD_MARK)
+    );
+    if (pendingUpload) return pendingUpload;
+  }
+
   return videos.find((v) => {
     if (v?.status !== 'STANDBY') return false;
     if ((v.retryCount || 0) >= MAX_AUTO_RETRIES) return false;
@@ -1067,6 +1079,7 @@ function findRetryableVideo(data, now = Date.now()) {
     return new Date(v.nextRetryAt).getTime() <= now;
   }) || null;
 }
+
 
 // Artifacts persisted in Supabase are usable on resume; placeholders are not.
 function isUsableUrl(url) {
