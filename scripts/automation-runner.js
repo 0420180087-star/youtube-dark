@@ -1499,6 +1499,12 @@ async function processProject(projectRow) {
 async function main() {
   log('🤖', '=== Automation Runner Started ===');
 
+  const ready = await preflight();
+  await writeHeartbeat(ready ? 'ciclo iniciado' : 'ciclo iniciado com schema incompleto');
+  if (!ready) {
+    process.exit(1);
+  }
+
   let query = supabase.from('projects').select('*');
 
   // If specific project ID provided, only process that one
@@ -1511,16 +1517,19 @@ async function main() {
 
   if (error) {
     log('❌', `Failed to fetch projects: ${error.message}`);
+    await writeHeartbeat(`erro ao buscar projetos: ${error.message}`);
     process.exit(1);
   }
 
   if (!projects?.length) {
     log('📭', 'No projects found');
+    await writeHeartbeat('nenhum projeto encontrado');
     process.exit(0);
   }
 
   // Filter eligible projects
   const now = new Date();
+  const nowMs = now.getTime();
 
   log('🔍', `Verificando ${projects.length} projeto(s):`);
   for (const p of projects) {
@@ -1530,18 +1539,27 @@ async function main() {
     log('   ', `"${d?.channelTheme || p.id}": autoGenerate=${autoGen}, nextRun=${nextRun}`);
   }
 
+  const skippedOff = [];
   const eligible = projects.filter((p) => {
     const d = p.data;
     if (PROJECT_ID) return true;
     if (!d?.scheduleSettings?.autoGenerate) {
-      log('⏭️', `"${d?.channelTheme || p.id}" pulado: autoGenerate não está ativado`);
+      skippedOff.push(d?.channelTheme || p.id);
       return false;
     }
+    // A failed video whose backoff elapsed makes the project eligible right
+    // away, independent of the normal publishing schedule.
+    if (findRetryableVideo(d, nowMs, true)) return true;
+
     const nextRun = d.scheduleSettings?.nextScheduledRun
       ? new Date(d.scheduleSettings.nextScheduledRun)
       : new Date(0);
     return nextRun <= now;
   });
+
+  if (skippedOff.length) {
+    log('⏭️', `${skippedOff.length} projeto(s) com Auto-Pilot desligado: ${skippedOff.join(', ')}`);
+  }
 
   log('📋', `${projects.length} projeto(s) encontrados, ${eligible.length} elegível(is)`);
 
@@ -1554,10 +1572,13 @@ async function main() {
     else errorCount++;
   }
 
+  await writeHeartbeat(`ciclo concluído: ${successCount} ok, ${errorCount} falha(s), ${eligible.length} elegível(is)`);
   log('🏁', `=== Done! ✅ ${successCount} success, ❌ ${errorCount} errors ===`);
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   log('💀', `Fatal error: ${err.message}`);
+  await writeHeartbeat(`erro fatal: ${err.message}`);
   process.exit(1);
 });
+
