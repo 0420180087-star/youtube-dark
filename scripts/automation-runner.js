@@ -1300,10 +1300,15 @@ async function processProject(projectRow) {
     const audioMimeType = voiceResult.mimeType;
     await updateRunnerVideo(projectId, data, videoId, { audioUrl: '__runner_audio__', status: 'AUDIO_GENERATED' }, 'Voice state saved');
 
-    // Step 4: Visuals
+    // Step 4: Visuals — reused on resume when the persisted URLs are real
     currentStep = 'visuals';
-    await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Buscando/gerando visuais', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
-    const scenes = await stepVisuals(script, data);
+    let scenes = isResume ? reusableScenes(resumeVideo) : null;
+    if (scenes) {
+      log('♻️', `Visuais reaproveitados (${scenes.length} cenas)`);
+    } else {
+      await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Buscando/gerando visuais', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
+      scenes = await stepVisuals(script, data);
+    }
     await updateRunnerVideo(projectId, data, videoId, { visualScenes: scenes, status: 'VIDEO_GENERATED' }, 'Visuals saved');
 
     // Step 5: Thumbnail (optional — does not break pipeline)
@@ -1320,17 +1325,23 @@ async function processProject(projectRow) {
       log('⚠️', 'Thumbnail failed, continuing without it');
     }
 
-    // Step 6: Metadata
+    // Step 6: Metadata — reused on resume
     currentStep = 'metadata';
-    await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Gerando título, descrição e tags', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
-    const metadata = await stepMetadata(idea.topic, script, data);
+    let metadata;
+    if (isResume && resumeVideo.videoMetadata?.youtubeTitle) {
+      metadata = { ...resumeVideo.videoMetadata, title: resumeVideo.videoMetadata.youtubeTitle };
+      log('♻️', 'Metadados reaproveitados do vídeo em standby');
+    } else {
+      await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Gerando título, descrição e tags', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
+      metadata = await stepMetadata(idea.topic, script, data);
+    }
     videoTitle = metadata.youtubeTitle || metadata.title || idea.topic;
     await updateRunnerVideo(projectId, data, videoId, { title: videoTitle, videoMetadata: {
       youtubeTitle: metadata.youtubeTitle || metadata.title || idea.topic,
       youtubeDescription: metadata.youtubeDescription || metadata.description || '',
       tags: metadata.tags || [],
       categoryId: metadata.categoryId || '22',
-      visibility: 'public',
+      visibility: metadata.visibility || 'public',
     } }, 'Metadata saved');
 
     // Step 7: Render Video (now receives audio!)
@@ -1338,17 +1349,48 @@ async function processProject(projectRow) {
     await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Renderizando vídeo no runner headless', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
     const renderResult = await stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, data, audioMimeType);
 
-    // Step 8: Upload
+    if (!data.scheduleSettings) data.scheduleSettings = {};
+    data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
+
+    // Step 8: Upload — skipped (not failed!) when the channel is disconnected.
+    // The video stays SCHEDULED and publishes automatically after reconnection.
+    if (!tokenHealth.ok) {
+      currentStep = 'upload';
+      cleanupTmp(renderResult.tmpDir);
+      await updateRunnerVideo(projectId, data, videoId, {
+        status: 'SCHEDULED',
+        scheduledDate: new Date().toISOString(),
+        retryCount: 0,
+        nextRetryAt: undefined,
+        standbyInfo: undefined,
+        lastError: `Upload pendente: ${tokenHealth.message}`,
+      }, 'Scheduled video saved (YouTube desconectado)');
+
+      const waitDuration = Math.round((Date.now() - startTime) / 1000);
+      await safeInsertAutopilotLog({
+        project_id: projectId,
+        status: 'success',
+        message: `Vídeo pronto e agendado. Publicação automática assim que o canal for reconectado. (${tokenHealth.message})`,
+        step: 'render',
+        video_title: videoTitle,
+        elapsed_ms: waitDuration * 1000,
+        runner: 'github-actions',
+      });
+      log('🕒', `Vídeo pronto em ${waitDuration}s, aguardando reconexão do YouTube.`);
+      return true;
+    }
+
     currentStep = 'upload';
     await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Enviando vídeo para o YouTube', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
     const uploadResult = await stepUploadYouTube(data, metadata, renderResult, thumbnailBase64, projectRow.user_email);
 
-    if (!data.scheduleSettings) data.scheduleSettings = {};
-    data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
-
     await updateRunnerVideo(projectId, data, videoId, {
       status: 'PUBLISHED',
       youtubeUrl: uploadResult?.videoUrl || null,
+      retryCount: 0,
+      nextRetryAt: undefined,
+      standbyInfo: undefined,
+      lastError: undefined,
     }, 'Published video saved');
 
     // Log success
@@ -1378,16 +1420,41 @@ async function processProject(projectRow) {
     if (data.scheduleSettings?.autoGenerate) {
       data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
     }
+
     if (videoId) {
+      // Auto-retry with backoff instead of waiting for a human click.
+      const previousRetries = (resumeVideo?.retryCount || 0);
+      const retryCount = previousRetries + 1;
+      const exhausted = retryCount >= MAX_AUTO_RETRIES;
+      const nextRetryAt = exhausted ? null : new Date(Date.now() + retryBackoffMs(previousRetries)).toISOString();
+
       await updateRunnerVideo(projectId, data, videoId, {
         status: 'STANDBY',
         standbyInfo,
+        retryCount,
+        nextRetryAt: nextRetryAt || undefined,
+        lastError: err.message,
       }, 'Standby video saved');
-    } else {
-      await persistProjectData(projectId, data, 'Standby project saved');
+
+      await safeInsertAutopilotLog({
+        project_id: projectId,
+        status: exhausted ? 'error' : 'retrying',
+        message: exhausted
+          ? `Falhou ${retryCount}x em "${currentStep}" — aguardando ação manual. Último erro: ${err.message}`
+          : `Falhou em "${currentStep}" (tentativa ${retryCount}/${MAX_AUTO_RETRIES}). Nova tentativa automática em ${new Date(nextRetryAt).toLocaleString('pt-BR')}. Erro: ${err.message}`,
+        step: currentStep,
+        video_title: videoTitle,
+        elapsed_ms: duration * 1000,
+        runner: 'github-actions',
+      });
+
+      log(exhausted ? '🛑' : '🔁', exhausted
+        ? `Tentativas esgotadas para "${videoTitle}"`
+        : `Retry agendado para ${nextRetryAt}`);
+      return false;
     }
 
-    // Log error
+    await persistProjectData(projectId, data, 'Standby project saved');
     await safeInsertAutopilotLog({
       project_id: projectId,
       status: 'error',
@@ -1406,13 +1473,10 @@ async function processProject(projectRow) {
     }
     // Always release the lock — even on crash — so the project isn't
     // permanently blocked from future runs.
-    try {
-      await supabase.rpc('release_autopilot_lock', { p_project_id: projectId });
-    } catch (e) {
-      log('⚠️', `Failed to release autopilot lock for ${projectId}: ${e.message}`);
-    }
+    await releaseLock(projectId);
   }
 }
+
 
 // --- ENTRY POINT ---
 
