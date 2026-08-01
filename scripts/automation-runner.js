@@ -1191,26 +1191,6 @@ async function processProject(projectRow) {
     return false;
   }
 
-  // Resume mode: a previous run failed and its backoff has elapsed.
-  const resumeVideo = findRetryableVideo(data);
-  const isResume = !!resumeVideo;
-  let videoId = resumeVideo?.id || null;
-
-  log('🚀', isResume
-    ? `Retomando vídeo em standby: "${resumeVideo.title}" (tentativa ${(resumeVideo.retryCount || 0) + 1}/${MAX_AUTO_RETRIES})`
-    : `Processing project: "${data.channelTheme}" (${projectId})`);
-
-  await safeInsertAutopilotLog({
-    project_id: projectId,
-    status: 'running',
-    message: isResume
-      ? `Retomando do passo "${resumeVideo.standbyInfo?.failedStep || '?'}" (tentativa ${(resumeVideo.retryCount || 0) + 1}/${MAX_AUTO_RETRIES})`
-      : 'Runner headless iniciou o pipeline',
-    step: resumeVideo?.standbyInfo?.failedStep || 'idea',
-    video_title: isResume ? resumeVideo.title : undefined,
-    runner: 'github-actions',
-  });
-
   // Load per-user API keys (Gemini/Pexels) — owner of this project
   await loadUserKeys(projectRow.user_email);
   if (!GEMINI_API_KEY) {
@@ -1234,7 +1214,8 @@ async function processProject(projectRow) {
   // Ensure projectId is accessible inside data for token lookup
   data.id = projectId;
 
-  // Proactive YouTube check — decides upfront whether this run can publish.
+  // Proactive YouTube check — decides upfront whether this run can publish and
+  // whether a video parked as "upload pendente" can now be finished.
   const tokenHealth = await checkYoutubeTokenHealth(projectId, projectRow.user_email);
   if (!tokenHealth.ok) {
     log('⚠️', `YouTube indisponível (${tokenHealth.reason}): ${tokenHealth.message} — o vídeo será gerado e ficará agendado.`);
@@ -1246,6 +1227,28 @@ async function processProject(projectRow) {
       runner: 'github-actions',
     });
   }
+
+  // Resume mode: a previous run failed (backoff elapsed) or a finished video is
+  // waiting for the channel to come back.
+  const resumeVideo = findRetryableVideo(data, Date.now(), tokenHealth.ok);
+  const isResume = !!resumeVideo;
+  let videoId = resumeVideo?.id || null;
+
+  log('🚀', isResume
+    ? `Retomando "${resumeVideo.title}" (tentativa ${(resumeVideo.retryCount || 0) + 1}/${MAX_AUTO_RETRIES})`
+    : `Processing project: "${data.channelTheme}" (${projectId})`);
+
+  await safeInsertAutopilotLog({
+    project_id: projectId,
+    status: 'running',
+    message: isResume
+      ? `Retomando do passo "${resumeVideo.standbyInfo?.failedStep || 'upload'}" (tentativa ${(resumeVideo.retryCount || 0) + 1}/${MAX_AUTO_RETRIES})`
+      : 'Runner headless iniciou o pipeline',
+    step: resumeVideo?.standbyInfo?.failedStep || 'idea',
+    video_title: isResume ? resumeVideo.title : undefined,
+    runner: 'github-actions',
+  });
+
 
   let currentStep = 'idea';
   try {
