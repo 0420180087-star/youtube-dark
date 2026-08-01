@@ -196,6 +196,8 @@ function rotateGeminiKey() {
 
 async function loadUserKeys(userEmail) {
   if (!userEmail) return;
+  if (!SCHEMA.user_settings) return; // schema incompleto — segue com chaves do ENV
+
   try {
     const { data } = await supabase
       .from('user_settings')
