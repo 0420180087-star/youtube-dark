@@ -3,6 +3,8 @@ import { useProjects, AutoPilotLogEntry } from '../context/ProjectContext';
 import { ProjectStatus } from '../types';
 import { STEP_LABELS } from '../services/automationService';
 import { supabase } from '../lib/supabaseClient';
+import { AutomationHealth } from '../components/AutomationHealth';
+
 import { 
   Calendar as CalendarIcon, Clock, ListOrdered, PlayCircle, Bot, Zap, 
   CheckCircle, XCircle, Loader2, Timer, ArrowRight, AlertTriangle, 
