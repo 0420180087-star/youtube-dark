@@ -1046,33 +1046,126 @@ async function updateRunnerVideo(projectId, data, videoId, updates, logMessage) 
   await persistProjectData(projectId, data, logMessage || `Video ${videoId} updated`);
 }
 
+// --- RETRY POLICY ---
+// Transient failures (Gemini "OTHER", network timeouts, Pexels 429) must not
+// require a human click. Backoff: 5 min → 20 min → 1 h → 4 h, then give up.
+const MAX_AUTO_RETRIES = 4;
+const RETRY_BACKOFF_MS = [5 * 60 * 1000, 20 * 60 * 1000, 60 * 60 * 1000, 4 * 60 * 60 * 1000];
+
+function retryBackoffMs(retryCount) {
+  return RETRY_BACKOFF_MS[Math.min(retryCount, RETRY_BACKOFF_MS.length - 1)];
+}
+
+// A STANDBY video is retryable when it still has attempts left and its
+// nextRetryAt has elapsed.
+function findRetryableVideo(data, now = Date.now()) {
+  const videos = Array.isArray(data?.videos) ? data.videos : [];
+  return videos.find((v) => {
+    if (v?.status !== 'STANDBY') return false;
+    if ((v.retryCount || 0) >= MAX_AUTO_RETRIES) return false;
+    if (!v.nextRetryAt) return true; // legacy standby video — retry on next cycle
+    return new Date(v.nextRetryAt).getTime() <= now;
+  }) || null;
+}
+
+// Artifacts persisted in Supabase are usable on resume; placeholders are not.
+function isUsableUrl(url) {
+  return typeof url === 'string' && /^https?:\/\//.test(url);
+}
+
+function reusableScenes(video) {
+  const scenes = video?.visualScenes;
+  if (!Array.isArray(scenes) || scenes.length === 0) return null;
+  const allUsable = scenes.every((s) => isUsableUrl(s?.videoUrl) || isUsableUrl(s?.imageUrl));
+  return allUsable ? scenes : null;
+}
+
+// --- YOUTUBE TOKEN HEALTH ---
+// Checked BEFORE generating anything, so we never burn 10 minutes of compute
+// only to discover the channel is disconnected.
+async function checkYoutubeTokenHealth(projectId, userEmail) {
+  if (!SCHEMA.project_auth || !projectId || !userEmail) {
+    return { ok: false, reason: 'missing', message: 'Tabela project_auth indisponível.' };
+  }
+  if (!YOUTUBE_CLIENT_ID || !YOUTUBE_CLIENT_SECRET) {
+    return { ok: false, reason: 'missing', message: 'GOOGLE_CLIENT_ID/YOUTUBE_CLIENT_SECRET não configurados nos secrets.' };
+  }
+
+  const { data: authRow } = await supabase
+    .from('project_auth')
+    .select('youtube_refresh_token, youtube_access_token, token_expires_at')
+    .eq('project_id', projectId)
+    .eq('user_email', userEmail)
+    .maybeSingle();
+
+  const persist = async (status, message) => {
+    try {
+      await supabase.from('project_auth').update({
+        token_status: status,
+        token_checked_at: new Date().toISOString(),
+        token_error: message || null,
+      }).eq('project_id', projectId).eq('user_email', userEmail);
+    } catch { /* coluna pode não existir em bancos antigos */ }
+  };
+
+  if (!authRow?.youtube_refresh_token) {
+    await persist('missing', 'Canal do YouTube não conectado neste projeto.');
+    return { ok: false, reason: 'missing', message: 'Canal do YouTube não conectado neste projeto.' };
+  }
+
+  // A cached access token with >5 min of life proves the credential chain works.
+  if (authRow.youtube_access_token && authRow.token_expires_at) {
+    const msLeft = new Date(authRow.token_expires_at).getTime() - Date.now();
+    if (msLeft > 5 * 60 * 1000) {
+      await persist('ok', null);
+      return { ok: true, reason: 'cached', accessToken: authRow.youtube_access_token };
+    }
+  }
+
+  try {
+    const res = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: YOUTUBE_CLIENT_ID,
+        client_secret: YOUTUBE_CLIENT_SECRET,
+        refresh_token: authRow.youtube_refresh_token,
+        grant_type: 'refresh_token',
+      }),
+    });
+    const tokens = await res.json();
+    if (!tokens.access_token) {
+      const revoked = tokens.error === 'invalid_grant';
+      const message = revoked
+        ? 'Refresh token revogado pelo Google. Reconecte o canal no app (e publique o app OAuth no Google Cloud).'
+        : `Falha ao validar token: ${JSON.stringify(tokens).slice(0, 200)}`;
+      await persist(revoked ? 'revoked' : 'unknown', message);
+      return { ok: false, reason: revoked ? 'revoked' : 'unknown', message };
+    }
+    const expiresAt = new Date(Date.now() + (tokens.expires_in || 3600) * 1000).toISOString();
+    await supabase.from('project_auth').update({
+      youtube_access_token: tokens.access_token,
+      token_expires_at: expiresAt,
+      updated_at: new Date().toISOString(),
+    }).eq('project_id', projectId).eq('user_email', userEmail);
+    await persist('ok', null);
+    return { ok: true, reason: 'refreshed', accessToken: tokens.access_token };
+  } catch (e) {
+    await persist('unknown', e.message);
+    return { ok: false, reason: 'unknown', message: `Erro de rede ao validar token: ${e.message}` };
+  }
+}
+
 async function processProject(projectRow) {
   const projectId = projectRow.id;
   const data = projectRow.data || {};
   const startTime = Date.now();
-  let videoId = null;
   let videoTitle = data.channelTheme || projectId;
 
   // Acquire distributed lock — prevents browser scheduler from running
   // the same project at the same time as this GitHub Actions runner.
-  const { data: lockAcquired, error: lockError } = await supabase
-    .rpc('acquire_autopilot_lock', {
-      p_project_id: String(projectId),
-      p_locked_by: 'github-actions',
-      p_lock_minutes: 90,
-    });
+  const { acquired: lockAcquired } = await acquireLock(projectId, 90);
 
-  if (lockError) {
-    log('❌', `Lock RPC error: ${lockError.message} — aplique as migrations 003 e 005 no Supabase`);
-    await safeInsertAutopilotLog({
-      project_id: projectId,
-      status: 'error',
-      message: `Lock RPC error: ${lockError.message}`,
-      step: 'idea',
-      runner: 'github-actions',
-    });
-    return false;
-  }
   if (!lockAcquired) {
     log('⏭️', `Lock não adquirido para "${data.channelTheme}" — já rodando em outro lugar`);
     await safeInsertAutopilotLog({
@@ -1085,12 +1178,23 @@ async function processProject(projectRow) {
     return false;
   }
 
-  log('🚀', `Processing project: "${data.channelTheme}" (${projectId})`);
+  // Resume mode: a previous run failed and its backoff has elapsed.
+  const resumeVideo = findRetryableVideo(data);
+  const isResume = !!resumeVideo;
+  let videoId = resumeVideo?.id || null;
+
+  log('🚀', isResume
+    ? `Retomando vídeo em standby: "${resumeVideo.title}" (tentativa ${(resumeVideo.retryCount || 0) + 1}/${MAX_AUTO_RETRIES})`
+    : `Processing project: "${data.channelTheme}" (${projectId})`);
+
   await safeInsertAutopilotLog({
     project_id: projectId,
     status: 'running',
-    message: 'Runner headless iniciou o pipeline',
-    step: 'idea',
+    message: isResume
+      ? `Retomando do passo "${resumeVideo.standbyInfo?.failedStep || '?'}" (tentativa ${(resumeVideo.retryCount || 0) + 1}/${MAX_AUTO_RETRIES})`
+      : 'Runner headless iniciou o pipeline',
+    step: resumeVideo?.standbyInfo?.failedStep || 'idea',
+    video_title: isResume ? resumeVideo.title : undefined,
     runner: 'github-actions',
   });
 
@@ -1110,47 +1214,83 @@ async function processProject(projectRow) {
       step: 'idea',
       runner: 'github-actions',
     });
-    try { await supabase.rpc('release_autopilot_lock', { p_project_id: projectId }); } catch {}
+    await releaseLock(projectId);
     return false;
   }
 
   // Ensure projectId is accessible inside data for token lookup
   data.id = projectId;
 
+  // Proactive YouTube check — decides upfront whether this run can publish.
+  const tokenHealth = await checkYoutubeTokenHealth(projectId, projectRow.user_email);
+  if (!tokenHealth.ok) {
+    log('⚠️', `YouTube indisponível (${tokenHealth.reason}): ${tokenHealth.message} — o vídeo será gerado e ficará agendado.`);
+    await safeInsertAutopilotLog({
+      project_id: projectId,
+      status: 'retrying',
+      message: `YouTube não conectado (${tokenHealth.reason}): o vídeo será gerado e publicado automaticamente após a reconexão. ${tokenHealth.message}`,
+      step: 'upload',
+      runner: 'github-actions',
+    });
+  }
+
   let currentStep = 'idea';
   try {
-    // Step 1: Idea
-    currentStep = 'idea';
-    await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Buscando/criando ideia no Brainstorm', step: currentStep, runner: 'github-actions' });
-    const idea = await stepIdea(data);
+    let idea;
 
-    // Update ideas in Supabase
-    if (idea.updatedIdeas) {
-      data.ideas = idea.updatedIdeas;
-      await persistProjectData(projectId, data, 'Brainstorm saved');
+    if (isResume) {
+      // Reuse the existing draft instead of consuming a new brainstorm idea.
+      currentStep = 'idea';
+      idea = {
+        topic: resumeVideo.title,
+        context: resumeVideo.specificContext || '',
+        specificContext: resumeVideo.specificContext || '',
+      };
+      videoTitle = resumeVideo.title;
+      await updateRunnerVideo(projectId, data, videoId, {
+        status: 'DRAFT',
+        standbyInfo: undefined,
+      }, 'Retry started');
+    } else {
+      // Step 1: Idea
+      currentStep = 'idea';
+      await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Buscando/criando ideia no Brainstorm', step: currentStep, runner: 'github-actions' });
+      idea = await stepIdea(data);
+
+      // Update ideas in Supabase
+      if (idea.updatedIdeas) {
+        data.ideas = idea.updatedIdeas;
+        await persistProjectData(projectId, data, 'Brainstorm saved');
+      }
+
+      videoTitle = idea.topic;
+      videoId = `auto_${Date.now()}`;
+      if (!data.videos) data.videos = [];
+      data.videos.unshift({
+        id: videoId,
+        projectId,
+        title: idea.topic,
+        status: 'DRAFT',
+        targetDuration: data.defaultDuration || 'Standard (5-8 min)',
+        format: data.defaultFormat || 'Landscape 16:9',
+        specificContext: idea.specificContext || idea.context || '',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+      await persistProjectData(projectId, data, 'Draft video saved');
     }
 
-    videoTitle = idea.topic;
-    videoId = `auto_${Date.now()}`;
-    if (!data.videos) data.videos = [];
-    data.videos.unshift({
-      id: videoId,
-      projectId,
-      title: idea.topic,
-      status: 'DRAFT',
-      targetDuration: data.defaultDuration || 'Standard (5-8 min)',
-      format: data.defaultFormat || 'Landscape 16:9',
-      specificContext: idea.specificContext || idea.context || '',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    });
-    await persistProjectData(projectId, data, 'Draft video saved');
-
-    // Step 2: Script
+    // Step 2: Script — reused on resume (already persisted, no need to pay again)
     currentStep = 'script';
-    await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Gerando roteiro', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
-    const script = await stepScript(idea.topic, data);
+    let script = isResume && resumeVideo.script?.segments?.length ? resumeVideo.script : null;
+    if (script) {
+      log('♻️', 'Roteiro reaproveitado do vídeo em standby');
+    } else {
+      await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Gerando roteiro', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
+      script = await stepScript(idea.topic, data);
+    }
     await updateRunnerVideo(projectId, data, videoId, { script, status: 'SCRIPTING' }, 'Script saved');
+
 
     // Step 3: Voice/Narration
     currentStep = 'voice';
