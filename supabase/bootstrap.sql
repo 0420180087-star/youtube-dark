@@ -1,181 +1,172 @@
 -- =============================================================================
--- DarkStream — BOOTSTRAP SQL (canônico e idempotente)
---
--- Cole este arquivo INTEIRO no SQL Editor do Supabase e execute.
--- Pode rodar quantas vezes quiser: nada é destruído, nada duplica.
---
--- Este script substitui todas as migrations 001→005. Ele cria:
---   • user_profiles     — perfil do usuário (cross-device)
---   • projects          — espelho dos projetos (lido pelo GitHub Actions)
---   • project_auth      — refresh_token do YouTube por projeto
---   • user_settings     — chaves Gemini/Pexels por usuário
---   • autopilot_logs    — histórico de execuções da automação
---   • automation_heartbeat — sinal de vida do runner headless
---   • RPCs de lock      — evitam dois runners no mesmo projeto
---   • GRANTs + RLS      — sem eles o app recebe "permission denied"
+-- DarkStream — Setup COMPLETO do Supabase (idempotente)
+-- Consolida as migrations 001 a 005 + automation_reliability.sql
+-- Pode rodar mesmo que já tenha rodado o SQL do SETUP.md antes — tudo usa
+-- IF NOT EXISTS / OR REPLACE, então não duplica nem quebra nada existente.
 -- =============================================================================
 
--- ─────────────────────────────────────────────────────────────────────────────
+-- ─────────────────────────────────────────────────────────────────────────
 -- 1. TABELAS
--- ─────────────────────────────────────────────────────────────────────────────
+-- ─────────────────────────────────────────────────────────────────────────
 
-create table if not exists public.user_profiles (
-  email      text primary key,
-  name       text,
-  picture    text,
-  updated_at timestamptz default now()
+create table if not exists user_profiles (
+  email       text primary key,
+  name        text,
+  picture     text,
+  updated_at  timestamptz default now()
 );
 
-create table if not exists public.projects (
-  id         text primary key,
-  user_email text not null,
-  data       jsonb not null default '{}'::jsonb,
-  updated_at timestamptz default now()
-);
-
-alter table public.projects
-  add column if not exists autopilot_locked_until timestamptz default null,
-  add column if not exists autopilot_locked_by    text        default null;
-
-create table if not exists public.project_auth (
+create table if not exists project_auth (
   project_id            text not null,
   user_email            text not null,
   youtube_channel_id    text,
   youtube_channel_title text,
   youtube_access_token  text,
   youtube_refresh_token text,
+  oauth_client_id       text,
   token_expires_at      timestamptz,
   updated_at            timestamptz default now(),
   primary key (project_id, user_email)
 );
 
-alter table public.project_auth
-  add column if not exists youtube_channel_id    text,
-  add column if not exists youtube_channel_title text,
-  add column if not exists oauth_client_id       text,
-  -- Saúde do refresh_token, escrita pelo runner a cada ciclo.
-  -- 'ok' | 'revoked' | 'missing' | 'unknown'
-  add column if not exists token_status          text default 'unknown',
-  add column if not exists token_checked_at      timestamptz,
-  add column if not exists token_error           text;
+create table if not exists projects (
+  id          text primary key,
+  user_email  text not null,
+  data        jsonb not null,
+  autopilot_locked_until timestamptz default null,
+  autopilot_locked_by    text default null,
+  updated_at  timestamptz default now()
+);
 
--- Bancos antigos criaram youtube_refresh_token como NOT NULL. O fluxo atual
--- grava a linha antes de ter o refresh_token, então a restrição precisa cair.
-alter table public.project_auth
-  alter column youtube_refresh_token drop not null;
+create table if not exists autopilot_logs (
+  id          uuid primary key default gen_random_uuid(),
+  project_id  text not null,
+  status      text not null,
+  message     text,
+  step        text,
+  video_title text,
+  elapsed_ms  integer,
+  runner      text,
+  created_at  timestamptz default now()
+);
 
-create table if not exists public.user_settings (
+create table if not exists user_settings (
   user_email      text primary key,
   gemini_api_keys text[] not null default '{}',
   pexels_api_key  text,
   updated_at      timestamptz default now()
 );
 
-create table if not exists public.autopilot_logs (
-  id          uuid primary key default gen_random_uuid(),
-  project_id  text not null,
-  status      text not null,
-  message     text,
-  step        text,
-  created_at  timestamptz default now()
-);
+-- Garante colunas em bancos que só rodaram o SQL antigo do SETUP.md
+alter table project_auth
+  add column if not exists youtube_channel_id    text,
+  add column if not exists youtube_channel_title text,
+  add column if not exists oauth_client_id       text;
+alter table project_auth alter column youtube_refresh_token drop not null;
 
-alter table public.autopilot_logs
+alter table projects
+  add column if not exists autopilot_locked_until timestamptz default null,
+  add column if not exists autopilot_locked_by    text default null;
+
+alter table autopilot_logs
   add column if not exists video_title text,
   add column if not exists elapsed_ms  integer,
   add column if not exists runner      text;
 
--- Sinal de vida do runner headless. Se a linha 'github-actions' estiver velha,
--- o app avisa que os secrets do repositório não estão configurados.
-create table if not exists public.automation_heartbeat (
-  runner       text primary key,
-  last_seen_at timestamptz not null default now(),
-  detail       text
-);
+-- ─────────────────────────────────────────────────────────────────────────
+-- 2. RLS — política permissiva ("app managed rows")
+-- Este app usa Google OAuth próprio, NÃO Supabase Auth (auth.uid() é sempre
+-- NULL). O isolamento real acontece via .eq('user_email', email) no código
+-- do frontend. RLS aqui é apenas uma camada extra, não o filtro principal.
+-- ─────────────────────────────────────────────────────────────────────────
 
--- ─────────────────────────────────────────────────────────────────────────────
--- 2. ÍNDICES
--- ─────────────────────────────────────────────────────────────────────────────
+alter table user_profiles  enable row level security;
+alter table project_auth   enable row level security;
+alter table projects       enable row level security;
+alter table autopilot_logs enable row level security;
+alter table user_settings  enable row level security;
 
-create index if not exists idx_projects_user_email        on public.projects(user_email);
-create index if not exists idx_projects_updated_at        on public.projects(updated_at desc);
-create index if not exists idx_projects_autopilot_lock    on public.projects(autopilot_locked_until) where autopilot_locked_until is not null;
-create index if not exists idx_project_auth_project_user  on public.project_auth(project_id, user_email);
-create index if not exists idx_project_auth_user_updated  on public.project_auth(user_email, updated_at desc);
-create index if not exists idx_autopilot_logs_proj_create on public.autopilot_logs(project_id, created_at desc);
-create index if not exists idx_user_settings_email        on public.user_settings(user_email);
+drop policy if exists "user_profiles: acesso proprio"  on user_profiles;
+drop policy if exists "user_profiles: own row only"    on user_profiles;
+drop policy if exists "user_profiles: own row"          on user_profiles;
+drop policy if exists "user_profiles: app managed rows" on user_profiles;
+create policy "user_profiles: app managed rows" on user_profiles for all using (true) with check (true);
 
--- ─────────────────────────────────────────────────────────────────────────────
--- 3. GRANTS — obrigatórios. Sem eles o PostgREST retorna permission denied.
--- ─────────────────────────────────────────────────────────────────────────────
+drop policy if exists "project_auth: acesso por email"  on project_auth;
+drop policy if exists "project_auth: own rows only"     on project_auth;
+drop policy if exists "project_auth: own rows"          on project_auth;
+drop policy if exists "project_auth: app managed rows"  on project_auth;
+create policy "project_auth: app managed rows" on project_auth for all using (true) with check (true);
 
-grant usage on schema public to anon, authenticated, service_role;
+drop policy if exists "projects: acesso por email"  on projects;
+drop policy if exists "projects: own rows only"     on projects;
+drop policy if exists "projects: own rows"          on projects;
+drop policy if exists "projects: app managed rows"  on projects;
+create policy "projects: app managed rows" on projects for all using (true) with check (true);
 
-grant select, insert, update, delete on public.user_profiles        to anon, authenticated;
-grant select, insert, update, delete on public.projects             to anon, authenticated;
-grant select, insert, update, delete on public.project_auth         to anon, authenticated;
-grant select, insert, update, delete on public.user_settings        to anon, authenticated;
-grant select, insert, update, delete on public.autopilot_logs       to anon, authenticated;
-grant select, insert, update, delete on public.automation_heartbeat to anon, authenticated;
+drop policy if exists "autopilot_logs: acesso por email"      on autopilot_logs;
+drop policy if exists "autopilot_logs: own project logs"      on autopilot_logs;
+drop policy if exists "autopilot_logs: own projects only"     on autopilot_logs;
+drop policy if exists "autopilot_logs: app managed rows"      on autopilot_logs;
+create policy "autopilot_logs: app managed rows" on autopilot_logs for all using (true) with check (true);
 
-grant all on public.user_profiles        to service_role;
-grant all on public.projects             to service_role;
-grant all on public.project_auth         to service_role;
-grant all on public.user_settings        to service_role;
-grant all on public.autopilot_logs       to service_role;
-grant all on public.automation_heartbeat to service_role;
+drop policy if exists "user_settings: own row only"    on user_settings;
+drop policy if exists "user_settings: own row"          on user_settings;
+drop policy if exists "user_settings: app managed rows" on user_settings;
+create policy "user_settings: app managed rows" on user_settings for all using (true) with check (true);
 
--- ─────────────────────────────────────────────────────────────────────────────
--- 4. RLS
---
--- O app faz login com Google OAuth no navegador, NÃO com Supabase Auth, então
--- auth.uid() é sempre NULL aqui. A isolação real acontece nos filtros
--- explícitos (.eq('user_email', ...)) de cada query. As policies abaixo
--- mantêm RLS habilitado e liberam o acesso via anon key.
--- Trate a anon key como pública e o projeto Supabase como privado.
--- ─────────────────────────────────────────────────────────────────────────────
+-- GRANTs — necessários pois as policies acima liberam para anon/authenticated
+grant select, insert, update, delete on public.user_profiles  to anon, authenticated;
+grant select, insert, update, delete on public.projects       to anon, authenticated;
+grant select, insert, update, delete on public.project_auth   to anon, authenticated;
+grant select, insert, update, delete on public.autopilot_logs to anon, authenticated;
+grant select, insert, update, delete on public.user_settings  to anon, authenticated;
+grant all on public.user_profiles  to service_role;
+grant all on public.projects       to service_role;
+grant all on public.project_auth   to service_role;
+grant all on public.autopilot_logs to service_role;
+grant all on public.user_settings  to service_role;
 
-alter table public.user_profiles        enable row level security;
-alter table public.projects             enable row level security;
-alter table public.project_auth         enable row level security;
-alter table public.user_settings        enable row level security;
-alter table public.autopilot_logs       enable row level security;
-alter table public.automation_heartbeat enable row level security;
+-- ─────────────────────────────────────────────────────────────────────────
+-- 3. FUNÇÕES AUXILIARES
+-- ─────────────────────────────────────────────────────────────────────────
 
-do $$
-declare
-  t text;
-  p record;
+-- Usada pelo frontend (supabaseClient.ts) — hoje é só "melhor esforço",
+-- não bloqueia nada, mas evita warnings no console se não existir.
+create or replace function set_session_email(p_email text)
+returns void language plpgsql as $$
 begin
-  foreach t in array array[
-    'user_profiles','projects','project_auth',
-    'user_settings','autopilot_logs','automation_heartbeat'
-  ]
-  loop
-    -- remove qualquer policy antiga (migrations 001/002/004/005)
-    for p in
-      select policyname from pg_policies
-      where schemaname = 'public' and tablename = t
-    loop
-      execute format('drop policy if exists %I on public.%I', p.policyname, t);
-    end loop;
-
-    execute format(
-      'create policy %I on public.%I for all using (true) with check (true)',
-      t || ': app managed rows', t
-    );
-  end loop;
-end
+  perform set_config('request.user_email', p_email, true);
+end;
 $$;
 
--- ─────────────────────────────────────────────────────────────────────────────
--- 5. LOCK DISTRIBUÍDO (projects.id é TEXT — não uuid)
--- ─────────────────────────────────────────────────────────────────────────────
+create or replace function requesting_user_email()
+returns text language sql stable as $$
+  select nullif(current_setting('request.user_email', true), '')
+$$;
+
+create or replace function touch_updated_at()
+returns trigger language plpgsql as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+drop trigger if exists user_settings_touch_updated_at on user_settings;
+create trigger user_settings_touch_updated_at
+  before update on user_settings
+  for each row execute function touch_updated_at();
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- 4. LOCK DISTRIBUÍDO — essencial para o automation-runner.js funcionar
+-- (é o que trava o erro "Lock RPC error" se estiver faltando)
+-- ─────────────────────────────────────────────────────────────────────────
 
 create or replace function public.acquire_autopilot_lock(
-  p_project_id   text,
-  p_locked_by    text,
-  p_lock_minutes int default 90
+    p_project_id   text,
+    p_locked_by    text,
+    p_lock_minutes int default 90
 )
 returns boolean
 language plpgsql
@@ -183,17 +174,17 @@ security definer
 set search_path = public
 as $$
 declare
-  v_updated int;
+    v_updated int;
 begin
-  update public.projects
-  set autopilot_locked_until = now() + (p_lock_minutes || ' minutes')::interval,
-      autopilot_locked_by    = p_locked_by,
-      updated_at             = now()
-  where id = p_project_id
-    and (autopilot_locked_until is null or autopilot_locked_until < now());
+    update public.projects
+    set autopilot_locked_until = now() + (p_lock_minutes || ' minutes')::interval,
+        autopilot_locked_by    = p_locked_by,
+        updated_at             = now()
+    where id = p_project_id
+      and (autopilot_locked_until is null or autopilot_locked_until < now());
 
-  get diagnostics v_updated = row_count;
-  return v_updated > 0;
+    get diagnostics v_updated = row_count;
+    return v_updated > 0;
 end;
 $$;
 
@@ -204,42 +195,33 @@ security definer
 set search_path = public
 as $$
 begin
-  update public.projects
-  set autopilot_locked_until = null,
-      autopilot_locked_by    = null,
-      updated_at             = now()
-  where id = p_project_id;
+    update public.projects
+    set autopilot_locked_until = null,
+        autopilot_locked_by    = null,
+        updated_at             = now()
+    where id = p_project_id;
 end;
 $$;
 
 grant execute on function public.acquire_autopilot_lock(text, text, int) to anon, authenticated, service_role;
 grant execute on function public.release_autopilot_lock(text)            to anon, authenticated, service_role;
 
--- ─────────────────────────────────────────────────────────────────────────────
--- 6. updated_at automático em user_settings
--- ─────────────────────────────────────────────────────────────────────────────
+-- ─────────────────────────────────────────────────────────────────────────
+-- 5. ÍNDICES
+-- ─────────────────────────────────────────────────────────────────────────
 
-create or replace function public.touch_updated_at()
-returns trigger
-language plpgsql
-set search_path = public
-as $$
-begin
-  new.updated_at = now();
-  return new;
-end;
-$$;
-
-drop trigger if exists user_settings_touch_updated_at on public.user_settings;
-create trigger user_settings_touch_updated_at
-  before update on public.user_settings
-  for each row execute function public.touch_updated_at();
+create index if not exists idx_projects_user_email          on public.projects(user_email);
+create index if not exists idx_projects_updated_at          on public.projects(updated_at desc);
+create index if not exists idx_projects_autopilot_lock      on public.projects(autopilot_locked_until) where autopilot_locked_until is not null;
+create index if not exists idx_project_auth_project_user    on public.project_auth(project_id, user_email);
+create index if not exists idx_project_auth_user_updated    on public.project_auth(user_email, updated_at desc);
+create index if not exists idx_autopilot_logs_project_created on public.autopilot_logs(project_id, created_at desc);
+create index if not exists idx_user_settings_email          on public.user_settings(user_email);
 
 -- =============================================================================
--- FIM. Se rodou sem erro, o schema está completo.
--- Verifique com:
---   select table_name from information_schema.tables
---   where table_schema = 'public' order by 1;
--- Deve listar: autopilot_logs, automation_heartbeat, project_auth,
---              projects, user_profiles, user_settings
+-- FIM. Depois de rodar isto, confira em Table Editor se aparecem:
+--   user_profiles, project_auth, projects, autopilot_logs, user_settings
+-- E em Database → Functions:
+--   acquire_autopilot_lock, release_autopilot_lock, set_session_email,
+--   requesting_user_email, touch_updated_at
 -- =============================================================================
