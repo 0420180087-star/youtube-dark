@@ -47,6 +47,139 @@ if (!ACTIVE_SUPABASE_URL || !ACTIVE_SUPABASE_SERVICE_KEY) {
 
 const supabase = createClient(ACTIVE_SUPABASE_URL, ACTIVE_SUPABASE_SERVICE_KEY);
 
+// --- SCHEMA PREFLIGHT ---
+// The runner must never die because the database is incomplete. It probes each
+// dependency once, prints a single actionable block, and degrades gracefully.
+const SCHEMA = {
+  projects: true,
+  project_auth: true,
+  user_settings: true,
+  autopilot_logs: true,
+  automation_heartbeat: true,
+  lockRpc: true,
+};
+
+async function tableExists(name) {
+  const { error } = await supabase.from(name).select('*').limit(1);
+  if (!error) return true;
+  const msg = (error.message || '').toLowerCase();
+  // 42P01 = undefined_table, 42501/permission = missing GRANT — both mean "run bootstrap.sql"
+  if (msg.includes('does not exist') || msg.includes('permission denied') || error.code === '42P01') return false;
+  // Unknown error (network etc.) — assume present so we don't disable features wrongly
+  return true;
+}
+
+async function preflight() {
+  const missing = [];
+
+  for (const name of ['projects', 'project_auth', 'user_settings', 'autopilot_logs', 'automation_heartbeat']) {
+    SCHEMA[name] = await tableExists(name);
+    if (!SCHEMA[name]) missing.push(`tabela ${name}`);
+  }
+
+  // Probe the lock RPC with a project id that cannot exist: a working RPC
+  // returns false, a missing one returns a 404/undefined-function error.
+  const { error: lockErr } = await supabase.rpc('acquire_autopilot_lock', {
+    p_project_id: '__preflight_probe__',
+    p_locked_by: 'preflight',
+    p_lock_minutes: 1,
+  });
+  if (lockErr) {
+    SCHEMA.lockRpc = false;
+    missing.push('função acquire_autopilot_lock');
+  }
+
+  if (missing.length) {
+    console.error('');
+    console.error('════════════════════════════════════════════════════════════════');
+    console.error('⚠️  PREFLIGHT FALHOU — schema incompleto no Supabase');
+    console.error('    Faltando: ' + missing.join(', '));
+    console.error('');
+    console.error('    CORREÇÃO: abra o SQL Editor do Supabase e execute o arquivo');
+    console.error('              supabase/bootstrap.sql (inteiro, é idempotente).');
+    console.error('════════════════════════════════════════════════════════════════');
+    console.error('');
+  }
+
+  if (!SCHEMA.projects) {
+    console.error('❌ Sem a tabela "projects" o runner não tem o que processar. Abortando.');
+    return false;
+  }
+  if (!SCHEMA.lockRpc) {
+    log('🔁', 'Lock RPC ausente — usando lock por coluna (fallback degradado).');
+  }
+  if (!SCHEMA.user_settings) {
+    log('🔁', 'Tabela user_settings ausente — usando chaves de API do ambiente.');
+  }
+  return true;
+}
+
+// --- DISTRIBUTED LOCK (com fallback sem RPC) ---
+
+async function acquireLock(projectId, lockMinutes = 90) {
+  if (SCHEMA.lockRpc) {
+    const { data, error } = await supabase.rpc('acquire_autopilot_lock', {
+      p_project_id: String(projectId),
+      p_locked_by: 'github-actions',
+      p_lock_minutes: lockMinutes,
+    });
+    if (!error) return { acquired: data === true, error: null };
+    SCHEMA.lockRpc = false;
+    log('🔁', `Lock RPC falhou (${error.message}) — caindo para lock por coluna.`);
+  }
+
+  // Fallback: conditional UPDATE on the lock columns (same semantics as the RPC).
+  const nowIso = new Date().toISOString();
+  const untilIso = new Date(Date.now() + lockMinutes * 60 * 1000).toISOString();
+  const { data, error } = await supabase
+    .from('projects')
+    .update({
+      autopilot_locked_until: untilIso,
+      autopilot_locked_by: 'github-actions',
+      updated_at: nowIso,
+    })
+    .eq('id', String(projectId))
+    .or(`autopilot_locked_until.is.null,autopilot_locked_until.lt.${nowIso}`)
+    .select('id');
+
+  if (error) {
+    // Lock columns missing too — run unlocked rather than never running at all.
+    log('⚠️', `Lock indisponível (${error.message}) — prosseguindo sem lock.`);
+    return { acquired: true, error: null };
+  }
+  return { acquired: (data?.length || 0) > 0, error: null };
+}
+
+async function releaseLock(projectId) {
+  try {
+    if (SCHEMA.lockRpc) {
+      const { error } = await supabase.rpc('release_autopilot_lock', { p_project_id: String(projectId) });
+      if (!error) return;
+    }
+    await supabase
+      .from('projects')
+      .update({ autopilot_locked_until: null, autopilot_locked_by: null })
+      .eq('id', String(projectId));
+  } catch (e) {
+    log('⚠️', `Failed to release autopilot lock for ${projectId}: ${e.message}`);
+  }
+}
+
+// --- HEARTBEAT ---
+// Lets the app prove the headless runner is alive. Without this, "enqueued for
+// headless" is indistinguishable from "secrets missing, nothing ever runs".
+async function writeHeartbeat(detail) {
+  if (!SCHEMA.automation_heartbeat) return;
+  try {
+    await supabase.from('automation_heartbeat').upsert({
+      runner: 'github-actions',
+      last_seen_at: new Date().toISOString(),
+      detail: String(detail || '').slice(0, 500),
+    }, { onConflict: 'runner' });
+  } catch { /* non-fatal */ }
+}
+
+
 // Per-run mutable keys — populated from user_settings before each project runs.
 // Falls back to ENV if no per-user key is configured.
 let GEMINI_API_KEY = ENV_GEMINI_API_KEY || VITE_GEMINI_API_KEY || '';
