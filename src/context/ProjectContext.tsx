@@ -679,7 +679,10 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       language: 'Portuguese (BR)', defaultDuration: 'Standard (5-8 min)', defaultFormat: 'Landscape 16:9',
       visualSourceMix: { geminiPercentage: 50, pexelsPercentage: 50 }, maxMediaDurationSeconds: 6,
       visualPacing: { minImagesPer5Sec: 1, maxImagesPer5Sec: 2, style: 'dynamic' },
-      scheduleSettings: { frequencyDays: 1, timeWindowStart: '12:00', timeWindowEnd: '18:00', autoGenerate: false }
+      // Auto-Pilot ligado por padrão: o objetivo do produto é "liga e esquece".
+      // O usuário pode desligar em Configurações do projeto.
+      scheduleSettings: { frequencyDays: 1, timeWindowStart: '12:00', timeWindowEnd: '18:00', autoGenerate: true }
+
     };
     setProjects(prev => {
       const next = [newProject, ...prev];

@@ -124,7 +124,17 @@ export interface Video {
   videoMetadata?: VideoMetadata;
   youtubeUrl?: string;
   standbyInfo?: StandbyInfo;
+
+  // Auto-retry bookkeeping written by the automation runner.
+  // retryCount = tentativas automáticas já feitas (máx. 4)
+  // nextRetryAt = quando o runner tentará de novo (backoff)
+  // lastError = último erro legível; "Upload pendente: ..." significa
+  //             vídeo pronto aguardando reconexão do canal do YouTube.
+  retryCount?: number;
+  nextRetryAt?: string;
+  lastError?: string;
 }
+
 
 export interface ScheduleSettings {
   frequencyDays: number;

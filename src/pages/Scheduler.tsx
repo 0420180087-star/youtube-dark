@@ -3,6 +3,8 @@ import { useProjects, AutoPilotLogEntry } from '../context/ProjectContext';
 import { ProjectStatus } from '../types';
 import { STEP_LABELS } from '../services/automationService';
 import { supabase } from '../lib/supabaseClient';
+import { AutomationHealth } from '../components/AutomationHealth';
+
 import { 
   Calendar as CalendarIcon, Clock, ListOrdered, PlayCircle, Bot, Zap, 
   CheckCircle, XCircle, Loader2, Timer, ArrowRight, AlertTriangle, 
@@ -109,30 +111,49 @@ const StandbyVideos: React.FC = () => {
         <PauseCircle className="w-5 h-5" />
         Vídeos em Standby ({standbyVideos.length})
       </h2>
-      <p className="text-[11px] text-slate-400">Esses vídeos tiveram falha em alguma etapa. Você pode reprocessá-los manualmente.</p>
+      <p className="text-[11px] text-slate-400">
+        Falhas transitórias são reprocessadas sozinhas (até 4 tentativas, com espera crescente).
+        Só os itens marcados como "tentativas esgotadas" precisam de você.
+      </p>
       <div className="space-y-2">
-        {standbyVideos.map(v => (
-          <Link 
-            key={v.id}
-            to={`/project/${v.projectId}/video/${v.id}/editor`}
-            className="flex items-center gap-3 bg-slate-950/50 px-4 py-3 rounded-xl border border-slate-800 hover:border-yellow-500/40 transition-colors group"
-          >
-            <AlertTriangle className="w-4 h-4 text-yellow-500 flex-shrink-0" />
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-bold text-white truncate">{v.title}</span>
-                <span className="text-[10px] text-slate-500">({v.projectTitle})</span>
+        {standbyVideos.map(v => {
+          const retries = v.retryCount || 0;
+          const exhausted = retries >= 4;
+          const willRetryAt = !exhausted && v.nextRetryAt ? new Date(v.nextRetryAt) : null;
+          return (
+            <Link
+              key={v.id}
+              to={`/project/${v.projectId}/video/${v.id}/editor`}
+              className="flex items-center gap-3 bg-slate-950/50 px-4 py-3 rounded-xl border border-slate-800 hover:border-yellow-500/40 transition-colors group"
+            >
+              <AlertTriangle className={`w-4 h-4 flex-shrink-0 ${exhausted ? 'text-red-500' : 'text-yellow-500'}`} />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-white truncate">{v.title}</span>
+                  <span className="text-[10px] text-slate-500">({v.projectTitle})</span>
+                </div>
+                <div className="flex items-center gap-2 mt-1 flex-wrap">
+                  <span className="text-[10px] bg-red-500/10 text-red-400 px-2 py-0.5 rounded border border-red-500/20">
+                    Falhou em: {v.standbyInfo ? STEP_LABELS[v.standbyInfo.failedStep] : '?'}
+                  </span>
+                  {exhausted ? (
+                    <span className="text-[10px] bg-red-500/20 text-red-300 px-2 py-0.5 rounded border border-red-500/30 font-bold">
+                      Tentativas esgotadas ({retries}/4) — precisa de ação manual
+                    </span>
+                  ) : (
+                    <span className="text-[10px] bg-blue-500/10 text-blue-300 px-2 py-0.5 rounded border border-blue-500/20">
+                      Retry automático {retries}/4
+                      {willRetryAt ? ` — ${formatTimeUntil(willRetryAt)}` : ' — no próximo ciclo'}
+                    </span>
+                  )}
+                  <span className="text-[10px] text-slate-500 truncate">{v.standbyInfo?.errorMessage}</span>
+                </div>
               </div>
-              <div className="flex items-center gap-2 mt-1">
-                <span className="text-[10px] bg-red-500/10 text-red-400 px-2 py-0.5 rounded border border-red-500/20">
-                  Falhou em: {v.standbyInfo ? STEP_LABELS[v.standbyInfo.failedStep] : '?'}
-                </span>
-                <span className="text-[10px] text-slate-500 truncate">{v.standbyInfo?.errorMessage}</span>
-              </div>
-            </div>
-            <ArrowRight className="w-4 h-4 text-slate-600 group-hover:text-yellow-400 transition-colors" />
-          </Link>
-        ))}
+              <ArrowRight className="w-4 h-4 text-slate-600 group-hover:text-yellow-400 transition-colors" />
+            </Link>
+          );
+        })}
+
       </div>
     </div>
   );
@@ -391,11 +412,15 @@ export const Scheduler: React.FC = () => {
         </div>
       </div>
 
+      {/* HEALTH — sempre o primeiro lugar para diagnosticar a automação */}
+      <AutomationHealth />
+
       {/* PROGRESS PANEL (only visible during execution) */}
       <ProgressPanel />
 
       {/* STANDBY VIDEOS */}
       <StandbyVideos />
+
 
       {/* AUTO-PILOT PROJECTS */}
       <AutoPilotProjects />

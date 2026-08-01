@@ -47,6 +47,139 @@ if (!ACTIVE_SUPABASE_URL || !ACTIVE_SUPABASE_SERVICE_KEY) {
 
 const supabase = createClient(ACTIVE_SUPABASE_URL, ACTIVE_SUPABASE_SERVICE_KEY);
 
+// --- SCHEMA PREFLIGHT ---
+// The runner must never die because the database is incomplete. It probes each
+// dependency once, prints a single actionable block, and degrades gracefully.
+const SCHEMA = {
+  projects: true,
+  project_auth: true,
+  user_settings: true,
+  autopilot_logs: true,
+  automation_heartbeat: true,
+  lockRpc: true,
+};
+
+async function tableExists(name) {
+  const { error } = await supabase.from(name).select('*').limit(1);
+  if (!error) return true;
+  const msg = (error.message || '').toLowerCase();
+  // 42P01 = undefined_table, 42501/permission = missing GRANT — both mean "run bootstrap.sql"
+  if (msg.includes('does not exist') || msg.includes('permission denied') || error.code === '42P01') return false;
+  // Unknown error (network etc.) — assume present so we don't disable features wrongly
+  return true;
+}
+
+async function preflight() {
+  const missing = [];
+
+  for (const name of ['projects', 'project_auth', 'user_settings', 'autopilot_logs', 'automation_heartbeat']) {
+    SCHEMA[name] = await tableExists(name);
+    if (!SCHEMA[name]) missing.push(`tabela ${name}`);
+  }
+
+  // Probe the lock RPC with a project id that cannot exist: a working RPC
+  // returns false, a missing one returns a 404/undefined-function error.
+  const { error: lockErr } = await supabase.rpc('acquire_autopilot_lock', {
+    p_project_id: '__preflight_probe__',
+    p_locked_by: 'preflight',
+    p_lock_minutes: 1,
+  });
+  if (lockErr) {
+    SCHEMA.lockRpc = false;
+    missing.push('função acquire_autopilot_lock');
+  }
+
+  if (missing.length) {
+    console.error('');
+    console.error('════════════════════════════════════════════════════════════════');
+    console.error('⚠️  PREFLIGHT FALHOU — schema incompleto no Supabase');
+    console.error('    Faltando: ' + missing.join(', '));
+    console.error('');
+    console.error('    CORREÇÃO: abra o SQL Editor do Supabase e execute o arquivo');
+    console.error('              supabase/bootstrap.sql (inteiro, é idempotente).');
+    console.error('════════════════════════════════════════════════════════════════');
+    console.error('');
+  }
+
+  if (!SCHEMA.projects) {
+    console.error('❌ Sem a tabela "projects" o runner não tem o que processar. Abortando.');
+    return false;
+  }
+  if (!SCHEMA.lockRpc) {
+    log('🔁', 'Lock RPC ausente — usando lock por coluna (fallback degradado).');
+  }
+  if (!SCHEMA.user_settings) {
+    log('🔁', 'Tabela user_settings ausente — usando chaves de API do ambiente.');
+  }
+  return true;
+}
+
+// --- DISTRIBUTED LOCK (com fallback sem RPC) ---
+
+async function acquireLock(projectId, lockMinutes = 90) {
+  if (SCHEMA.lockRpc) {
+    const { data, error } = await supabase.rpc('acquire_autopilot_lock', {
+      p_project_id: String(projectId),
+      p_locked_by: 'github-actions',
+      p_lock_minutes: lockMinutes,
+    });
+    if (!error) return { acquired: data === true, error: null };
+    SCHEMA.lockRpc = false;
+    log('🔁', `Lock RPC falhou (${error.message}) — caindo para lock por coluna.`);
+  }
+
+  // Fallback: conditional UPDATE on the lock columns (same semantics as the RPC).
+  const nowIso = new Date().toISOString();
+  const untilIso = new Date(Date.now() + lockMinutes * 60 * 1000).toISOString();
+  const { data, error } = await supabase
+    .from('projects')
+    .update({
+      autopilot_locked_until: untilIso,
+      autopilot_locked_by: 'github-actions',
+      updated_at: nowIso,
+    })
+    .eq('id', String(projectId))
+    .or(`autopilot_locked_until.is.null,autopilot_locked_until.lt.${nowIso}`)
+    .select('id');
+
+  if (error) {
+    // Lock columns missing too — run unlocked rather than never running at all.
+    log('⚠️', `Lock indisponível (${error.message}) — prosseguindo sem lock.`);
+    return { acquired: true, error: null };
+  }
+  return { acquired: (data?.length || 0) > 0, error: null };
+}
+
+async function releaseLock(projectId) {
+  try {
+    if (SCHEMA.lockRpc) {
+      const { error } = await supabase.rpc('release_autopilot_lock', { p_project_id: String(projectId) });
+      if (!error) return;
+    }
+    await supabase
+      .from('projects')
+      .update({ autopilot_locked_until: null, autopilot_locked_by: null })
+      .eq('id', String(projectId));
+  } catch (e) {
+    log('⚠️', `Failed to release autopilot lock for ${projectId}: ${e.message}`);
+  }
+}
+
+// --- HEARTBEAT ---
+// Lets the app prove the headless runner is alive. Without this, "enqueued for
+// headless" is indistinguishable from "secrets missing, nothing ever runs".
+async function writeHeartbeat(detail) {
+  if (!SCHEMA.automation_heartbeat) return;
+  try {
+    await supabase.from('automation_heartbeat').upsert({
+      runner: 'github-actions',
+      last_seen_at: new Date().toISOString(),
+      detail: String(detail || '').slice(0, 500),
+    }, { onConflict: 'runner' });
+  } catch { /* non-fatal */ }
+}
+
+
 // Per-run mutable keys — populated from user_settings before each project runs.
 // Falls back to ENV if no per-user key is configured.
 let GEMINI_API_KEY = ENV_GEMINI_API_KEY || VITE_GEMINI_API_KEY || '';
@@ -63,6 +196,8 @@ function rotateGeminiKey() {
 
 async function loadUserKeys(userEmail) {
   if (!userEmail) return;
+  if (!SCHEMA.user_settings) return; // schema incompleto — segue com chaves do ENV
+
   try {
     const { data } = await supabase
       .from('user_settings')
@@ -911,33 +1046,139 @@ async function updateRunnerVideo(projectId, data, videoId, updates, logMessage) 
   await persistProjectData(projectId, data, logMessage || `Video ${videoId} updated`);
 }
 
+// --- RETRY POLICY ---
+// Transient failures (Gemini "OTHER", network timeouts, Pexels 429) must not
+// require a human click. Backoff: 5 min → 20 min → 1 h → 4 h, then give up.
+const MAX_AUTO_RETRIES = 4;
+const RETRY_BACKOFF_MS = [5 * 60 * 1000, 20 * 60 * 1000, 60 * 60 * 1000, 4 * 60 * 60 * 1000];
+
+function retryBackoffMs(retryCount) {
+  return RETRY_BACKOFF_MS[Math.min(retryCount, RETRY_BACKOFF_MS.length - 1)];
+}
+
+// A video is retryable when:
+//   • está em STANDBY, com tentativas restantes e backoff vencido; ou
+//   • está em SCHEDULED por falta de canal do YouTube (upload pendente) —
+//     nesse caso é retomado sem gastar tentativa, assim que o token voltar.
+const PENDING_UPLOAD_MARK = 'Upload pendente';
+
+function findRetryableVideo(data, now = Date.now(), youtubeReady = false) {
+  const videos = Array.isArray(data?.videos) ? data.videos : [];
+
+  if (youtubeReady) {
+    const pendingUpload = videos.find(
+      (v) => v?.status === 'SCHEDULED' && String(v.lastError || '').startsWith(PENDING_UPLOAD_MARK)
+    );
+    if (pendingUpload) return pendingUpload;
+  }
+
+  return videos.find((v) => {
+    if (v?.status !== 'STANDBY') return false;
+    if ((v.retryCount || 0) >= MAX_AUTO_RETRIES) return false;
+    if (!v.nextRetryAt) return true; // legacy standby video — retry on next cycle
+    return new Date(v.nextRetryAt).getTime() <= now;
+  }) || null;
+}
+
+
+// Artifacts persisted in Supabase are usable on resume; placeholders are not.
+function isUsableUrl(url) {
+  return typeof url === 'string' && /^https?:\/\//.test(url);
+}
+
+function reusableScenes(video) {
+  const scenes = video?.visualScenes;
+  if (!Array.isArray(scenes) || scenes.length === 0) return null;
+  const allUsable = scenes.every((s) => isUsableUrl(s?.videoUrl) || isUsableUrl(s?.imageUrl));
+  return allUsable ? scenes : null;
+}
+
+// --- YOUTUBE TOKEN HEALTH ---
+// Checked BEFORE generating anything, so we never burn 10 minutes of compute
+// only to discover the channel is disconnected.
+async function checkYoutubeTokenHealth(projectId, userEmail) {
+  if (!SCHEMA.project_auth || !projectId || !userEmail) {
+    return { ok: false, reason: 'missing', message: 'Tabela project_auth indisponível.' };
+  }
+  if (!YOUTUBE_CLIENT_ID || !YOUTUBE_CLIENT_SECRET) {
+    return { ok: false, reason: 'missing', message: 'GOOGLE_CLIENT_ID/YOUTUBE_CLIENT_SECRET não configurados nos secrets.' };
+  }
+
+  const { data: authRow } = await supabase
+    .from('project_auth')
+    .select('youtube_refresh_token, youtube_access_token, token_expires_at')
+    .eq('project_id', projectId)
+    .eq('user_email', userEmail)
+    .maybeSingle();
+
+  const persist = async (status, message) => {
+    try {
+      await supabase.from('project_auth').update({
+        token_status: status,
+        token_checked_at: new Date().toISOString(),
+        token_error: message || null,
+      }).eq('project_id', projectId).eq('user_email', userEmail);
+    } catch { /* coluna pode não existir em bancos antigos */ }
+  };
+
+  if (!authRow?.youtube_refresh_token) {
+    await persist('missing', 'Canal do YouTube não conectado neste projeto.');
+    return { ok: false, reason: 'missing', message: 'Canal do YouTube não conectado neste projeto.' };
+  }
+
+  // A cached access token with >5 min of life proves the credential chain works.
+  if (authRow.youtube_access_token && authRow.token_expires_at) {
+    const msLeft = new Date(authRow.token_expires_at).getTime() - Date.now();
+    if (msLeft > 5 * 60 * 1000) {
+      await persist('ok', null);
+      return { ok: true, reason: 'cached', accessToken: authRow.youtube_access_token };
+    }
+  }
+
+  try {
+    const res = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: YOUTUBE_CLIENT_ID,
+        client_secret: YOUTUBE_CLIENT_SECRET,
+        refresh_token: authRow.youtube_refresh_token,
+        grant_type: 'refresh_token',
+      }),
+    });
+    const tokens = await res.json();
+    if (!tokens.access_token) {
+      const revoked = tokens.error === 'invalid_grant';
+      const message = revoked
+        ? 'Refresh token revogado pelo Google. Reconecte o canal no app (e publique o app OAuth no Google Cloud).'
+        : `Falha ao validar token: ${JSON.stringify(tokens).slice(0, 200)}`;
+      await persist(revoked ? 'revoked' : 'unknown', message);
+      return { ok: false, reason: revoked ? 'revoked' : 'unknown', message };
+    }
+    const expiresAt = new Date(Date.now() + (tokens.expires_in || 3600) * 1000).toISOString();
+    await supabase.from('project_auth').update({
+      youtube_access_token: tokens.access_token,
+      token_expires_at: expiresAt,
+      updated_at: new Date().toISOString(),
+    }).eq('project_id', projectId).eq('user_email', userEmail);
+    await persist('ok', null);
+    return { ok: true, reason: 'refreshed', accessToken: tokens.access_token };
+  } catch (e) {
+    await persist('unknown', e.message);
+    return { ok: false, reason: 'unknown', message: `Erro de rede ao validar token: ${e.message}` };
+  }
+}
+
 async function processProject(projectRow) {
   const projectId = projectRow.id;
   const data = projectRow.data || {};
   const startTime = Date.now();
-  let videoId = null;
   let videoTitle = data.channelTheme || projectId;
 
   // Acquire distributed lock — prevents browser scheduler from running
   // the same project at the same time as this GitHub Actions runner.
-  const { data: lockAcquired, error: lockError } = await supabase
-    .rpc('acquire_autopilot_lock', {
-      p_project_id: String(projectId),
-      p_locked_by: 'github-actions',
-      p_lock_minutes: 90,
-    });
+  const { acquired: lockAcquired } = await acquireLock(projectId, 90);
 
-  if (lockError) {
-    log('❌', `Lock RPC error: ${lockError.message} — aplique as migrations 003 e 005 no Supabase`);
-    await safeInsertAutopilotLog({
-      project_id: projectId,
-      status: 'error',
-      message: `Lock RPC error: ${lockError.message}`,
-      step: 'idea',
-      runner: 'github-actions',
-    });
-    return false;
-  }
   if (!lockAcquired) {
     log('⏭️', `Lock não adquirido para "${data.channelTheme}" — já rodando em outro lugar`);
     await safeInsertAutopilotLog({
@@ -949,15 +1190,6 @@ async function processProject(projectRow) {
     });
     return false;
   }
-
-  log('🚀', `Processing project: "${data.channelTheme}" (${projectId})`);
-  await safeInsertAutopilotLog({
-    project_id: projectId,
-    status: 'running',
-    message: 'Runner headless iniciou o pipeline',
-    step: 'idea',
-    runner: 'github-actions',
-  });
 
   // Load per-user API keys (Gemini/Pexels) — owner of this project
   await loadUserKeys(projectRow.user_email);
@@ -975,47 +1207,106 @@ async function processProject(projectRow) {
       step: 'idea',
       runner: 'github-actions',
     });
-    try { await supabase.rpc('release_autopilot_lock', { p_project_id: projectId }); } catch {}
+    await releaseLock(projectId);
     return false;
   }
 
   // Ensure projectId is accessible inside data for token lookup
   data.id = projectId;
 
+  // Proactive YouTube check — decides upfront whether this run can publish and
+  // whether a video parked as "upload pendente" can now be finished.
+  const tokenHealth = await checkYoutubeTokenHealth(projectId, projectRow.user_email);
+  if (!tokenHealth.ok) {
+    log('⚠️', `YouTube indisponível (${tokenHealth.reason}): ${tokenHealth.message} — o vídeo será gerado e ficará agendado.`);
+    await safeInsertAutopilotLog({
+      project_id: projectId,
+      status: 'retrying',
+      message: `YouTube não conectado (${tokenHealth.reason}): o vídeo será gerado e publicado automaticamente após a reconexão. ${tokenHealth.message}`,
+      step: 'upload',
+      runner: 'github-actions',
+    });
+  }
+
+  // Resume mode: a previous run failed (backoff elapsed) or a finished video is
+  // waiting for the channel to come back.
+  const resumeVideo = findRetryableVideo(data, Date.now(), tokenHealth.ok);
+  const isResume = !!resumeVideo;
+  let videoId = resumeVideo?.id || null;
+
+  log('🚀', isResume
+    ? `Retomando "${resumeVideo.title}" (tentativa ${(resumeVideo.retryCount || 0) + 1}/${MAX_AUTO_RETRIES})`
+    : `Processing project: "${data.channelTheme}" (${projectId})`);
+
+  await safeInsertAutopilotLog({
+    project_id: projectId,
+    status: 'running',
+    message: isResume
+      ? `Retomando do passo "${resumeVideo.standbyInfo?.failedStep || 'upload'}" (tentativa ${(resumeVideo.retryCount || 0) + 1}/${MAX_AUTO_RETRIES})`
+      : 'Runner headless iniciou o pipeline',
+    step: resumeVideo?.standbyInfo?.failedStep || 'idea',
+    video_title: isResume ? resumeVideo.title : undefined,
+    runner: 'github-actions',
+  });
+
+
   let currentStep = 'idea';
   try {
-    // Step 1: Idea
-    currentStep = 'idea';
-    await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Buscando/criando ideia no Brainstorm', step: currentStep, runner: 'github-actions' });
-    const idea = await stepIdea(data);
+    let idea;
 
-    // Update ideas in Supabase
-    if (idea.updatedIdeas) {
-      data.ideas = idea.updatedIdeas;
-      await persistProjectData(projectId, data, 'Brainstorm saved');
+    if (isResume) {
+      // Reuse the existing draft instead of consuming a new brainstorm idea.
+      currentStep = 'idea';
+      idea = {
+        topic: resumeVideo.title,
+        context: resumeVideo.specificContext || '',
+        specificContext: resumeVideo.specificContext || '',
+      };
+      videoTitle = resumeVideo.title;
+      await updateRunnerVideo(projectId, data, videoId, {
+        status: 'DRAFT',
+        standbyInfo: undefined,
+      }, 'Retry started');
+    } else {
+      // Step 1: Idea
+      currentStep = 'idea';
+      await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Buscando/criando ideia no Brainstorm', step: currentStep, runner: 'github-actions' });
+      idea = await stepIdea(data);
+
+      // Update ideas in Supabase
+      if (idea.updatedIdeas) {
+        data.ideas = idea.updatedIdeas;
+        await persistProjectData(projectId, data, 'Brainstorm saved');
+      }
+
+      videoTitle = idea.topic;
+      videoId = `auto_${Date.now()}`;
+      if (!data.videos) data.videos = [];
+      data.videos.unshift({
+        id: videoId,
+        projectId,
+        title: idea.topic,
+        status: 'DRAFT',
+        targetDuration: data.defaultDuration || 'Standard (5-8 min)',
+        format: data.defaultFormat || 'Landscape 16:9',
+        specificContext: idea.specificContext || idea.context || '',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+      await persistProjectData(projectId, data, 'Draft video saved');
     }
 
-    videoTitle = idea.topic;
-    videoId = `auto_${Date.now()}`;
-    if (!data.videos) data.videos = [];
-    data.videos.unshift({
-      id: videoId,
-      projectId,
-      title: idea.topic,
-      status: 'DRAFT',
-      targetDuration: data.defaultDuration || 'Standard (5-8 min)',
-      format: data.defaultFormat || 'Landscape 16:9',
-      specificContext: idea.specificContext || idea.context || '',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    });
-    await persistProjectData(projectId, data, 'Draft video saved');
-
-    // Step 2: Script
+    // Step 2: Script — reused on resume (already persisted, no need to pay again)
     currentStep = 'script';
-    await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Gerando roteiro', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
-    const script = await stepScript(idea.topic, data);
+    let script = isResume && resumeVideo.script?.segments?.length ? resumeVideo.script : null;
+    if (script) {
+      log('♻️', 'Roteiro reaproveitado do vídeo em standby');
+    } else {
+      await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Gerando roteiro', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
+      script = await stepScript(idea.topic, data);
+    }
     await updateRunnerVideo(projectId, data, videoId, { script, status: 'SCRIPTING' }, 'Script saved');
+
 
     // Step 3: Voice/Narration
     currentStep = 'voice';
@@ -1025,10 +1316,15 @@ async function processProject(projectRow) {
     const audioMimeType = voiceResult.mimeType;
     await updateRunnerVideo(projectId, data, videoId, { audioUrl: '__runner_audio__', status: 'AUDIO_GENERATED' }, 'Voice state saved');
 
-    // Step 4: Visuals
+    // Step 4: Visuals — reused on resume when the persisted URLs are real
     currentStep = 'visuals';
-    await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Buscando/gerando visuais', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
-    const scenes = await stepVisuals(script, data);
+    let scenes = isResume ? reusableScenes(resumeVideo) : null;
+    if (scenes) {
+      log('♻️', `Visuais reaproveitados (${scenes.length} cenas)`);
+    } else {
+      await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Buscando/gerando visuais', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
+      scenes = await stepVisuals(script, data);
+    }
     await updateRunnerVideo(projectId, data, videoId, { visualScenes: scenes, status: 'VIDEO_GENERATED' }, 'Visuals saved');
 
     // Step 5: Thumbnail (optional — does not break pipeline)
@@ -1045,17 +1341,23 @@ async function processProject(projectRow) {
       log('⚠️', 'Thumbnail failed, continuing without it');
     }
 
-    // Step 6: Metadata
+    // Step 6: Metadata — reused on resume
     currentStep = 'metadata';
-    await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Gerando título, descrição e tags', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
-    const metadata = await stepMetadata(idea.topic, script, data);
+    let metadata;
+    if (isResume && resumeVideo.videoMetadata?.youtubeTitle) {
+      metadata = { ...resumeVideo.videoMetadata, title: resumeVideo.videoMetadata.youtubeTitle };
+      log('♻️', 'Metadados reaproveitados do vídeo em standby');
+    } else {
+      await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Gerando título, descrição e tags', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
+      metadata = await stepMetadata(idea.topic, script, data);
+    }
     videoTitle = metadata.youtubeTitle || metadata.title || idea.topic;
     await updateRunnerVideo(projectId, data, videoId, { title: videoTitle, videoMetadata: {
       youtubeTitle: metadata.youtubeTitle || metadata.title || idea.topic,
       youtubeDescription: metadata.youtubeDescription || metadata.description || '',
       tags: metadata.tags || [],
       categoryId: metadata.categoryId || '22',
-      visibility: 'public',
+      visibility: metadata.visibility || 'public',
     } }, 'Metadata saved');
 
     // Step 7: Render Video (now receives audio!)
@@ -1063,17 +1365,48 @@ async function processProject(projectRow) {
     await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Renderizando vídeo no runner headless', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
     const renderResult = await stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, data, audioMimeType);
 
-    // Step 8: Upload
+    if (!data.scheduleSettings) data.scheduleSettings = {};
+    data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
+
+    // Step 8: Upload — skipped (not failed!) when the channel is disconnected.
+    // The video stays SCHEDULED and publishes automatically after reconnection.
+    if (!tokenHealth.ok) {
+      currentStep = 'upload';
+      cleanupTmp(renderResult.tmpDir);
+      await updateRunnerVideo(projectId, data, videoId, {
+        status: 'SCHEDULED',
+        scheduledDate: new Date().toISOString(),
+        retryCount: 0,
+        nextRetryAt: undefined,
+        standbyInfo: undefined,
+        lastError: `Upload pendente: ${tokenHealth.message}`,
+      }, 'Scheduled video saved (YouTube desconectado)');
+
+      const waitDuration = Math.round((Date.now() - startTime) / 1000);
+      await safeInsertAutopilotLog({
+        project_id: projectId,
+        status: 'success',
+        message: `Vídeo pronto e agendado. Publicação automática assim que o canal for reconectado. (${tokenHealth.message})`,
+        step: 'render',
+        video_title: videoTitle,
+        elapsed_ms: waitDuration * 1000,
+        runner: 'github-actions',
+      });
+      log('🕒', `Vídeo pronto em ${waitDuration}s, aguardando reconexão do YouTube.`);
+      return true;
+    }
+
     currentStep = 'upload';
     await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Enviando vídeo para o YouTube', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
     const uploadResult = await stepUploadYouTube(data, metadata, renderResult, thumbnailBase64, projectRow.user_email);
 
-    if (!data.scheduleSettings) data.scheduleSettings = {};
-    data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
-
     await updateRunnerVideo(projectId, data, videoId, {
       status: 'PUBLISHED',
       youtubeUrl: uploadResult?.videoUrl || null,
+      retryCount: 0,
+      nextRetryAt: undefined,
+      standbyInfo: undefined,
+      lastError: undefined,
     }, 'Published video saved');
 
     // Log success
@@ -1103,16 +1436,41 @@ async function processProject(projectRow) {
     if (data.scheduleSettings?.autoGenerate) {
       data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
     }
+
     if (videoId) {
+      // Auto-retry with backoff instead of waiting for a human click.
+      const previousRetries = (resumeVideo?.retryCount || 0);
+      const retryCount = previousRetries + 1;
+      const exhausted = retryCount >= MAX_AUTO_RETRIES;
+      const nextRetryAt = exhausted ? null : new Date(Date.now() + retryBackoffMs(previousRetries)).toISOString();
+
       await updateRunnerVideo(projectId, data, videoId, {
         status: 'STANDBY',
         standbyInfo,
+        retryCount,
+        nextRetryAt: nextRetryAt || undefined,
+        lastError: err.message,
       }, 'Standby video saved');
-    } else {
-      await persistProjectData(projectId, data, 'Standby project saved');
+
+      await safeInsertAutopilotLog({
+        project_id: projectId,
+        status: exhausted ? 'error' : 'retrying',
+        message: exhausted
+          ? `Falhou ${retryCount}x em "${currentStep}" — aguardando ação manual. Último erro: ${err.message}`
+          : `Falhou em "${currentStep}" (tentativa ${retryCount}/${MAX_AUTO_RETRIES}). Nova tentativa automática em ${new Date(nextRetryAt).toLocaleString('pt-BR')}. Erro: ${err.message}`,
+        step: currentStep,
+        video_title: videoTitle,
+        elapsed_ms: duration * 1000,
+        runner: 'github-actions',
+      });
+
+      log(exhausted ? '🛑' : '🔁', exhausted
+        ? `Tentativas esgotadas para "${videoTitle}"`
+        : `Retry agendado para ${nextRetryAt}`);
+      return false;
     }
 
-    // Log error
+    await persistProjectData(projectId, data, 'Standby project saved');
     await safeInsertAutopilotLog({
       project_id: projectId,
       status: 'error',
@@ -1131,18 +1489,21 @@ async function processProject(projectRow) {
     }
     // Always release the lock — even on crash — so the project isn't
     // permanently blocked from future runs.
-    try {
-      await supabase.rpc('release_autopilot_lock', { p_project_id: projectId });
-    } catch (e) {
-      log('⚠️', `Failed to release autopilot lock for ${projectId}: ${e.message}`);
-    }
+    await releaseLock(projectId);
   }
 }
+
 
 // --- ENTRY POINT ---
 
 async function main() {
   log('🤖', '=== Automation Runner Started ===');
+
+  const ready = await preflight();
+  await writeHeartbeat(ready ? 'ciclo iniciado' : 'ciclo iniciado com schema incompleto');
+  if (!ready) {
+    process.exit(1);
+  }
 
   let query = supabase.from('projects').select('*');
 
@@ -1156,16 +1517,19 @@ async function main() {
 
   if (error) {
     log('❌', `Failed to fetch projects: ${error.message}`);
+    await writeHeartbeat(`erro ao buscar projetos: ${error.message}`);
     process.exit(1);
   }
 
   if (!projects?.length) {
     log('📭', 'No projects found');
+    await writeHeartbeat('nenhum projeto encontrado');
     process.exit(0);
   }
 
   // Filter eligible projects
   const now = new Date();
+  const nowMs = now.getTime();
 
   log('🔍', `Verificando ${projects.length} projeto(s):`);
   for (const p of projects) {
@@ -1175,18 +1539,27 @@ async function main() {
     log('   ', `"${d?.channelTheme || p.id}": autoGenerate=${autoGen}, nextRun=${nextRun}`);
   }
 
+  const skippedOff = [];
   const eligible = projects.filter((p) => {
     const d = p.data;
     if (PROJECT_ID) return true;
     if (!d?.scheduleSettings?.autoGenerate) {
-      log('⏭️', `"${d?.channelTheme || p.id}" pulado: autoGenerate não está ativado`);
+      skippedOff.push(d?.channelTheme || p.id);
       return false;
     }
+    // A failed video whose backoff elapsed makes the project eligible right
+    // away, independent of the normal publishing schedule.
+    if (findRetryableVideo(d, nowMs, true)) return true;
+
     const nextRun = d.scheduleSettings?.nextScheduledRun
       ? new Date(d.scheduleSettings.nextScheduledRun)
       : new Date(0);
     return nextRun <= now;
   });
+
+  if (skippedOff.length) {
+    log('⏭️', `${skippedOff.length} projeto(s) com Auto-Pilot desligado: ${skippedOff.join(', ')}`);
+  }
 
   log('📋', `${projects.length} projeto(s) encontrados, ${eligible.length} elegível(is)`);
 
@@ -1199,10 +1572,13 @@ async function main() {
     else errorCount++;
   }
 
+  await writeHeartbeat(`ciclo concluído: ${successCount} ok, ${errorCount} falha(s), ${eligible.length} elegível(is)`);
   log('🏁', `=== Done! ✅ ${successCount} success, ❌ ${errorCount} errors ===`);
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   log('💀', `Fatal error: ${err.message}`);
+  await writeHeartbeat(`erro fatal: ${err.message}`);
   process.exit(1);
 });
+
