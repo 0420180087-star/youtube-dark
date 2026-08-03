@@ -452,10 +452,11 @@ const executePexelsPhotoSearch = async (
   usedIds: Set<number>,
 ): Promise<PexelsMedia[]> => {
   try {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=15&orientation=${orientation}&size=medium`,
       { headers: { Authorization: apiKey } }
     );
+
     if (!response.ok) return [];
     const data = await response.json();
     const results: PexelsMedia[] = [];
