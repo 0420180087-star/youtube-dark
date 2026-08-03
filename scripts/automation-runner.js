@@ -487,7 +487,9 @@ async function searchPexels(query, usedIds, isVideo = true) {
   try {
     const res = await axios.get(endpoint, {
       headers: { Authorization: PEXELS_API_KEY },
+      timeout: 12_000,
     });
+
 
     const items = isVideo ? res.data.videos : res.data.photos;
     if (!items?.length) return null;
