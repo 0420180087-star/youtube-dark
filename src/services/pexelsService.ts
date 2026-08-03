@@ -331,7 +331,7 @@ export const searchPexelsContextual = async (
 
   
   // RULE 5: Fallback chain
-  if (results.length < 3) {
+  if (results.length < 3 && Date.now() < deadline) {
     console.log(`[Pexels] ⚠️ Only ${results.length} results. Trying tone-stripped query...`);
     // Fallback 1: emotion visual only (no tone modifier)
     const emotion = detectEmotion(sectionText + ' ' + sectionTitle);
@@ -343,7 +343,7 @@ export const searchPexelsContextual = async (
     for (const r of fallbackResults) usedIds.add(r.id);
   }
   
-  if (results.length < 3) {
+  if (results.length < 3 && Date.now() < deadline) {
     console.log(`[Pexels] ⚠️ Still only ${results.length} results. Trying niche-only query...`);
     // Fallback 2: niche only
     const nicheQuery = niche.split(' ').slice(0, 2).join(' ') || 'cinematic';
@@ -352,7 +352,8 @@ export const searchPexelsContextual = async (
     for (const r of nicheResults) usedIds.add(r.id);
   }
   
-  if (results.length < 2) {
+  if (results.length < 2 && Date.now() < deadline) {
+
     console.log(`[Pexels] ⚠️ Final fallback: generic atmospheric query`);
     // Fallback 3: completely generic
     const genericQueries = ['cinematic atmosphere', 'dramatic landscape', 'abstract motion', 'aerial city'];
