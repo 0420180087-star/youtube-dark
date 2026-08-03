@@ -371,6 +371,17 @@ export const searchPexelsContextual = async (
 // LOW-LEVEL PEXELS API CALL
 // =============================================
 
+// Aborts a fetch that hangs — prevents the visuals step from stalling forever.
+const fetchWithTimeout = async (url: string, init: RequestInit, timeoutMs = 12_000): Promise<Response> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 const executePexelsSearch = async (
   apiKey: string,
   query: string,
@@ -379,10 +390,11 @@ const executePexelsSearch = async (
   usedIds: Set<number>,
 ): Promise<PexelsMedia[]> => {
   try {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&per_page=15&orientation=${orientation}&min_duration=5&max_duration=30&size=medium`,
       { headers: { Authorization: apiKey } }
     );
+
 
     if (!response.ok) {
       console.warn(`[Pexels] API returned ${response.status} for "${query}"`);
