@@ -314,8 +314,11 @@ export const searchPexelsContextual = async (
   console.log(`[Pexels] 🔍 Searching for section "${sectionTitle}" | emotion-based queries:`, queries);
   
   const results: PexelsMedia[] = [];
+  // Hard deadline for the whole search chain (queries + fallbacks).
+  const deadline = Date.now() + 20_000;
   
   for (const query of queries) {
+    if (Date.now() > deadline) break;
     const newResults = await executePexelsSearch(apiKey, query, orientation, minWidth, usedIds);
     results.push(...newResults);
     
@@ -324,10 +327,8 @@ export const searchPexelsContextual = async (
     
     // Stop if we have enough
     if (results.length >= 5) break;
-    
-    // Rate limit courtesy
-    await new Promise(r => setTimeout(r, 250));
   }
+
   
   // RULE 5: Fallback chain
   if (results.length < 3) {
