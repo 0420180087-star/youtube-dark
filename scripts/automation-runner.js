@@ -487,7 +487,9 @@ async function searchPexels(query, usedIds, isVideo = true) {
   try {
     const res = await axios.get(endpoint, {
       headers: { Authorization: PEXELS_API_KEY },
+      timeout: 12_000,
     });
+
 
     const items = isVideo ? res.data.videos : res.data.photos;
     if (!items?.length) return null;
@@ -722,76 +724,127 @@ async function stepVoice(script, projectData) {
   }
 }
 
+const VISUAL_MAX_SLOTS_PER_SEGMENT = 8;
+const VISUAL_MAX_SLOTS_TOTAL = 60;
+const VISUAL_SLOT_TIMEOUT_MS = 90_000;
+const VISUAL_CONCURRENCY = 3;
+
+/** Rejects if the promise takes longer than ms — keeps the step from hanging forever. */
+function raceTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(`${label}_timeout`)), ms)),
+  ]);
+}
+
 async function stepVisuals(script, projectData) {
   log('🎨', 'Step 4: Searching visuals...');
   const usedIds = new Set();
   const toneModifier = getToneModifier(projectData.defaultTone);
-  const scenes = [];
 
   // Keep each media on screen at most this many seconds — configurable per-project
   const MAX_MEDIA_DUR = Math.max(2, Number(projectData.maxMediaDurationSeconds) || 6);
 
+  // 1. Plan all slots up front (capped so long segments can't explode).
+  const slots = [];
   for (let i = 0; i < script.segments.length; i++) {
     const seg = script.segments[i];
     const prompts = getSegmentVisualPrompts(seg);
-
     const segDur = Math.max(2, Number(seg.estimatedDuration) || 5);
-    // Split segment into N slots so no single media stays longer than MAX_MEDIA_DUR
-    const slotCount = Math.max(prompts.length, Math.ceil(segDur / MAX_MEDIA_DUR));
-    const useExactCut = slotCount === Math.ceil(segDur / MAX_MEDIA_DUR) && slotCount >= prompts.length;
-    let currentStart = 0;
+    const desired = Math.max(prompts.length, Math.ceil(segDur / MAX_MEDIA_DUR));
+    const slotCount = Math.max(1, Math.min(desired, VISUAL_MAX_SLOTS_PER_SEGMENT));
+    const slotDur = segDur / slotCount;
 
     for (let j = 0; j < slotCount; j++) {
+      if (slots.length >= VISUAL_MAX_SLOTS_TOTAL) break;
       const basePrompt = prompts[j % prompts.length];
-      const prompt = buildSlotVisualPrompt(seg, basePrompt, i, j, slotCount, projectData.channelTheme);
-      const remaining = segDur - currentStart;
-      const slotDur = useExactCut ? Math.min(MAX_MEDIA_DUR, remaining) : segDur / slotCount;
-      const query = `${prompt} ${toneModifier}`.split(' ').slice(0, 4).join(' ');
-      log('🔍', `  Searching (${j + 1}/${slotCount}): "${query}"`);
-
-      let result = await searchPexels(query, usedIds);
-
-      // Fallback: try without tone modifier
-      if (!result) {
-        const fallbackQuery = prompt.split(' ').slice(0, 3).join(' ');
-        result = await searchPexels(fallbackQuery, usedIds);
-      }
-
-      // Fallback: niche-based
-      if (!result) {
-        result = await searchPexels(projectData.channelTheme || 'cinematic', usedIds);
-      }
-
-      // Final stock fallback: use Pexels photos before resorting to a generated placeholder.
-      if (!result) {
-        result = await searchPexels(query, usedIds, false)
-          || await searchPexels(projectData.channelTheme || 'cinematic', usedIds, false);
-      }
-
-      let generatedImageUrl = null;
-      if (!result?.imageUrl && !result?.thumbnailUrl) {
-        const b64 = await geminiGenerateImage(`${prompt}. Cinematic video scene, no text, no watermark, 16:9.`);
-        if (b64) generatedImageUrl = `data:image/jpeg;base64,${b64}`;
-      }
-
-      scenes.push({
+      slots.push({
+        index: slots.length,
         segmentIndex: i,
-        prompt,
+        slotInSegment: j,
         duration: slotDur,
-        videoUrl: result?.videoUrl,
-        imageUrl: result?.imageUrl || result?.thumbnailUrl || generatedImageUrl || createFallbackVisualDataUrl(prompt, i * 100 + j),
-        effect: ['zoom-in', 'zoom-out', 'pan-left', 'pan-right', 'zoom-in-fast'][(i + j) % 5],
+        prompt: buildSlotVisualPrompt(seg, basePrompt, i, j, slotCount, projectData.channelTheme),
       });
-      currentStart += slotDur;
-
-      // Rate limit
-      if (i > 0 || j > 0) await new Promise((r) => setTimeout(r, 1000));
     }
   }
 
+  const total = slots.length;
+  const resolved = new Array(total).fill(null);
+  let done = 0;
+
+  const resolveSlot = async (slot) => {
+    const { prompt, segmentIndex: i, slotInSegment: j } = slot;
+    const query = `${prompt} ${toneModifier}`.split(' ').slice(0, 4).join(' ');
+
+    let result = await searchPexels(query, usedIds);
+    if (!result) result = await searchPexels(prompt.split(' ').slice(0, 3).join(' '), usedIds);
+    if (!result) result = await searchPexels(projectData.channelTheme || 'cinematic', usedIds);
+    if (!result) {
+      result = await searchPexels(query, usedIds, false)
+        || await searchPexels(projectData.channelTheme || 'cinematic', usedIds, false);
+    }
+
+    let generatedImageUrl = null;
+    if (!result?.imageUrl && !result?.thumbnailUrl) {
+      try {
+        const b64 = await raceTimeout(
+          geminiGenerateImage(`${prompt}. Cinematic video scene, no text, no watermark, 16:9.`),
+          45_000,
+          'scene_image',
+        );
+        if (b64) generatedImageUrl = `data:image/jpeg;base64,${b64}`;
+      } catch (e) {
+        log('⚠️', `  AI image failed (${e.message}) — using generated fallback`);
+      }
+    }
+
+    return {
+      segmentIndex: i,
+      prompt,
+      duration: slot.duration,
+      videoUrl: result?.videoUrl,
+      imageUrl: result?.imageUrl || result?.thumbnailUrl || generatedImageUrl
+        || createFallbackVisualDataUrl(prompt, i * 100 + j),
+      effect: ['zoom-in', 'zoom-out', 'pan-left', 'pan-right', 'zoom-in-fast'][(i + j) % 5],
+    };
+  };
+
+  const resolveSlotGuarded = async (slot) => {
+    try {
+      return await raceTimeout(resolveSlot(slot), VISUAL_SLOT_TIMEOUT_MS, 'slot');
+    } catch (e) {
+      log('⚠️', `  Scene ${slot.index + 1} timed out (${e.message}) — fallback visual`);
+      return {
+        segmentIndex: slot.segmentIndex,
+        prompt: slot.prompt,
+        duration: slot.duration,
+        videoUrl: undefined,
+        imageUrl: createFallbackVisualDataUrl(slot.prompt, slot.segmentIndex * 100 + slot.slotInSegment),
+        effect: ['zoom-in', 'zoom-out', 'pan-left', 'pan-right', 'zoom-in-fast'][(slot.segmentIndex + slot.slotInSegment) % 5],
+      };
+    }
+  };
+
+  // 2. Bounded-concurrency pool, order preserved by index.
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < total) {
+      const slot = slots[cursor++];
+      resolved[slot.index] = await resolveSlotGuarded(slot);
+      done++;
+      log('🔍', `  Scene ${done}/${total} ready`);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(VISUAL_CONCURRENCY, Math.max(1, total)) }, worker)
+  );
+
+  const scenes = resolved.filter(Boolean);
   log('✅', `Found ${scenes.length} visual scenes (max ${MAX_MEDIA_DUR}s per media)`);
   return scenes;
 }
+
+
 
 async function stepThumbnail(title, script, projectData) {
   log('🖼️', 'Step 5: Generating thumbnail...');

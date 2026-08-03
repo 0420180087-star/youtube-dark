@@ -314,8 +314,11 @@ export const searchPexelsContextual = async (
   console.log(`[Pexels] 🔍 Searching for section "${sectionTitle}" | emotion-based queries:`, queries);
   
   const results: PexelsMedia[] = [];
+  // Hard deadline for the whole search chain (queries + fallbacks).
+  const deadline = Date.now() + 20_000;
   
   for (const query of queries) {
+    if (Date.now() > deadline) break;
     const newResults = await executePexelsSearch(apiKey, query, orientation, minWidth, usedIds);
     results.push(...newResults);
     
@@ -324,13 +327,11 @@ export const searchPexelsContextual = async (
     
     // Stop if we have enough
     if (results.length >= 5) break;
-    
-    // Rate limit courtesy
-    await new Promise(r => setTimeout(r, 250));
   }
+
   
   // RULE 5: Fallback chain
-  if (results.length < 3) {
+  if (results.length < 3 && Date.now() < deadline) {
     console.log(`[Pexels] ⚠️ Only ${results.length} results. Trying tone-stripped query...`);
     // Fallback 1: emotion visual only (no tone modifier)
     const emotion = detectEmotion(sectionText + ' ' + sectionTitle);
@@ -342,7 +343,7 @@ export const searchPexelsContextual = async (
     for (const r of fallbackResults) usedIds.add(r.id);
   }
   
-  if (results.length < 3) {
+  if (results.length < 3 && Date.now() < deadline) {
     console.log(`[Pexels] ⚠️ Still only ${results.length} results. Trying niche-only query...`);
     // Fallback 2: niche only
     const nicheQuery = niche.split(' ').slice(0, 2).join(' ') || 'cinematic';
@@ -351,7 +352,8 @@ export const searchPexelsContextual = async (
     for (const r of nicheResults) usedIds.add(r.id);
   }
   
-  if (results.length < 2) {
+  if (results.length < 2 && Date.now() < deadline) {
+
     console.log(`[Pexels] ⚠️ Final fallback: generic atmospheric query`);
     // Fallback 3: completely generic
     const genericQueries = ['cinematic atmosphere', 'dramatic landscape', 'abstract motion', 'aerial city'];
@@ -371,6 +373,17 @@ export const searchPexelsContextual = async (
 // LOW-LEVEL PEXELS API CALL
 // =============================================
 
+// Aborts a fetch that hangs — prevents the visuals step from stalling forever.
+const fetchWithTimeout = async (url: string, init: RequestInit, timeoutMs = 12_000): Promise<Response> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 const executePexelsSearch = async (
   apiKey: string,
   query: string,
@@ -379,10 +392,11 @@ const executePexelsSearch = async (
   usedIds: Set<number>,
 ): Promise<PexelsMedia[]> => {
   try {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&per_page=15&orientation=${orientation}&min_duration=5&max_duration=30&size=medium`,
       { headers: { Authorization: apiKey } }
     );
+
 
     if (!response.ok) {
       console.warn(`[Pexels] API returned ${response.status} for "${query}"`);
@@ -440,10 +454,11 @@ const executePexelsPhotoSearch = async (
   usedIds: Set<number>,
 ): Promise<PexelsMedia[]> => {
   try {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=15&orientation=${orientation}&size=medium`,
       { headers: { Authorization: apiKey } }
     );
+
     if (!response.ok) return [];
     const data = await response.json();
     const results: PexelsMedia[] = [];

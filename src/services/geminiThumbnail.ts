@@ -407,11 +407,19 @@ const generateCanvasThumbnail = (topic: string, tone: string): string => {
 // SCENE IMAGE (used by video studio, not thumbnails — kept intact)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Rejects if the wrapped promise takes longer than `ms`. */
+const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
+    Promise.race([
+        p,
+        new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`${label}_timeout`)), ms)),
+    ]);
+
 export const generateSceneImage = async (
     prompt: string,
     tone: string = 'Cinematic',
     format: string = 'Landscape 16:9',
     sessionId?: string,
+    timeoutMs: number = 60_000,
 ): Promise<string> => {
     if (!prompt || !prompt.trim()) throw new Error('Prompt is empty');
 
@@ -430,18 +438,24 @@ export const generateSceneImage = async (
 
         let lastErr: any = null;
         const sceneModels = ['gemini-2.0-flash-exp', 'gemini-2.0-flash'];
+        // Split the budget across the candidate models so one hang can't eat it all.
+        const perModelTimeout = Math.max(15_000, Math.floor(timeoutMs / sceneModels.length));
 
         for (const modelName of sceneModels) {
             try {
                 console.log(`[Scene] 🎨 Gerando imagem: ${modelName}`);
-                const response = await ai.models.generateContent({
-                    model: modelName,
-                    contents: { parts: [{ text: fullPrompt }] },
-                    config: {
-                        responseModalities: [Modality.IMAGE, Modality.TEXT],
-                        safetySettings: SAFETY_SETTINGS,
-                    },
-                });
+                const response: any = await withTimeout(
+                    ai.models.generateContent({
+                        model: modelName,
+                        contents: { parts: [{ text: fullPrompt }] },
+                        config: {
+                            responseModalities: [Modality.IMAGE, Modality.TEXT],
+                            safetySettings: SAFETY_SETTINGS,
+                        },
+                    }),
+                    perModelTimeout,
+                    'scene_image',
+                );
                 const base64 = response.candidates?.[0]?.content?.parts
                     ?.find((p: any) => p.inlineData)?.inlineData?.data;
                 if (base64) return `data:image/jpeg;base64,${base64}`;
@@ -457,6 +471,7 @@ export const generateSceneImage = async (
         throw lastErr || new Error('Nenhum modelo disponível');
     }, sessionId);
 };
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS

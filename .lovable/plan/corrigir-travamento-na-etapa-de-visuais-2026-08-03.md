@@ -13,18 +13,17 @@ Somado a isso, a rotação de chaves (`geminiCore.ts`) pode dormir até 2 minuto
 ## Correções
 
 **1. Watchdog por chamada (a correção que destrava)**
+
 - Envolver cada busca Pexels (25s) e cada geração de imagem Gemini (60s) num `Promise.race` com timeout. No timeout, cancelar e seguir para o próximo recurso em vez de travar.
 - Cada slot passa a ter um teto total (~90s). Estourando, usa `createFallbackVisualDataUrl` (já existe, gera SVG não-preto) e continua. A etapa nunca mais fica presa.
 
 **2. Paralelizar com pool controlado**
+
 - Construir a lista de todos os slots primeiro, depois processar com concorrência limitada (3 simultâneos), preservando a ordem pelo índice.
 - Remover a espera fixa de 6s: throttle apenas antes de chamadas Gemini reais (não antes de slots resolvidos pelo Pexels), e reduzido, já que a fila do Gemini já serializa.
 
-**3. Limitar e reaproveitar cenas**
-- Teto de cenas por segmento (máx. 8) e teto global por vídeo (máx. 60), respeitando `maxMediaDurationSeconds` como alvo, não como regra rígida.
-- Quando o orçamento de gerações Gemini do vídeo acabar, reutilizar imagens já geradas do mesmo segmento com efeito de animação diferente, em vez de gerar mais.
+**3. Progresso legível**
 
-**4. Progresso legível**
 - `onProgress` passa a mostrar cena concluída/total e a origem (`Pexels`, `IA`, `fallback`), além de avisar quando está aguardando cooldown de chave. Assim um travamento fica visível em segundos, não em minutos.
 
 ## Detalhes técnicos
