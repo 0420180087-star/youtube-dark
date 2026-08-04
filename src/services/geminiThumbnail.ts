@@ -111,8 +111,25 @@ NINGUÉM ACREDITA
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// TIMEOUT HELPER — nenhuma chamada de thumbnail pode travar o pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Rejects if the wrapped promise takes longer than `ms`. */
+const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
+    Promise.race([
+        p,
+        new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`${label}_timeout`)), ms)),
+    ]);
+
+const PROMPT_TIMEOUT_MS = 25_000;
+const PER_MODEL_TIMEOUT_MS = 35_000;
+const RENDER_TOTAL_TIMEOUT_MS = 70_000;
+const THUMBNAIL_TOTAL_TIMEOUT_MS = 100_000;
+
+// ─────────────────────────────────────────────────────────────────────────────
 // STEP 2A — IMAGE PROMPT GENERATION (Gemini Flash, script-aware)
 // ─────────────────────────────────────────────────────────────────────────────
+
 
 /**
  * Uses Gemini to generate a rich, topic-specific image prompt.
