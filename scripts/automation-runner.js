@@ -849,6 +849,14 @@ async function stepVisuals(script, projectData) {
 
 
 
+/** Rejeita se a promise passar de `ms` — impede travamento do passo. */
+function withStepTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(`${label}_timeout`)), ms)),
+  ]);
+}
+
 async function stepThumbnail(title, script, projectData) {
   log('🖼️', 'Step 5: Generating thumbnail...');
 
@@ -864,16 +872,32 @@ Tone: ${projectData.defaultTone}. Channel niche: ${projectData.channelTheme}.
 Script summary: ${scriptSummary}
 Return JSON: { "clickbaitText": "...", "imagePrompt": "full prompt for thumbnail image generation" }`;
 
-  const result = await geminiWithRetry(() => geminiGenerateJSON(prompt));
+  // Texto clickbait (25s de teto) — se falhar, deriva do título.
+  let result;
+  try {
+    result = await withStepTimeout(geminiWithRetry(() => geminiGenerateJSON(prompt)), 25000, 'thumb_text');
+  } catch (err) {
+    log('⚠️', `Texto de thumbnail falhou (${err.message}), derivando do título`);
+    result = {
+      clickbaitText: title.split(' ').slice(0, 4).join(' ').toUpperCase(),
+      imagePrompt: `dramatic scene about "${title}", one human face with extreme emotion looking at camera, ${toneStyle} atmosphere`,
+    };
+  }
 
   const fullPrompt = `YouTube thumbnail, ${toneStyle} style, text overlay "${result.clickbaitText}", ${result.imagePrompt}, high contrast, bold colors, professional design, 16:9 aspect ratio, no watermark`;
 
-  // Try to generate actual thumbnail image
-  const thumbnailBase64 = await geminiWithRetry(() => geminiGenerateImage(fullPrompt));
+  // Imagem: teto total de 100s. Estourando, segue sem imagem (não bloqueia).
+  let thumbnailBase64 = null;
+  try {
+    thumbnailBase64 = await withStepTimeout(geminiGenerateImage(fullPrompt), 100000, 'thumb_image');
+  } catch (err) {
+    log('⚠️', `Imagem de thumbnail falhou (${err.message}) — seguindo sem ela`);
+  }
 
   log('✅', `Thumbnail: "${result.clickbaitText}" ${thumbnailBase64 ? '(image generated)' : '(text only, no image)'}`);
   return { clickbaitText: result.clickbaitText, imagePrompt: fullPrompt, thumbnailBase64 };
 }
+
 
 async function stepMetadata(title, script, projectData) {
   log('📊', 'Step 6: Generating SEO metadata...');
