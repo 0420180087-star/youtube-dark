@@ -424,12 +424,6 @@ const generateCanvasThumbnail = (topic: string, tone: string): string => {
 // SCENE IMAGE (used by video studio, not thumbnails — kept intact)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Rejects if the wrapped promise takes longer than `ms`. */
-const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
-    Promise.race([
-        p,
-        new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`${label}_timeout`)), ms)),
-    ]);
 
 export const generateSceneImage = async (
     prompt: string,
