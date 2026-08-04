@@ -432,11 +432,25 @@ export async function stepGenerateThumbnail(
 ) {
   callbacks.onStepStart('thumbnail', 'Gerando thumbnail com clickbait...');
   const scriptSummary = script.segments.slice(0, 3).map((s: any) => s.narratorText).join(' ').slice(0, 500);
-  const thumbnailUrl = await generateThumbnail(video.title, project.defaultTone, scriptSummary, script, project.channelTheme, project.library);
-  callbacks.updateVideo(project.id, video.id, { thumbnailUrl });
+
+  // A thumbnail NUNCA deve travar ou derrubar o pipeline: teto de 2 min e
+  // fallback silencioso (generateThumbnail já devolve canvas em caso de falha).
+  let thumbnailUrl: string | undefined;
+  try {
+    thumbnailUrl = await Promise.race([
+      generateThumbnail(video.title, project.defaultTone, scriptSummary, script, project.channelTheme, project.library),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('thumbnail_step_timeout')), 120_000)),
+    ]);
+  } catch (err: any) {
+    console.warn('[Pipeline] Thumbnail falhou, seguindo sem ela:', err?.message);
+    thumbnailUrl = undefined;
+  }
+
+  if (thumbnailUrl) callbacks.updateVideo(project.id, video.id, { thumbnailUrl });
   callbacks.onStepComplete('thumbnail');
   return thumbnailUrl;
 }
+
 
 export async function stepGenerateMetadata(
   project: Project,

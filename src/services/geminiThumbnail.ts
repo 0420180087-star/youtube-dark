@@ -111,8 +111,25 @@ NINGUÉM ACREDITA
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// TIMEOUT HELPER — nenhuma chamada de thumbnail pode travar o pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Rejects if the wrapped promise takes longer than `ms`. */
+const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
+    Promise.race([
+        p,
+        new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`${label}_timeout`)), ms)),
+    ]);
+
+const PROMPT_TIMEOUT_MS = 25_000;
+const PER_MODEL_TIMEOUT_MS = 35_000;
+const RENDER_TOTAL_TIMEOUT_MS = 70_000;
+const THUMBNAIL_TOTAL_TIMEOUT_MS = 100_000;
+
+// ─────────────────────────────────────────────────────────────────────────────
 // STEP 2A — IMAGE PROMPT GENERATION (Gemini Flash, script-aware)
 // ─────────────────────────────────────────────────────────────────────────────
+
 
 /**
  * Uses Gemini to generate a rich, topic-specific image prompt.
@@ -184,10 +201,12 @@ Output ONLY the image generation prompt as a single paragraph. No explanation, n
 // STEP 2B — IMAGE GENERATION (Gemini image models)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Somente modelos que realmente devolvem imagem (inlineData).
+// `gemini-2.0-flash` / `-exp` NÃO geram imagem — usá-los só queimava cota
+// e fazia o loop terminar sem erro, impedindo o fallback de disparar.
 const IMAGE_MODELS = [
+    'gemini-2.5-flash-image',
     'gemini-2.0-flash-preview-image-generation',
-    'gemini-2.0-flash-exp',
-    'gemini-2.0-flash',
 ];
 
 const SAFETY_SETTINGS = [
@@ -206,14 +225,18 @@ const renderImageFromPrompt = async (prompt: string): Promise<string> => {
         for (const modelName of IMAGE_MODELS) {
             try {
                 console.log(`[Thumbnail] 🖼️ Tentando modelo: ${modelName}`);
-                const response = await ai.models.generateContent({
-                    model: modelName,
-                    contents: { parts: [{ text: fullPrompt }] },
-                    config: {
-                        responseModalities: [Modality.IMAGE, Modality.TEXT],
-                        safetySettings: SAFETY_SETTINGS,
-                    },
-                });
+                const response: any = await withTimeout(
+                    ai.models.generateContent({
+                        model: modelName,
+                        contents: { parts: [{ text: fullPrompt }] },
+                        config: {
+                            responseModalities: [Modality.IMAGE, Modality.TEXT],
+                            safetySettings: SAFETY_SETTINGS,
+                        },
+                    }),
+                    PER_MODEL_TIMEOUT_MS,
+                    `thumbnail_image_${modelName}`,
+                );
 
                 const base64 = response.candidates?.[0]?.content?.parts
                     ?.find((p: any) => p.inlineData)?.inlineData?.data;
@@ -222,14 +245,11 @@ const renderImageFromPrompt = async (prompt: string): Promise<string> => {
                     console.log(`[Thumbnail] ✅ Imagem gerada com ${modelName}`);
                     return `data:image/jpeg;base64,${base64}`;
                 }
+                // Sem inlineData = o modelo respondeu só texto. Erro explícito
+                // para que a cascata/fallback funcione de verdade.
+                throw new Error(`Sem dados de imagem em ${modelName}`);
             } catch (err: any) {
                 if (isQuotaError(err)) throw err; // bubble up for key rotation
-                const msg = (err.message || '').toLowerCase();
-                if (msg.includes('not found') || msg.includes('404') || msg.includes('not supported')) {
-                    console.warn(`[Thumbnail] Modelo ${modelName} indisponível. Tentando próximo...`);
-                    lastError = err;
-                    continue;
-                }
                 lastError = err;
                 console.warn(`[Thumbnail] Erro em ${modelName}: ${err.message}. Tentando próximo...`);
             }
@@ -243,13 +263,23 @@ const renderImageFromPrompt = async (prompt: string): Promise<string> => {
 // PUBLIC: generateThumbnail — orchestrates both steps
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Prompt determinístico (sem IA) usado quando o Gemini Flash não responde a tempo. */
+const buildLocalImagePrompt = (topic: string, tone: string, niche?: string): string =>
+    `A dramatic YouTube thumbnail scene about "${topic}"${niche ? ` in the ${niche} niche` : ''}. ` +
+    `ONE dominant human face in the right third of the frame covering 40-60% of the image, ` +
+    `${mapToneToExpression(tone)}, eyes looking directly at the camera. ` +
+    `Background: a specific scene related to the topic. Atmosphere: ${mapToneToVisualStyle(tone)}. ` +
+    `Color palette: ${mapToneToColors(tone)}. Extreme contrast, movie poster composition, ` +
+    `1280x720, no text, no logos, no watermarks.`;
+
 /**
  * Generates a topic-specific, clickbait-optimized thumbnail image using Gemini.
  *
  * Flow:
  *   1. Gemini Flash reads the script → generates a rich, specific image prompt
- *   2. Gemini image model renders the prompt
- *   3. If both fail (non-quota), canvas fallback fires
+ *      (25s de teto; estourando, usa um prompt local determinístico)
+ *   2. Gemini image model renders the prompt (35s por modelo, 70s no total)
+ *   3. Teto global de 100s. Qualquer falha/estouro → fallback canvas com clickbait
  */
 export const generateThumbnail = async (
     topic: string,
@@ -259,22 +289,48 @@ export const generateThumbnail = async (
     niche?: string,
     libraryItems?: import('../types').LibraryItem[],
 ): Promise<string> => {
-    try {
+    const pipeline = async (): Promise<string> => {
         // Step A: Build a rich, script-aware image prompt via Gemini
         console.log('[Thumbnail] 📝 Gerando prompt de imagem com Gemini...');
-        const imagePrompt = await buildImagePrompt(topic, tone, script, scriptSummary, niche);
-
-        if (!imagePrompt) throw new Error('Prompt de imagem vazio');
-        console.log('[Thumbnail] Prompt gerado:', imagePrompt.substring(0, 120) + '...');
+        let imagePrompt = '';
+        try {
+            imagePrompt = await withTimeout(
+                buildImagePrompt(topic, tone, script, scriptSummary, niche),
+                PROMPT_TIMEOUT_MS,
+                'thumbnail_prompt',
+            );
+        } catch (err: any) {
+            console.warn(`[Thumbnail] Prompt via IA falhou (${err.message}). Usando prompt local.`);
+        }
+        if (!imagePrompt) imagePrompt = buildLocalImagePrompt(topic, tone, niche);
+        console.log('[Thumbnail] Prompt:', imagePrompt.substring(0, 120) + '...');
 
         // Step B: Render the image with Gemini image models
-        return await renderImageFromPrompt(imagePrompt);
+        return await withTimeout(
+            renderImageFromPrompt(imagePrompt),
+            RENDER_TOTAL_TIMEOUT_MS,
+            'thumbnail_render',
+        );
+    };
 
+    try {
+        return await withTimeout(pipeline(), THUMBNAIL_TOTAL_TIMEOUT_MS, 'thumbnail_pipeline');
     } catch (err: any) {
         console.warn('[Thumbnail] ⚠️ Pipeline Gemini falhou, usando fallback canvas:', err.message);
-        return generateCanvasThumbnail(topic, tone);
+        // Tenta recuperar um texto clickbait rápido para o canvas; se não vier, usa o título.
+        let headline = topic;
+        try {
+            const hook = await withTimeout(
+                generateThumbnailHook(topic, tone, 'Portuguese', scriptSummary, script, niche, libraryItems),
+                12_000,
+                'thumbnail_hook',
+            );
+            if (hook?.mainText) headline = hook.accentText ? `${hook.mainText} ${hook.accentText}` : hook.mainText;
+        } catch { /* mantém o título */ }
+        return generateCanvasThumbnail(headline, tone);
     }
 };
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CANVAS FALLBACK — no API calls, still looks professional
@@ -407,12 +463,6 @@ const generateCanvasThumbnail = (topic: string, tone: string): string => {
 // SCENE IMAGE (used by video studio, not thumbnails — kept intact)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Rejects if the wrapped promise takes longer than `ms`. */
-const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
-    Promise.race([
-        p,
-        new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`${label}_timeout`)), ms)),
-    ]);
 
 export const generateSceneImage = async (
     prompt: string,
