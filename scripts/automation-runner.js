@@ -343,11 +343,14 @@ async function geminiGenerateImage(prompt) {
     }
   }
 
-  // 2️⃣ Fallback to Gemini 2.0 Flash image-generation (no allowlist needed)
+  // 2️⃣ Fallback to Gemini image-generation models (no allowlist needed).
+  // Apenas modelos que realmente devolvem inlineData — `gemini-2.0-flash-exp`
+  // não gera imagem e só queimava cota.
   const FLASH_MODELS = [
+    'gemini-2.5-flash-image',
     'gemini-2.0-flash-preview-image-generation',
-    'gemini-2.0-flash-exp',
   ];
+
   for (const model of FLASH_MODELS) {
     try {
       const res = await axios.post(
