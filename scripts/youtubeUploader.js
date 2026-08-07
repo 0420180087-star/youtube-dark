@@ -6,11 +6,23 @@
 // fetch é nativo no Node 18+ — node-fetch removido
 import fs from 'fs';
 
+// Timeouts explícitos: nenhuma chamada de rede pode ficar pendurada até o
+// limite de 120 min do job do GitHub Actions.
+const TIMEOUT = {
+  TOKEN: 30_000,
+  INIT: 60_000,
+  UPLOAD: 15 * 60_000,
+  THUMBNAIL: 60_000,
+};
+
+const withTimeout = (ms) => AbortSignal.timeout(ms);
+
 // Renova o access token usando o refresh token
 export async function refreshAccessToken(clientId, clientSecret, refreshToken) {
   const res = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal: withTimeout(TIMEOUT.TOKEN),
     body: JSON.stringify({
       client_id: clientId,
       client_secret: clientSecret,
@@ -22,6 +34,7 @@ export async function refreshAccessToken(clientId, clientSecret, refreshToken) {
   if (!data.access_token) throw new Error(`Falha ao renovar token: ${JSON.stringify(data)}`);
   return data.access_token;
 }
+
 
 // Faz upload do vídeo para o YouTube (resumable upload)
 export async function uploadVideoFile(accessToken, videoPath, metadata) {
