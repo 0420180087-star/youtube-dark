@@ -31,25 +31,26 @@ Consequência em cadeia: em `scripts/automation-runner.js`, `loadUserKeys()` faz
 6. `AutomationHealth.tsx`: tratar `error` em todas as queries e mostrar "Falha ao verificar: <mensagem>" em vez de assumir "desconectado".
 
 
-### Fase C — Timeouts (a classe de bug que já voltou 3×)
-8. Criar um helper único de timeout reutilizável em cada lado (`raceTimeout` no runner; `withTimeout` compartilhado no frontend) e aplicar em:
+### Fase B — Timeouts (a classe de bug que já voltou 3×)
+7. Criar um helper único de timeout reutilizável em cada lado (`raceTimeout` no runner; `withTimeout` compartilhado no frontend) e aplicar em:
    - runner: `geminiGenerate()` e `geminiTTS()` (`axios.post` sem `timeout` hoje) → `timeout` no axios + race; roteiro/ideia/metadados 90s, TTS por segmento 60s.
    - `src/services/geminiCore.ts`: `ttsOnce()` → race de 60s por segmento.
    - Em timeout: erro explícito que aciona retry/standby, nunca pendurar até os 120 min do job.
-9. Varredura final: todas as chamadas Gemini/Pexels/YouTube em `scripts/automation-runner.js` e `src/services/*.ts` passam a usar o helper — sem exceção.
+8. Varredura final: todas as chamadas Gemini/Pexels/YouTube em `scripts/automation-runner.js` e `src/services/*.ts` passam a usar o helper — sem exceção.
 
-### Fase D — Modelo de imagem de cena
-10. `src/services/geminiThumbnail.ts`, `generateSceneImage`: trocar `sceneModels = ['gemini-2.0-flash-exp','gemini-2.0-flash']` (não retornam imagem) pela mesma lista `IMAGE_MODELS` (`gemini-2.5-flash-image`, `gemini-2.0-flash-preview-image-generation`).
+### Fase C — Modelo de imagem de cena
+9. `src/services/geminiThumbnail.ts`, `generateSceneImage`: trocar `sceneModels = ['gemini-2.0-flash-exp','gemini-2.0-flash']` (não retornam imagem) pela mesma lista `IMAGE_MODELS` (`gemini-2.5-flash-image`, `gemini-2.0-flash-preview-image-generation`).
 
-### Fase E — Limpeza
-11. Deletar a pasta `pages/` da raiz (órfã; `src/App.tsx` importa de `src/pages`).
-12. `.github/workflows/deploy.yml`: remover a dependência de `build-and-deploy` em `supabase-deploy` (site deixa de ficar refém) e documentar `SUPABASE_ACCESS_TOKEN`, `SUPABASE_PROJECT_REF`, `SUPABASE_DB_URL` no `SETUP.md`.
-13. `YoutubeReconnectBanner.tsx`: mensagem específica quando `invalid_grant` repetir logo após reconexão.
+### Fase D — Limpeza
+10. Deletar a pasta `pages/` da raiz (órfã; `src/App.tsx` importa de `src/pages`).
+11. `.github/workflows/deploy.yml`: remover a dependência de `build-and-deploy` em `supabase-deploy` (site deixa de ficar refém) e documentar `SUPABASE_ACCESS_TOKEN`, `SUPABASE_PROJECT_REF`, `SUPABASE_DB_URL` no `SETUP.md`.
+12. `YoutubeReconnectBanner.tsx`: mensagem específica quando `invalid_grant` repetir logo após reconexão.
 
 ## O que você precisa fazer depois
-- Rodar o `supabase/bootstrap.sql` atualizado uma vez no SQL Editor (Fase B).
-- Reabrir Configurações e salvar as chaves Gemini/Pexels novamente, para garantir a linha em `user_settings` com o e-mail normalizado.
+- Rodar o `supabase/bootstrap.sql` atualizado uma vez no SQL Editor (é o que cria `gemini_api_keys`/`pexels_api_key` e libera a automação).
+- Reabrir Configurações e salvar as chaves Gemini/Pexels — só depois disso elas passam a existir no banco para o runner headless.
 - Disparar o workflow Auto-Post manualmente e conferir se avança além da etapa de ideia.
+
 
 ## Validação
 - Log do Actions passa de "No Gemini key" e chega a "Enviando vídeo para o YouTube" com URL.
