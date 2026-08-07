@@ -803,13 +803,9 @@ const VISUAL_MAX_SLOTS_TOTAL = 60;
 const VISUAL_SLOT_TIMEOUT_MS = 90_000;
 const VISUAL_CONCURRENCY = 3;
 
-/** Rejects if the promise takes longer than ms — keeps the step from hanging forever. */
-function raceTimeout(promise, ms, label) {
-  return Promise.race([
-    promise,
-    new Promise((_, rej) => setTimeout(() => rej(new Error(`${label}_timeout`)), ms)),
-  ]);
-}
+// raceTimeout é definido uma única vez no topo do arquivo (helper de timeout
+// compartilhado por TODAS as chamadas de rede do runner).
+
 
 async function stepVisuals(script, projectData) {
   log('🎨', 'Step 4: Searching visuals...');
