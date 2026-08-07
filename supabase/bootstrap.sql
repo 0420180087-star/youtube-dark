@@ -41,6 +41,7 @@ create table if not exists projects (
 create table if not exists autopilot_logs (
   id          uuid primary key default gen_random_uuid(),
   project_id  text not null,
+  user_email  text,
   status      text not null,
   message     text,
   step        text,
