@@ -1347,24 +1347,27 @@ async function processProject(projectRow) {
   }
 
   // Load per-user API keys (Gemini/Pexels) — owner of this project
+  CURRENT_USER_EMAIL = normalizeEmail(projectRow.user_email);
   await loadUserKeys(projectRow.user_email);
   if (!GEMINI_API_KEY) {
-    log('❌', `No Gemini key configured for user ${projectRow.user_email}. Skipping.`);
+    log('❌', `Nenhuma chave Gemini disponível para ${CURRENT_USER_EMAIL} (nem em user_settings, nem no ambiente). Pulando.`);
     if (!data.scheduleSettings) data.scheduleSettings = {};
     if (data.scheduleSettings.autoGenerate) {
-      data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
-      await persistProjectData(projectId, data, 'Next run saved after missing Gemini key');
+      // Retry curto: não perder o dia inteiro por um problema de leitura de chave.
+      data.scheduleSettings.nextScheduledRun = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+      await persistProjectData(projectId, data, 'Retry em 30 min — chave Gemini indisponível');
     }
     await safeInsertAutopilotLog({
       project_id: projectId,
       status: 'error',
-      message: 'Gemini API key ausente. Salve a chave em Configurações ou no GitHub Actions.',
+      message: 'Chave Gemini indisponível. Verifique Configurações (user_settings) — se o log acima mostrar "Falha ao ler user_settings", rode supabase/bootstrap.sql.',
       step: 'idea',
       runner: 'github-actions',
     });
     await releaseLock(projectId);
     return false;
   }
+
 
   // Ensure projectId is accessible inside data for token lookup
   data.id = projectId;
