@@ -1052,9 +1052,11 @@ async function stepUploadYouTube(projectData, metadata, renderResult, thumbnailB
       .select('youtube_refresh_token, youtube_access_token, token_expires_at, project_id, user_email')
       .eq('project_id', projectId)
       .eq('user_email', userEmail)
-      .maybeSingle();
+      .order('updated_at', { ascending: false })
+      .limit(1);
     if (error) throw new Error(`Falha ao buscar auth do projeto: ${error.message}`);
-    authRow = data;
+    authRow = data?.[0] || null;
+
   }
 
   const refreshToken = authRow?.youtube_refresh_token;
