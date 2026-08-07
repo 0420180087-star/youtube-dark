@@ -2,18 +2,19 @@
 
 ## Passo 1 — Evidência levantada
 
-Não tenho acesso ao banco deste projeto (Supabase externo, sem credenciais no sandbox) nem à aba Actions, então a evidência veio do log que você colou + leitura do código.
+Evidência real: log do GitHub Actions + inspeção do schema do banco (`information_schema.columns`). Diagnóstico agora é confirmado, não hipótese.
 
-**Causa raiz #1 (é a que está parando tudo hoje):** o runner encontra o projeto elegível e para em
-`No Gemini key configured for user r9345302@gmail.com`. Ou seja: nada do pipeline (roteiro, voz, visuais, thumbnail, upload) chega a rodar. Não é timeout, não é OAuth — é a leitura das chaves.
+**Causa raiz #1 — CONFIRMADA (é o que para tudo hoje).** A tabela `user_settings` no banco real tem apenas `user_email`, `google_client_id`, `youtube_channel`, `youtube_access_token`, `updated_at`. **As colunas `gemini_api_keys` e `pexels_api_key` não existem** (`ERROR 42703: column "gemini_api_keys" does not exist`) — a migration `004_user_settings.sql` nunca foi aplicada neste banco.
 
-Em `scripts/automation-runner.js`, `loadUserKeys()` faz `.from('user_settings').select(...)` e **descarta o `error`** (`const { data } = ...`). Se a query falhar (RLS bloqueando a chave usada pelo runner, coluna diferente, e-mail com caixa/espaço diferente, ou linha inexistente porque o save em Configurações falhou em silêncio), o resultado é idêntico a "usuário sem chave": pula o projeto e reagenda para o dia seguinte. Por isso a automação "nunca roda" enquanto o manual funciona (no navegador as chaves vêm do localStorage criptografado, não do banco).
+Consequência em cadeia: em `scripts/automation-runner.js`, `loadUserKeys()` faz `.select('gemini_api_keys, pexels_api_key')` e **descarta o `error`** (`const { data } = ...`). O PostgREST erra, `data` vem `null`, e o runner interpreta isso como "usuário sem chave" → `No Gemini key configured for user r9345302@gmail.com` → pula o projeto e reagenda para o dia seguinte. Nada do pipeline (roteiro, voz, visuais, thumbnail, upload) chega a rodar. O modo manual funciona porque no navegador as chaves vêm do localStorage criptografado, não do banco.
 
-**Causa raiz #2:** `Failed to write autopilot log: null value in column "user_email" of relation "autopilot_logs" violates not-null constraint`. O banco real tem `autopilot_logs.user_email NOT NULL`, e nem `bootstrap.sql` nem o runner conhecem essa coluna → **todo log remoto é descartado**. É por isso que o Scheduler e o painel de saúde não mostram histórico e o diagnóstico ficou cego.
+**Causa raiz #2 — CONFIRMADA.** `autopilot_logs.user_email` é `NOT NULL` no banco real, mas nem `bootstrap.sql` nem o runner conhecem essa coluna → **todo log remoto é rejeitado** (`null value in column "user_email" ... violates not-null constraint`). Por isso o Scheduler e o painel de saúde ficaram cegos.
 
-**Causa raiz #3 (confirmada por código, não é o bloqueio atual):** `token_status`, `token_checked_at` e `token_error` não existem em nenhum SQL do repositório, mas são consultados por `AutomationHealth.tsx` e pelo runner → a checagem "Canais do YouTube" sempre reporta desconectado.
+**Causa raiz #3 — CONFIRMADA.** `project_auth` não tem `token_status`, `token_checked_at` nem `token_error`, mas `AutomationHealth.tsx` e o runner consultam essas colunas → a checagem "Canais do YouTube" sempre reporta desconectado, mesmo com refresh token válido (as duas linhas de `project_auth` têm `tem_refresh = true`).
 
-**OAuth:** você confirmou app "In production", então expiração de refresh token em 7 dias **não** é o problema. Continua valendo melhorar a mensagem para `invalid_grant`, mas com prioridade baixa.
+**Achado extra:** há **duas linhas em `project_auth` para o mesmo canal "Biblical Investor"**, uma com `token_expires_at` de 2026-08-01 (vencida) e outra de 2026-08-07. Se o runner ler a linha errada, tenta refresh com token velho. O plano passa a ordenar por `updated_at desc` ao ler o token.
+
+**OAuth:** você confirmou app "In production", então expiração de refresh token em 7 dias **não** é o problema. Melhorar a mensagem de `invalid_grant` fica como prioridade baixa.
 
 ## Passo 2 — Correções
 
