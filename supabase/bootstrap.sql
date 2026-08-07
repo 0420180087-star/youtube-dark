@@ -25,6 +25,9 @@ create table if not exists project_auth (
   youtube_refresh_token text,
   oauth_client_id       text,
   token_expires_at      timestamptz,
+  token_status          text,
+  token_error           text,
+  token_checked_at      timestamptz,
   updated_at            timestamptz default now(),
   primary key (project_id, user_email)
 );
