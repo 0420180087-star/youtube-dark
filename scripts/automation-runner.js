@@ -194,35 +194,74 @@ function rotateGeminiKey() {
   log('🔁', `Rotated to Gemini key #${GEMINI_KEY_INDEX + 1}/${GEMINI_API_KEYS.length}`);
 }
 
+// E-mail do dono do projeto em execução — usado nos logs remotos (a coluna
+// autopilot_logs.user_email é NOT NULL em bancos já existentes).
+let CURRENT_USER_EMAIL = null;
+
+function normalizeEmail(email) {
+  return (email || '').trim().toLowerCase();
+}
+
 async function loadUserKeys(userEmail) {
-  if (!userEmail) return;
+  const email = normalizeEmail(userEmail);
+  if (!email) return;
   if (!SCHEMA.user_settings) return; // schema incompleto — segue com chaves do ENV
 
+  const envGemini = ENV_GEMINI_API_KEY || VITE_GEMINI_API_KEY;
+  const envPexels = ENV_PEXELS_API_KEY || VITE_PEXELS_API_KEY;
+
   try {
-    const { data } = await supabase
+    let { data, error } = await supabase
       .from('user_settings')
       .select('gemini_api_keys, pexels_api_key')
-      .eq('user_email', userEmail)
+      .eq('user_email', email)
       .maybeSingle();
-    if (data?.gemini_api_keys?.length) {
+
+    // Segunda tentativa: e-mail salvo com outra caixa/espaços.
+    if (!error && !data) {
+      const retry = await supabase
+        .from('user_settings')
+        .select('gemini_api_keys, pexels_api_key')
+        .ilike('user_email', email)
+        .maybeSingle();
+      data = retry.data;
+      error = retry.error;
+    }
+
+    if (error) {
+      // NUNCA tratar erro de query como "usuário sem chave" — isso mascarou o
+      // bug de colunas ausentes (gemini_api_keys) por várias execuções.
+      log('⚠️', `Falha ao ler user_settings de ${email}: ${error.message}. Rode supabase/bootstrap.sql para criar/atualizar as colunas.`);
+    } else if (data?.gemini_api_keys?.length) {
       GEMINI_API_KEYS = data.gemini_api_keys.filter(Boolean);
       GEMINI_KEY_INDEX = 0;
       GEMINI_API_KEY = GEMINI_API_KEYS[0];
-      log('🔑', `Loaded ${GEMINI_API_KEYS.length} Gemini key(s) for ${userEmail}`);
-    } else if (ENV_GEMINI_API_KEY || VITE_GEMINI_API_KEY) {
-      GEMINI_API_KEYS = [ENV_GEMINI_API_KEY || VITE_GEMINI_API_KEY];
-      GEMINI_API_KEY = GEMINI_API_KEYS[0];
+      log('🔑', `Loaded ${GEMINI_API_KEYS.length} Gemini key(s) for ${email}`);
+    } else {
+      log('ℹ️', `Nenhuma chave Gemini salva em user_settings para ${email}${envGemini ? ' — usando a chave do ambiente.' : '.'}`);
     }
+
+    if (!GEMINI_API_KEYS.length && envGemini) {
+      GEMINI_API_KEYS = [envGemini];
+      GEMINI_KEY_INDEX = 0;
+      GEMINI_API_KEY = envGemini;
+    }
+
     if (data?.pexels_api_key) {
       PEXELS_API_KEY = data.pexels_api_key;
-      log('🔑', `Loaded Pexels key for ${userEmail}`);
-    } else if (ENV_PEXELS_API_KEY || VITE_PEXELS_API_KEY) {
-      PEXELS_API_KEY = ENV_PEXELS_API_KEY || VITE_PEXELS_API_KEY;
+      log('🔑', `Loaded Pexels key for ${email}`);
+    } else if (envPexels) {
+      PEXELS_API_KEY = envPexels;
     }
   } catch (e) {
-    log('⚠️', `Failed to load user_settings for ${userEmail}: ${e.message}`);
+    log('⚠️', `Failed to load user_settings for ${email}: ${e.message}`);
+    if (!GEMINI_API_KEY && envGemini) {
+      GEMINI_API_KEYS = [envGemini];
+      GEMINI_API_KEY = envGemini;
+    }
   }
 }
+
 
 // --- HELPERS ---
 
