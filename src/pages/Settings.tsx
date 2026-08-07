@@ -78,7 +78,7 @@ export const Settings: React.FC = () => {
                 const { data, error } = await supabase
                     .from('user_settings')
                     .select('gemini_api_keys, pexels_api_key')
-                    .eq('user_email', user.email)
+                    .eq('user_email', user.email.trim().toLowerCase())
                     .maybeSingle();
                 if (error || !data) return;
                 if (Array.isArray(data.gemini_api_keys) && data.gemini_api_keys.length) {
