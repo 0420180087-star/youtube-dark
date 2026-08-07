@@ -64,7 +64,7 @@ alter table project_auth
   add column if not exists youtube_channel_title text,
   add column if not exists oauth_client_id       text,
   add column if not exists token_status          text,
-  add column if not exists token_status_message  text,
+  add column if not exists token_error           text,
   add column if not exists token_checked_at      timestamptz;
 alter table project_auth alter column youtube_refresh_token drop not null;
 
