@@ -61,8 +61,30 @@ create table if not exists user_settings (
 alter table project_auth
   add column if not exists youtube_channel_id    text,
   add column if not exists youtube_channel_title text,
-  add column if not exists oauth_client_id       text;
+  add column if not exists oauth_client_id       text,
+  add column if not exists token_status          text,
+  add column if not exists token_status_message  text,
+  add column if not exists token_checked_at      timestamptz;
 alter table project_auth alter column youtube_refresh_token drop not null;
+
+-- Bancos antigos podem ter linhas duplicadas por (project_id, user_email)
+-- sem a primary key composta; o runner acabava pegando um token expirado.
+delete from project_auth p
+ using project_auth q
+ where p.project_id = q.project_id
+   and p.user_email = q.user_email
+   and coalesce(p.updated_at, 'epoch') < coalesce(q.updated_at, 'epoch');
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+     where conrelid = 'public.project_auth'::regclass and contype = 'p'
+  ) then
+    alter table project_auth add primary key (project_id, user_email);
+  end if;
+end;
+$$;
 
 alter table projects
   add column if not exists autopilot_locked_until timestamptz default null,
@@ -71,7 +93,20 @@ alter table projects
 alter table autopilot_logs
   add column if not exists video_title text,
   add column if not exists elapsed_ms  integer,
-  add column if not exists runner      text;
+  add column if not exists runner      text,
+  add column if not exists user_email  text;
+
+-- autopilot_logs.user_email era NOT NULL em bancos antigos: todo log do runner
+-- headless era rejeitado, deixando a automação sem nenhuma observabilidade.
+alter table autopilot_logs alter column user_email drop not null;
+
+-- user_settings antigo só tinha colunas de OAuth: sem estas colunas o runner
+-- não conseguia ler as chaves por usuário e reportava "No Gemini key".
+alter table user_settings
+  add column if not exists gemini_api_keys text[] not null default '{}',
+  add column if not exists pexels_api_key  text,
+  add column if not exists updated_at      timestamptz default now();
+
 
 -- ─────────────────────────────────────────────────────────────────────────
 -- 2. RLS — política permissiva ("app managed rows")
