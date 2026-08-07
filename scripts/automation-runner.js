@@ -479,20 +479,26 @@ async function geminiTTS(text, voiceName = 'Fenrir', tone = 'Cinematic') {
 
   const ttsPrompt = `Style: ${styleInstruction}\n\nText to read: "${text}"`;
 
-  const res = await axios.post(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${GEMINI_API_KEY}`,
-    {
-      contents: [{ parts: [{ text: ttsPrompt }] }],
-      generationConfig: {
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: finalVoice },
+  const res = await raceTimeout(
+    axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        contents: [{ parts: [{ text: ttsPrompt }] }],
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: finalVoice },
+            },
           },
         },
       },
-    }
+      { timeout: NET_TIMEOUT.TTS }
+    ),
+    NET_TIMEOUT.TTS + 5_000,
+    'Gemini TTS'
   );
+
 
   const audioPart = res.data.candidates?.[0]?.content?.parts?.find(p => p.inlineData?.data);
   if (!audioPart?.inlineData?.data) {
