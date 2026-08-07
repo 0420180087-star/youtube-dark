@@ -282,16 +282,42 @@ async function normalizeAudioChunkToPcm(audioBuffer, mimeType, tmpDir, index) {
   return fs.readFileSync(outputPath);
 }
 
+// Teto de tempo padrão para chamadas de rede — nenhuma chamada do pipeline
+// pode ficar pendurada até o timeout de 120 min do job do GitHub Actions.
+const NET_TIMEOUT = {
+  TEXT: 90_000,   // roteiro / ideia / metadados
+  TTS: 60_000,    // narração por segmento
+  IMAGE: 45_000,  // thumbnail / cena
+  PEXELS: 12_000,
+};
+
+// Helper único de timeout — usado por TODA chamada de rede deste runner.
+function raceTimeout(promise, ms, label) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} excedeu ${Math.round(ms / 1000)}s (timeout)`)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 async function geminiGenerate(prompt, maxTokens = 4096) {
-  const res = await axios.post(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
-    {
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { maxOutputTokens: maxTokens, temperature: 0.9 },
-    }
+  const res = await raceTimeout(
+    axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { maxOutputTokens: maxTokens, temperature: 0.9 },
+      },
+      { timeout: NET_TIMEOUT.TEXT }
+    ),
+    NET_TIMEOUT.TEXT + 5_000,
+    'Gemini (texto)'
   );
   return res.data.candidates?.[0]?.content?.parts?.[0]?.text || '';
 }
+
 
 async function geminiWithRetry(fn, retries = 3) {
   for (let i = 0; i < retries; i++) {
