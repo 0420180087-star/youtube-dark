@@ -49,12 +49,14 @@ export async function uploadVideoFile(accessToken, videoPath, metadata) {
     'https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
     {
       method: 'POST',
+      signal: withTimeout(TIMEOUT.INIT),
       headers: {
         Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
         'X-Upload-Content-Type': 'video/mp4',
         'X-Upload-Content-Length': String(fileSize),
       },
+
       body: JSON.stringify({
         snippet: {
           title: metadata.youtubeTitle || metadata.title,
