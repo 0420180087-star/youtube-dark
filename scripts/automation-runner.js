@@ -1295,6 +1295,7 @@ async function checkYoutubeTokenHealth(projectId, userEmail) {
   try {
     const res = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
+      signal: AbortSignal.timeout(30_000),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         client_id: YOUTUBE_CLIENT_ID,
