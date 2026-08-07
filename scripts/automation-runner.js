@@ -1138,7 +1138,7 @@ async function safeInsertAutopilotLog(payload) {
 
     // Older databases may not have the new columns yet; keep logging non-fatal.
     if ((error.message || '').includes('video_title') || (error.message || '').includes('elapsed_ms') || (error.message || '').includes('runner')) {
-      const fallback = { ...payload };
+      const fallback = { ...row };
       delete fallback.video_title;
       delete fallback.elapsed_ms;
       delete fallback.runner;
