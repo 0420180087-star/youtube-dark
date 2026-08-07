@@ -194,35 +194,74 @@ function rotateGeminiKey() {
   log('🔁', `Rotated to Gemini key #${GEMINI_KEY_INDEX + 1}/${GEMINI_API_KEYS.length}`);
 }
 
+// E-mail do dono do projeto em execução — usado nos logs remotos (a coluna
+// autopilot_logs.user_email é NOT NULL em bancos já existentes).
+let CURRENT_USER_EMAIL = null;
+
+function normalizeEmail(email) {
+  return (email || '').trim().toLowerCase();
+}
+
 async function loadUserKeys(userEmail) {
-  if (!userEmail) return;
+  const email = normalizeEmail(userEmail);
+  if (!email) return;
   if (!SCHEMA.user_settings) return; // schema incompleto — segue com chaves do ENV
 
+  const envGemini = ENV_GEMINI_API_KEY || VITE_GEMINI_API_KEY;
+  const envPexels = ENV_PEXELS_API_KEY || VITE_PEXELS_API_KEY;
+
   try {
-    const { data } = await supabase
+    let { data, error } = await supabase
       .from('user_settings')
       .select('gemini_api_keys, pexels_api_key')
-      .eq('user_email', userEmail)
+      .eq('user_email', email)
       .maybeSingle();
-    if (data?.gemini_api_keys?.length) {
+
+    // Segunda tentativa: e-mail salvo com outra caixa/espaços.
+    if (!error && !data) {
+      const retry = await supabase
+        .from('user_settings')
+        .select('gemini_api_keys, pexels_api_key')
+        .ilike('user_email', email)
+        .maybeSingle();
+      data = retry.data;
+      error = retry.error;
+    }
+
+    if (error) {
+      // NUNCA tratar erro de query como "usuário sem chave" — isso mascarou o
+      // bug de colunas ausentes (gemini_api_keys) por várias execuções.
+      log('⚠️', `Falha ao ler user_settings de ${email}: ${error.message}. Rode supabase/bootstrap.sql para criar/atualizar as colunas.`);
+    } else if (data?.gemini_api_keys?.length) {
       GEMINI_API_KEYS = data.gemini_api_keys.filter(Boolean);
       GEMINI_KEY_INDEX = 0;
       GEMINI_API_KEY = GEMINI_API_KEYS[0];
-      log('🔑', `Loaded ${GEMINI_API_KEYS.length} Gemini key(s) for ${userEmail}`);
-    } else if (ENV_GEMINI_API_KEY || VITE_GEMINI_API_KEY) {
-      GEMINI_API_KEYS = [ENV_GEMINI_API_KEY || VITE_GEMINI_API_KEY];
-      GEMINI_API_KEY = GEMINI_API_KEYS[0];
+      log('🔑', `Loaded ${GEMINI_API_KEYS.length} Gemini key(s) for ${email}`);
+    } else {
+      log('ℹ️', `Nenhuma chave Gemini salva em user_settings para ${email}${envGemini ? ' — usando a chave do ambiente.' : '.'}`);
     }
+
+    if (!GEMINI_API_KEYS.length && envGemini) {
+      GEMINI_API_KEYS = [envGemini];
+      GEMINI_KEY_INDEX = 0;
+      GEMINI_API_KEY = envGemini;
+    }
+
     if (data?.pexels_api_key) {
       PEXELS_API_KEY = data.pexels_api_key;
-      log('🔑', `Loaded Pexels key for ${userEmail}`);
-    } else if (ENV_PEXELS_API_KEY || VITE_PEXELS_API_KEY) {
-      PEXELS_API_KEY = ENV_PEXELS_API_KEY || VITE_PEXELS_API_KEY;
+      log('🔑', `Loaded Pexels key for ${email}`);
+    } else if (envPexels) {
+      PEXELS_API_KEY = envPexels;
     }
   } catch (e) {
-    log('⚠️', `Failed to load user_settings for ${userEmail}: ${e.message}`);
+    log('⚠️', `Failed to load user_settings for ${email}: ${e.message}`);
+    if (!GEMINI_API_KEY && envGemini) {
+      GEMINI_API_KEYS = [envGemini];
+      GEMINI_API_KEY = envGemini;
+    }
   }
 }
+
 
 // --- HELPERS ---
 
@@ -282,16 +321,42 @@ async function normalizeAudioChunkToPcm(audioBuffer, mimeType, tmpDir, index) {
   return fs.readFileSync(outputPath);
 }
 
+// Teto de tempo padrão para chamadas de rede — nenhuma chamada do pipeline
+// pode ficar pendurada até o timeout de 120 min do job do GitHub Actions.
+const NET_TIMEOUT = {
+  TEXT: 90_000,   // roteiro / ideia / metadados
+  TTS: 60_000,    // narração por segmento
+  IMAGE: 45_000,  // thumbnail / cena
+  PEXELS: 12_000,
+};
+
+// Helper único de timeout — usado por TODA chamada de rede deste runner.
+function raceTimeout(promise, ms, label) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} excedeu ${Math.round(ms / 1000)}s (timeout)`)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 async function geminiGenerate(prompt, maxTokens = 4096) {
-  const res = await axios.post(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
-    {
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { maxOutputTokens: maxTokens, temperature: 0.9 },
-    }
+  const res = await raceTimeout(
+    axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { maxOutputTokens: maxTokens, temperature: 0.9 },
+      },
+      { timeout: NET_TIMEOUT.TEXT }
+    ),
+    NET_TIMEOUT.TEXT + 5_000,
+    'Gemini (texto)'
   );
   return res.data.candidates?.[0]?.content?.parts?.[0]?.text || '';
 }
+
 
 async function geminiWithRetry(fn, retries = 3) {
   for (let i = 0; i < retries; i++) {
@@ -453,20 +518,26 @@ async function geminiTTS(text, voiceName = 'Fenrir', tone = 'Cinematic') {
 
   const ttsPrompt = `Style: ${styleInstruction}\n\nText to read: "${text}"`;
 
-  const res = await axios.post(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${GEMINI_API_KEY}`,
-    {
-      contents: [{ parts: [{ text: ttsPrompt }] }],
-      generationConfig: {
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: finalVoice },
+  const res = await raceTimeout(
+    axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        contents: [{ parts: [{ text: ttsPrompt }] }],
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: finalVoice },
+            },
           },
         },
       },
-    }
+      { timeout: NET_TIMEOUT.TTS }
+    ),
+    NET_TIMEOUT.TTS + 5_000,
+    'Gemini TTS'
   );
+
 
   const audioPart = res.data.candidates?.[0]?.content?.parts?.find(p => p.inlineData?.data);
   if (!audioPart?.inlineData?.data) {
@@ -732,13 +803,9 @@ const VISUAL_MAX_SLOTS_TOTAL = 60;
 const VISUAL_SLOT_TIMEOUT_MS = 90_000;
 const VISUAL_CONCURRENCY = 3;
 
-/** Rejects if the promise takes longer than ms — keeps the step from hanging forever. */
-function raceTimeout(promise, ms, label) {
-  return Promise.race([
-    promise,
-    new Promise((_, rej) => setTimeout(() => rej(new Error(`${label}_timeout`)), ms)),
-  ]);
-}
+// raceTimeout é definido uma única vez no topo do arquivo (helper de timeout
+// compartilhado por TODAS as chamadas de rede do runner).
+
 
 async function stepVisuals(script, projectData) {
   log('🎨', 'Step 4: Searching visuals...');
@@ -981,9 +1048,11 @@ async function stepUploadYouTube(projectData, metadata, renderResult, thumbnailB
       .select('youtube_refresh_token, youtube_access_token, token_expires_at, project_id, user_email')
       .eq('project_id', projectId)
       .eq('user_email', userEmail)
-      .maybeSingle();
+      .order('updated_at', { ascending: false })
+      .limit(1);
     if (error) throw new Error(`Falha ao buscar auth do projeto: ${error.message}`);
-    authRow = data;
+    authRow = data?.[0] || null;
+
   }
 
   const refreshToken = authRow?.youtube_refresh_token;
@@ -1006,6 +1075,7 @@ async function stepUploadYouTube(projectData, metadata, renderResult, thumbnailB
       // Auto-login: exchange refresh_token → fresh access_token
       const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
         method: 'POST',
+        signal: AbortSignal.timeout(30_000),
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           client_id: YOUTUBE_CLIENT_ID,
@@ -1058,12 +1128,16 @@ async function stepUploadYouTube(projectData, metadata, renderResult, thumbnailB
 
 
 async function safeInsertAutopilotLog(payload) {
+  // autopilot_logs.user_email é NOT NULL em bancos já existentes — sem isso
+  // todos os logs remotos eram silenciosamente rejeitados.
+  const row = { user_email: payload.user_email || CURRENT_USER_EMAIL || 'unknown@runner', ...payload };
   try {
-    const { error } = await supabase.from('autopilot_logs').insert(payload);
+    const { error } = await supabase.from('autopilot_logs').insert(row);
     if (!error) return;
+
     // Older databases may not have the new columns yet; keep logging non-fatal.
     if ((error.message || '').includes('video_title') || (error.message || '').includes('elapsed_ms') || (error.message || '').includes('runner')) {
-      const fallback = { ...payload };
+      const fallback = { ...row };
       delete fallback.video_title;
       delete fallback.elapsed_ms;
       delete fallback.runner;
@@ -1184,12 +1258,15 @@ async function checkYoutubeTokenHealth(projectId, userEmail) {
     return { ok: false, reason: 'missing', message: 'GOOGLE_CLIENT_ID/YOUTUBE_CLIENT_SECRET não configurados nos secrets.' };
   }
 
-  const { data: authRow } = await supabase
+  const { data: authRows } = await supabase
     .from('project_auth')
     .select('youtube_refresh_token, youtube_access_token, token_expires_at')
     .eq('project_id', projectId)
     .eq('user_email', userEmail)
-    .maybeSingle();
+    .order('updated_at', { ascending: false })
+    .limit(1);
+  const authRow = authRows?.[0] || null;
+
 
   const persist = async (status, message) => {
     try {
@@ -1218,6 +1295,7 @@ async function checkYoutubeTokenHealth(projectId, userEmail) {
   try {
     const res = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
+      signal: AbortSignal.timeout(30_000),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         client_id: YOUTUBE_CLIENT_ID,
@@ -1272,24 +1350,27 @@ async function processProject(projectRow) {
   }
 
   // Load per-user API keys (Gemini/Pexels) — owner of this project
+  CURRENT_USER_EMAIL = normalizeEmail(projectRow.user_email);
   await loadUserKeys(projectRow.user_email);
   if (!GEMINI_API_KEY) {
-    log('❌', `No Gemini key configured for user ${projectRow.user_email}. Skipping.`);
+    log('❌', `Nenhuma chave Gemini disponível para ${CURRENT_USER_EMAIL} (nem em user_settings, nem no ambiente). Pulando.`);
     if (!data.scheduleSettings) data.scheduleSettings = {};
     if (data.scheduleSettings.autoGenerate) {
-      data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
-      await persistProjectData(projectId, data, 'Next run saved after missing Gemini key');
+      // Retry curto: não perder o dia inteiro por um problema de leitura de chave.
+      data.scheduleSettings.nextScheduledRun = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+      await persistProjectData(projectId, data, 'Retry em 30 min — chave Gemini indisponível');
     }
     await safeInsertAutopilotLog({
       project_id: projectId,
       status: 'error',
-      message: 'Gemini API key ausente. Salve a chave em Configurações ou no GitHub Actions.',
+      message: 'Chave Gemini indisponível. Verifique Configurações (user_settings) — se o log acima mostrar "Falha ao ler user_settings", rode supabase/bootstrap.sql.',
       step: 'idea',
       runner: 'github-actions',
     });
     await releaseLock(projectId);
     return false;
   }
+
 
   // Ensure projectId is accessible inside data for token lookup
   data.id = projectId;

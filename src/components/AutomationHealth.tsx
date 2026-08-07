@@ -83,21 +83,32 @@ export const AutomationHealth: React.FC = () => {
 
     // 2. Chaves de API
     if (user?.email) {
-      const { data: settings } = await supabase
+      const email = user.email.trim().toLowerCase();
+      const { data: settings, error: settingsError } = await supabase
         .from('user_settings')
         .select('gemini_api_keys, pexels_api_key')
-        .eq('user_email', user.email)
+        .eq('user_email', email)
         .maybeSingle();
       const geminiCount = settings?.gemini_api_keys?.length || 0;
       const hasPexels = !!settings?.pexels_api_key;
-      result.push({
-        label: 'Chaves de API',
-        state: geminiCount > 0 ? (hasPexels ? 'ok' : 'warn') : 'fail',
-        detail: geminiCount === 0
-          ? 'Nenhuma chave Gemini salva. Sem ela o runner não gera nada — salve em Configurações.'
-          : `${geminiCount} chave(s) Gemini${hasPexels ? ' + Pexels' : ' — Pexels ausente, os visuais cairão para geração por IA'}.`,
-      });
+      if (settingsError) {
+        // Erro de leitura ≠ "sem chaves": bancos antigos não têm as colunas.
+        result.push({
+          label: 'Chaves de API',
+          state: 'fail',
+          detail: `Não foi possível ler user_settings: ${settingsError.message}. Execute supabase/bootstrap.sql no SQL Editor.`,
+        });
+      } else {
+        result.push({
+          label: 'Chaves de API',
+          state: geminiCount > 0 ? (hasPexels ? 'ok' : 'warn') : 'fail',
+          detail: geminiCount === 0
+            ? 'Nenhuma chave Gemini salva. Sem ela o runner não gera nada — salve em Configurações.'
+            : `${geminiCount} chave(s) Gemini${hasPexels ? ' + Pexels' : ' — Pexels ausente, os visuais cairão para geração por IA'}.`,
+        });
+      }
     }
+
 
     // 3. Canais do YouTube por projeto (com Auto-Pilot ligado)
     const autoProjects = projects.filter(p => p.scheduleSettings?.autoGenerate);

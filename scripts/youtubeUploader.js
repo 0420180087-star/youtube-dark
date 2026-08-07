@@ -6,11 +6,23 @@
 // fetch é nativo no Node 18+ — node-fetch removido
 import fs from 'fs';
 
+// Timeouts explícitos: nenhuma chamada de rede pode ficar pendurada até o
+// limite de 120 min do job do GitHub Actions.
+const TIMEOUT = {
+  TOKEN: 30_000,
+  INIT: 60_000,
+  UPLOAD: 15 * 60_000,
+  THUMBNAIL: 60_000,
+};
+
+const withTimeout = (ms) => AbortSignal.timeout(ms);
+
 // Renova o access token usando o refresh token
 export async function refreshAccessToken(clientId, clientSecret, refreshToken) {
   const res = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal: withTimeout(TIMEOUT.TOKEN),
     body: JSON.stringify({
       client_id: clientId,
       client_secret: clientSecret,
@@ -22,6 +34,7 @@ export async function refreshAccessToken(clientId, clientSecret, refreshToken) {
   if (!data.access_token) throw new Error(`Falha ao renovar token: ${JSON.stringify(data)}`);
   return data.access_token;
 }
+
 
 // Faz upload do vídeo para o YouTube (resumable upload)
 export async function uploadVideoFile(accessToken, videoPath, metadata) {
@@ -36,12 +49,14 @@ export async function uploadVideoFile(accessToken, videoPath, metadata) {
     'https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
     {
       method: 'POST',
+      signal: withTimeout(TIMEOUT.INIT),
       headers: {
         Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
         'X-Upload-Content-Type': 'video/mp4',
         'X-Upload-Content-Length': String(fileSize),
       },
+
       body: JSON.stringify({
         snippet: {
           title: metadata.youtubeTitle || metadata.title,
@@ -72,12 +87,14 @@ export async function uploadVideoFile(accessToken, videoPath, metadata) {
   const fileBuffer = fs.readFileSync(videoPath);
   const uploadRes = await fetch(uploadUrl, {
     method: 'PUT',
+    signal: withTimeout(TIMEOUT.UPLOAD),
     headers: {
       'Content-Type': 'video/mp4',
       'Content-Length': String(fileSize),
     },
     body: fileBuffer,
   });
+
 
   const uploadBody = await uploadRes.text().catch(() => '');
   let result = {};
@@ -101,6 +118,7 @@ export async function uploadThumbnail(accessToken, videoId, thumbnailBase64) {
       `https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=${videoId}&uploadType=media`,
       {
         method: 'POST',
+        signal: withTimeout(TIMEOUT.THUMBNAIL),
         headers: {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'image/jpeg',
