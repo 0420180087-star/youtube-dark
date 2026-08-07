@@ -164,16 +164,17 @@ export const Settings: React.FC = () => {
             if (supabase && user?.email) {
                 try {
                     const { error } = await supabase.from('user_settings').upsert({
-                        user_email: user.email,
+                        user_email: user.email.trim().toLowerCase(),
                         gemini_api_keys: keysToSave,
                         pexels_api_key: pexelsKey.trim() || null,
                         updated_at: new Date().toISOString(),
                     }, { onConflict: 'user_email' });
                     if (error) throw error;
-                } catch (e) {
+                } catch (e: any) {
                     console.warn('[Settings] cloud sync failed:', e);
-                    alert('Configurações salvas localmente, mas não sincronizaram com o Supabase. A automação do GitHub não verá essas chaves até aplicar as migrations/RLS e salvar novamente.');
+                    alert(`Configurações salvas localmente, mas NÃO sincronizaram com o banco: ${e?.message || e}\n\nA automação do GitHub Actions não verá essas chaves. Rode supabase/bootstrap.sql no SQL Editor e salve novamente.`);
                 }
+
             }
 
             setTimeout(() => {
