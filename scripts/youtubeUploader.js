@@ -118,6 +118,7 @@ export async function uploadThumbnail(accessToken, videoId, thumbnailBase64) {
       `https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=${videoId}&uploadType=media`,
       {
         method: 'POST',
+        signal: withTimeout(TIMEOUT.THUMBNAIL),
         headers: {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'image/jpeg',
