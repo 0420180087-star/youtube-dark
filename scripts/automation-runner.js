@@ -1129,9 +1129,13 @@ async function stepUploadYouTube(projectData, metadata, renderResult, thumbnailB
 
 
 async function safeInsertAutopilotLog(payload) {
+  // autopilot_logs.user_email é NOT NULL em bancos já existentes — sem isso
+  // todos os logs remotos eram silenciosamente rejeitados.
+  const row = { user_email: payload.user_email || CURRENT_USER_EMAIL || 'unknown@runner', ...payload };
   try {
-    const { error } = await supabase.from('autopilot_logs').insert(payload);
+    const { error } = await supabase.from('autopilot_logs').insert(row);
     if (!error) return;
+
     // Older databases may not have the new columns yet; keep logging non-fatal.
     if ((error.message || '').includes('video_title') || (error.message || '').includes('elapsed_ms') || (error.message || '').includes('runner')) {
       const fallback = { ...payload };
