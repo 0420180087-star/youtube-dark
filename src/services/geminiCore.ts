@@ -1088,18 +1088,23 @@ Now narrate the following passage with full expression and natural rhythm:
 
 ${text}`;
 
-        const response = await ai.models.generateContent({
-            model: "gemini-2.5-flash-preview-tts",
-            contents: [{ parts: [{ text: ttsPrompt }] }],
-            config: {
-                responseModalities: [Modality.AUDIO],
-                speechConfig: {
-                    voiceConfig: {
-                        prebuiltVoiceConfig: { voiceName: voiceName as any },
+        const response = await withTimeout(
+            ai.models.generateContent({
+                model: "gemini-2.5-flash-preview-tts",
+                contents: [{ parts: [{ text: ttsPrompt }] }],
+                config: {
+                    responseModalities: [Modality.AUDIO],
+                    speechConfig: {
+                        voiceConfig: {
+                            prebuiltVoiceConfig: { voiceName: voiceName as any },
+                        },
                     },
                 },
-            },
-        });
+            }),
+            TTS_TIMEOUT_MS,
+            'tts',
+        );
+
 
         const audioPart = response.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData?.data);
         const base64Audio = audioPart?.inlineData?.data;
