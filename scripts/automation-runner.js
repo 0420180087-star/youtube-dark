@@ -1261,12 +1261,15 @@ async function checkYoutubeTokenHealth(projectId, userEmail) {
     return { ok: false, reason: 'missing', message: 'GOOGLE_CLIENT_ID/YOUTUBE_CLIENT_SECRET não configurados nos secrets.' };
   }
 
-  const { data: authRow } = await supabase
+  const { data: authRows } = await supabase
     .from('project_auth')
     .select('youtube_refresh_token, youtube_access_token, token_expires_at')
     .eq('project_id', projectId)
     .eq('user_email', userEmail)
-    .maybeSingle();
+    .order('updated_at', { ascending: false })
+    .limit(1);
+  const authRow = authRows?.[0] || null;
+
 
   const persist = async (status, message) => {
     try {
