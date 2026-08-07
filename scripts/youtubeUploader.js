@@ -87,12 +87,14 @@ export async function uploadVideoFile(accessToken, videoPath, metadata) {
   const fileBuffer = fs.readFileSync(videoPath);
   const uploadRes = await fetch(uploadUrl, {
     method: 'PUT',
+    signal: withTimeout(TIMEOUT.UPLOAD),
     headers: {
       'Content-Type': 'video/mp4',
       'Content-Length': String(fileSize),
     },
     body: fileBuffer,
   });
+
 
   const uploadBody = await uploadRes.text().catch(() => '');
   let result = {};
