@@ -19,15 +19,17 @@ Consequência em cadeia: em `scripts/automation-runner.js`, `loadUserKeys()` faz
 ## Passo 2 — Correções
 
 ### Fase A — Desbloquear a automação (prioridade máxima)
-1. `loadUserKeys()`: capturar e logar `error` explicitamente, normalizar o e-mail (`trim().toLowerCase()`), e tentar `ilike` no e-mail como segunda tentativa. Se a query falhar, o log diz "falha ao ler user_settings: <msg>" em vez de "sem chave".
-2. Quando não houver chave: em vez de reagendar para o dia seguinte, gravar log de erro claro e manter `nextScheduledRun` próximo (retry curto), para não perder um dia inteiro por um problema de leitura.
-3. `Settings.tsx`: tratar e exibir o `error` do `upsert` em `user_settings` (hoje pode falhar sem o usuário saber) e salvar o e-mail normalizado.
+1. `supabase/bootstrap.sql` (fonte única da verdade do schema), tudo idempotente:
+   - `user_settings`: `add column if not exists gemini_api_keys text[] not null default '{}'` e `pexels_api_key text` (é o que falta hoje), preservando as colunas extras que já existem no banco (`google_client_id`, `youtube_channel`, `youtube_access_token`).
+   - `autopilot_logs`: `add column if not exists user_email text` + `alter column user_email drop not null`.
+   - `project_auth`: `add column if not exists token_status text`, `token_checked_at timestamptz`, `token_error text`.
+   - Reaplicar GRANTs/RLS após as alterações.
+2. `loadUserKeys()` no runner: capturar e logar o `error` explicitamente, normalizar o e-mail (`trim().toLowerCase()`) e distinguir três casos no log — "falha ao ler user_settings: <msg>", "nenhuma chave salva" e "N chaves carregadas". Nunca mais tratar erro de query como ausência de chave.
+3. Quando não houver chave: gravar log de erro claro e manter `nextScheduledRun` curto (retry em minutos) em vez de perder o dia inteiro.
+4. `Settings.tsx`: tratar e exibir o `error` do `upsert` em `user_settings` e salvar o e-mail normalizado.
+5. Runner: passar `user_email` em todos os inserts de `autopilot_logs`; e ao ler `project_auth`, ordenar por `updated_at desc` + `limit 1` (há duas linhas duplicadas do mesmo canal, uma com token vencido).
+6. `AutomationHealth.tsx`: tratar `error` em todas as queries e mostrar "Falha ao verificar: <mensagem>" em vez de assumir "desconectado".
 
-### Fase B — Schema canônico (`supabase/bootstrap.sql`)
-4. Adicionar em `project_auth`: `token_status text`, `token_checked_at timestamptz`, `token_error text`.
-5. Reconciliar `autopilot_logs.user_email`: adicionar a coluna no bootstrap (nullable) e, se existir com NOT NULL, remover a constraint (`alter column user_email drop not null`), mantendo o bootstrap idempotente e como fonte única da verdade.
-6. Runner: passar `user_email` em todos os inserts de `autopilot_logs`.
-7. `AutomationHealth.tsx`: tratar `error` em todas as queries e mostrar "Falha ao verificar: <mensagem>" em vez de assumir "desconectado".
 
 ### Fase C — Timeouts (a classe de bug que já voltou 3×)
 8. Criar um helper único de timeout reutilizável em cada lado (`raceTimeout` no runner; `withTimeout` compartilhado no frontend) e aplicar em:
