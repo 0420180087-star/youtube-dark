@@ -158,35 +158,28 @@ function concatenateWithCrossfade(clipPaths, outputPath, crossfadeDuration = 0.5
       return resolve();
     }
 
-    // Build xfade filter chain for smooth transitions
-    // xfade applies a crossfade between clips
     const cmd = ffmpeg();
     clipPaths.forEach(p => cmd.input(p));
 
-    // Build filter_complex for N clips with crossfade
-    // We need to know durations to calculate offsets
     Promise.all(clipPaths.map(p => getVideoDuration(p))).then(durations => {
+      const dur = clipPaths.map((_, i) => Math.max(0.2, Number(durations[i]) || 5));
+
+      // Offset cumulativo que nunca regride: cada transição usa um crossfade
+      // seguro (mín. 0.15s, máx. 40% do menor clipe do par).
       let filterComplex = '';
       let currentStream = '[0:v]';
-      let offset = 0;
+      let timeline = dur[0];
 
       for (let i = 1; i < clipPaths.length; i++) {
-        const prevDur = durations[i - 1] || 5;
-        offset += prevDur - crossfadeDuration;
+        const safeXfade = Math.max(0.15, Math.min(crossfadeDuration, Math.min(dur[i - 1], dur[i]) * 0.4));
+        const offset = Math.max(0, timeline - safeXfade);
         const nextStream = i === clipPaths.length - 1 ? '[outv]' : `[v${i}]`;
-        filterComplex += `${currentStream}[${i}:v]xfade=transition=fade:duration=${crossfadeDuration}:offset=${offset.toFixed(3)}${nextStream};`;
-        currentStream = `[v${i}]`;
-        if (i === clipPaths.length - 1) break;
+        filterComplex += `${currentStream}[${i}:v]xfade=transition=fade:duration=${safeXfade.toFixed(3)}:offset=${offset.toFixed(3)}${nextStream};`;
+        currentStream = nextStream;
+        timeline = offset + safeXfade + dur[i] - safeXfade; // = offset + dur[i]
       }
 
-      // Remove trailing semicolon
       filterComplex = filterComplex.replace(/;$/, '');
-
-      // Fallback: if filter is empty (2 clips), handle directly
-      if (filterComplex === '' && clipPaths.length === 2) {
-        const dur0 = durations[0] || 5;
-        filterComplex = `[0:v][1:v]xfade=transition=fade:duration=${crossfadeDuration}:offset=${(dur0 - crossfadeDuration).toFixed(3)}[outv]`;
-      }
 
       cmd
         .complexFilter(filterComplex)
@@ -211,7 +204,7 @@ function concatenateWithCrossfade(clipPaths, outputPath, crossfadeDuration = 0.5
   });
 }
 
-// ─── Simple concat fallback ───────────────────────────────────────────────────
+// ─── Simple concat fallback (re-encode: stream copy trava com streams diferentes) ──
 function simpleConcat(clipPaths, outputPath) {
   return new Promise((resolve, reject) => {
     const listFile = outputPath + '.txt';
@@ -219,7 +212,7 @@ function simpleConcat(clipPaths, outputPath) {
     ffmpeg()
       .input(listFile)
       .inputOptions(['-f', 'concat', '-safe', '0'])
-      .outputOptions(['-c', 'copy', '-an'])
+      .outputOptions(['-c:v', 'libx264', '-preset', 'fast', '-crf', '20', '-pix_fmt', 'yuv420p', '-r', '30', '-an'])
       .output(outputPath)
       .on('end', () => { try { fs.unlinkSync(listFile); } catch {} resolve(); })
       .on('error', reject)
