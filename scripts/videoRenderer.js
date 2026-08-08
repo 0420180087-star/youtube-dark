@@ -10,6 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import { promisify } from 'util';
 import { pipeline, Readable } from 'stream';
+import { spawn } from 'child_process';
 
 const streamPipeline = promisify(pipeline);
 
