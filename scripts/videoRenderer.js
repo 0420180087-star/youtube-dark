@@ -152,7 +152,7 @@ function trimVideo(inputPath, outputPath, duration) {
 }
 
 // ─── Concatenate clips with crossfade transitions ────────────────────────────
-function concatenateWithCrossfade(clipPaths, outputPath, crossfadeDuration = 0.5) {
+export function concatenateWithCrossfade(clipPaths, outputPath, crossfadeDuration = 0.5) {
   return new Promise((resolve, reject) => {
     if (clipPaths.length === 1) {
       // Single clip — just copy it
@@ -207,7 +207,7 @@ function concatenateWithCrossfade(clipPaths, outputPath, crossfadeDuration = 0.5
 }
 
 // ─── Simple concat fallback (re-encode: stream copy trava com streams diferentes) ──
-function simpleConcat(clipPaths, outputPath) {
+export function simpleConcat(clipPaths, outputPath) {
   return new Promise((resolve, reject) => {
     const listFile = outputPath + '.txt';
     fs.writeFileSync(listFile, clipPaths.map(p => `file '${path.resolve(p)}'`).join('\n'));
