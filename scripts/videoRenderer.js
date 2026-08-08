@@ -221,6 +221,43 @@ function simpleConcat(clipPaths, outputPath) {
   });
 }
 
+// ─── Placeholder clip (gradiente animado) via FFmpeg direto ──────────────────
+// fluent-ffmpeg rejeita `-f lavfi` (não aparece na lista de formatos dele),
+// por isso o spawn direto do binário.
+const PLACEHOLDER_COLORS = [
+  ['0x152238', '0xd97706'], ['0x1f2937', '0x14b8a6'], ['0x111827', '0xef4444'], ['0x172554', '0xfacc15'],
+  ['0x0f172a', '0x2563eb'], ['0x1c1917', '0xf97316'], ['0x0b2b26', '0x22c55e'], ['0x2e1065', '0xa855f7'],
+  ['0x1e1b4b', '0x38bdf8'], ['0x450a0a', '0xfb7185'],
+];
+
+export function makePlaceholderClip(outputPath, duration, seed = 0) {
+  const s = Math.abs(Math.trunc(Number(seed) || 0));
+  const [c0, c1] = PLACEHOLDER_COLORS[s % PLACEHOLDER_COLORS.length];
+  const layout = Math.floor(s / 10) % 4;
+  const coords = [
+    'x0=0:y0=0:x1=1920:y1=1080',
+    'x0=1920:y0=0:x1=0:y1=1080',
+    'x0=960:y0=0:x1=960:y1=1080',
+    'x0=0:y0=540:x1=1920:y1=540',
+  ][layout];
+  const args = [
+    '-y', '-f', 'lavfi',
+    '-i', `gradients=s=1920x1080:r=30:c0=${c0}:c1=${c1}:${coords}:speed=0.015:duration=${duration}`,
+    '-t', String(duration),
+    '-c:v', 'libx264', '-preset', 'fast', '-crf', '22', '-pix_fmt', 'yuv420p', '-r', '30', '-an',
+    outputPath,
+  ];
+  return new Promise((resolve, reject) => {
+    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    proc.stderr.on('data', d => { stderr += String(d).slice(0, 2000); });
+    proc.on('error', reject);
+    proc.on('close', code => code === 0
+      ? resolve()
+      : reject(new Error(`ffmpeg placeholder exit ${code}: ${stderr.slice(-300)}`)));
+  });
+}
+
 // ─── Mix narration + background music ────────────────────────────────────────
 function mixAudio(videoPath, voicePath, musicPath, outputPath) {
   return new Promise((resolve, reject) => {
