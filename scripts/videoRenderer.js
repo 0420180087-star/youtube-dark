@@ -270,7 +270,18 @@ export async function renderVideo({ visuals, segments, audioBase64, audioMimeTyp
     const rawPath = path.join(tmpDir, `raw_${i}`);
     const outPath = path.join(tmpDir, `clip_${i}.mp4`);
 
+    const isSvg = /^data:image\/svg/i.test(visual.url) || extensionForUrl(visual.url, '') === '.svg';
+
     try {
+      if (isSvg) {
+        // FFmpeg normalmente é compilado sem librsvg — SVG não decodifica.
+        // Gera um clipe animado equivalente direto no FFmpeg, variando por índice.
+        console.log('    🎨 Fallback SVG detectado — gerando clipe de gradiente animado');
+        await makePlaceholderClip(outPath, duration, i);
+        processedClips.push(outPath);
+        continue;
+      }
+
       // Download the file (video or image)
       await downloadFile(visual.url, rawPath);
 
@@ -293,18 +304,9 @@ export async function renderVideo({ visuals, segments, audioBase64, audioMimeTyp
       processedClips.push(outPath);
     } catch (err) {
       console.warn(`  ⚠️ Clipe ${i + 1} falhou: ${err.message}. Usando placeholder visual...`);
-      // Generate a non-black placeholder clip instead of skipping
+      // Generate a non-black, varied placeholder clip instead of skipping
       try {
-        await new Promise((resolve, reject) => {
-          ffmpeg()
-            .input('color=c=0x101826:s=1920x1080:r=30')
-            .inputOptions(['-f', 'lavfi'])
-            .outputOptions(['-t', String(duration), '-c:v', 'libx264', '-crf', '28', '-an'])
-            .output(outPath)
-            .on('end', resolve)
-            .on('error', reject)
-            .run();
-        });
+        await makePlaceholderClip(outPath, duration, i);
         processedClips.push(outPath);
       } catch (e2) { console.warn(`  ⚠️ Placeholder do clipe ${i + 1} falhou: ${e2.message}`); }
     }
