@@ -306,7 +306,7 @@ export async function renderVideo({ visuals, segments, audioBase64, audioMimeTyp
             .run();
         });
         processedClips.push(outPath);
-      } catch {}
+      } catch (e2) { console.warn(`  ⚠️ Placeholder do clipe ${i + 1} falhou: ${e2.message}`); }
     }
   }
 
