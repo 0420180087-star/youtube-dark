@@ -16,7 +16,8 @@ const streamPipeline = promisify(pipeline);
 // ─── Download file with retries and validation ───────────────────────────────
 export async function downloadFile(url, destPath, retries = 3) {
   if (/^data:/i.test(url)) {
-    const match = String(url).match(/^data:([^;,]+)?(;base64)?,(.*)$/s);
+    // Aceita parâmetros no mime (ex.: data:image/svg+xml;charset=utf-8,...)
+    const match = String(url).match(/^data:([^,]*?)(;base64)?,(.*)$/s);
     if (!match) throw new Error('Invalid data URL');
     const isBase64 = Boolean(match[2]);
     const payload = match[3] || '';
