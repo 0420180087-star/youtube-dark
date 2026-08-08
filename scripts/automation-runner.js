@@ -635,11 +635,35 @@ function buildSlotVisualPrompt(segment, basePrompt, segmentIndex, slotIndex, tot
   ].filter(Boolean).join('. ');
 }
 
+const FALLBACK_PALETTES = [
+  ['#101826', '#0f766e'], ['#172033', '#b45309'], ['#111827', '#be123c'], ['#0f172a', '#2563eb'],
+  ['#1c1917', '#f97316'], ['#0b2b26', '#22c55e'], ['#2e1065', '#a855f7'], ['#1e1b4b', '#38bdf8'],
+  ['#450a0a', '#fb7185'], ['#152238', '#facc15'],
+];
+
 function createFallbackVisualDataUrl(prompt, seed = 0) {
-  const palettes = [['#101826', '#0f766e'], ['#172033', '#b45309'], ['#111827', '#be123c'], ['#0f172a', '#2563eb']];
-  const [bg, accent] = palettes[Math.abs(seed) % palettes.length];
+  const W = 1920, H = 1080;
+  const s = Math.abs(Math.trunc(Number(seed) || 0));
+  const [bg, accent] = FALLBACK_PALETTES[s % FALLBACK_PALETTES.length];
+  const layout = Math.floor(s / 10) % 4;
   const label = String(prompt || 'cinematic scene').replace(/[<>&]/g, '').slice(0, 110);
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${bg}"/><stop offset="1" stop-color="#020617"/></linearGradient><radialGradient id="r" cx="68%" cy="34%" r="55%"><stop offset="0" stop-color="${accent}" stop-opacity="0.55"/><stop offset="1" stop-color="${accent}" stop-opacity="0"/></radialGradient></defs><rect width="100%" height="100%" fill="url(#g)"/><rect width="100%" height="100%" fill="url(#r)"/><path d="M0 778 C 538 626, 998 929, 1920 691 L 1920 1080 L 0 1080 Z" fill="${accent}" opacity="0.28"/><text x="154" y="907" fill="#f8fafc" font-family="Arial,sans-serif" font-size="66" font-weight="700" opacity="0.82">${label}</text></svg>`;
+
+  const glow = [{ cx: '68%', cy: '34%' }, { cx: '24%', cy: '28%' }, { cx: '50%', cy: '72%' }, { cx: '82%', cy: '66%' }][layout];
+  const curve = [
+    'M0 778 C 538 626, 998 929, 1920 691 L 1920 1080 L 0 1080 Z',
+    'M0 670 C 653 950, 1267 562, 1920 842 L 1920 1080 L 0 1080 Z',
+    'M0 907 L 883 626, 1920 972 L 1920 1080 L 0 1080 Z',
+    'M0 1080 L 0 540 C 768 756, 1152 454, 1920 734 L 1920 1080 Z',
+  ][layout];
+  const circle = [
+    { cx: 346, cy: 238, r: 151 }, { cx: 1574, cy: 216, r: 194 },
+    { cx: 960, cy: 324, r: 119 }, { cx: 538, cy: 713, r: 238 },
+  ][layout];
+  const anchor = (layout === 1 || layout === 3) ? 'end' : 'start';
+  const tx = anchor === 'end' ? 1766 : 154;
+  const ty = layout === 2 ? 216 : 907;
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><defs><linearGradient id="g" x1="${layout % 2}" y1="0" x2="${1 - (layout % 2)}" y2="1"><stop offset="0" stop-color="${bg}"/><stop offset="1" stop-color="#020617"/></linearGradient><radialGradient id="r" cx="${glow.cx}" cy="${glow.cy}" r="55%"><stop offset="0" stop-color="${accent}" stop-opacity="0.55"/><stop offset="1" stop-color="${accent}" stop-opacity="0"/></radialGradient></defs><rect width="100%" height="100%" fill="url(#g)"/><rect width="100%" height="100%" fill="url(#r)"/><path d="${curve}" fill="${accent}" opacity="0.28"/><circle cx="${circle.cx}" cy="${circle.cy}" r="${circle.r}" fill="#f8fafc" opacity="0.08"/><text x="${tx}" y="${ty}" text-anchor="${anchor}" fill="#f8fafc" font-family="Arial,sans-serif" font-size="66" font-weight="700" opacity="0.82">${label}</text></svg>`;
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 

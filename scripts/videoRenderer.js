@@ -10,13 +10,15 @@ import fs from 'fs';
 import path from 'path';
 import { promisify } from 'util';
 import { pipeline, Readable } from 'stream';
+import { spawn } from 'child_process';
 
 const streamPipeline = promisify(pipeline);
 
 // ─── Download file with retries and validation ───────────────────────────────
 export async function downloadFile(url, destPath, retries = 3) {
   if (/^data:/i.test(url)) {
-    const match = String(url).match(/^data:([^;,]+)?(;base64)?,(.*)$/s);
+    // Aceita parâmetros no mime (ex.: data:image/svg+xml;charset=utf-8,...)
+    const match = String(url).match(/^data:([^,]*?)(;base64)?,(.*)$/s);
     if (!match) throw new Error('Invalid data URL');
     const isBase64 = Boolean(match[2]);
     const payload = match[3] || '';
@@ -150,7 +152,7 @@ function trimVideo(inputPath, outputPath, duration) {
 }
 
 // ─── Concatenate clips with crossfade transitions ────────────────────────────
-function concatenateWithCrossfade(clipPaths, outputPath, crossfadeDuration = 0.5) {
+export function concatenateWithCrossfade(clipPaths, outputPath, crossfadeDuration = 0.5) {
   return new Promise((resolve, reject) => {
     if (clipPaths.length === 1) {
       // Single clip — just copy it
@@ -158,35 +160,28 @@ function concatenateWithCrossfade(clipPaths, outputPath, crossfadeDuration = 0.5
       return resolve();
     }
 
-    // Build xfade filter chain for smooth transitions
-    // xfade applies a crossfade between clips
     const cmd = ffmpeg();
     clipPaths.forEach(p => cmd.input(p));
 
-    // Build filter_complex for N clips with crossfade
-    // We need to know durations to calculate offsets
     Promise.all(clipPaths.map(p => getVideoDuration(p))).then(durations => {
+      const dur = clipPaths.map((_, i) => Math.max(0.2, Number(durations[i]) || 5));
+
+      // Offset cumulativo que nunca regride: cada transição usa um crossfade
+      // seguro (mín. 0.15s, máx. 40% do menor clipe do par).
       let filterComplex = '';
       let currentStream = '[0:v]';
-      let offset = 0;
+      let timeline = dur[0];
 
       for (let i = 1; i < clipPaths.length; i++) {
-        const prevDur = durations[i - 1] || 5;
-        offset += prevDur - crossfadeDuration;
+        const safeXfade = Math.max(0.15, Math.min(crossfadeDuration, Math.min(dur[i - 1], dur[i]) * 0.4));
+        const offset = Math.max(0, timeline - safeXfade);
         const nextStream = i === clipPaths.length - 1 ? '[outv]' : `[v${i}]`;
-        filterComplex += `${currentStream}[${i}:v]xfade=transition=fade:duration=${crossfadeDuration}:offset=${offset.toFixed(3)}${nextStream};`;
-        currentStream = `[v${i}]`;
-        if (i === clipPaths.length - 1) break;
+        filterComplex += `${currentStream}[${i}:v]xfade=transition=fade:duration=${safeXfade.toFixed(3)}:offset=${offset.toFixed(3)}${nextStream};`;
+        currentStream = nextStream;
+        timeline = offset + safeXfade + dur[i] - safeXfade; // = offset + dur[i]
       }
 
-      // Remove trailing semicolon
       filterComplex = filterComplex.replace(/;$/, '');
-
-      // Fallback: if filter is empty (2 clips), handle directly
-      if (filterComplex === '' && clipPaths.length === 2) {
-        const dur0 = durations[0] || 5;
-        filterComplex = `[0:v][1:v]xfade=transition=fade:duration=${crossfadeDuration}:offset=${(dur0 - crossfadeDuration).toFixed(3)}[outv]`;
-      }
 
       cmd
         .complexFilter(filterComplex)
@@ -211,19 +206,56 @@ function concatenateWithCrossfade(clipPaths, outputPath, crossfadeDuration = 0.5
   });
 }
 
-// ─── Simple concat fallback ───────────────────────────────────────────────────
-function simpleConcat(clipPaths, outputPath) {
+// ─── Simple concat fallback (re-encode: stream copy trava com streams diferentes) ──
+export function simpleConcat(clipPaths, outputPath) {
   return new Promise((resolve, reject) => {
     const listFile = outputPath + '.txt';
     fs.writeFileSync(listFile, clipPaths.map(p => `file '${path.resolve(p)}'`).join('\n'));
     ffmpeg()
       .input(listFile)
       .inputOptions(['-f', 'concat', '-safe', '0'])
-      .outputOptions(['-c', 'copy', '-an'])
+      .outputOptions(['-c:v', 'libx264', '-preset', 'fast', '-crf', '20', '-pix_fmt', 'yuv420p', '-r', '30', '-an'])
       .output(outputPath)
       .on('end', () => { try { fs.unlinkSync(listFile); } catch {} resolve(); })
       .on('error', reject)
       .run();
+  });
+}
+
+// ─── Placeholder clip (gradiente animado) via FFmpeg direto ──────────────────
+// fluent-ffmpeg rejeita `-f lavfi` (não aparece na lista de formatos dele),
+// por isso o spawn direto do binário.
+const PLACEHOLDER_COLORS = [
+  ['0x152238', '0xd97706'], ['0x1f2937', '0x14b8a6'], ['0x111827', '0xef4444'], ['0x172554', '0xfacc15'],
+  ['0x0f172a', '0x2563eb'], ['0x1c1917', '0xf97316'], ['0x0b2b26', '0x22c55e'], ['0x2e1065', '0xa855f7'],
+  ['0x1e1b4b', '0x38bdf8'], ['0x450a0a', '0xfb7185'],
+];
+
+export function makePlaceholderClip(outputPath, duration, seed = 0) {
+  const s = Math.abs(Math.trunc(Number(seed) || 0));
+  const [c0, c1] = PLACEHOLDER_COLORS[s % PLACEHOLDER_COLORS.length];
+  const layout = Math.floor(s / 10) % 4;
+  const coords = [
+    'x0=0:y0=0:x1=1920:y1=1080',
+    'x0=1920:y0=0:x1=0:y1=1080',
+    'x0=960:y0=0:x1=960:y1=1080',
+    'x0=0:y0=540:x1=1920:y1=540',
+  ][layout];
+  const args = [
+    '-y', '-f', 'lavfi',
+    '-i', `gradients=s=1920x1080:r=30:c0=${c0}:c1=${c1}:${coords}:speed=0.015:duration=${duration}`,
+    '-t', String(duration),
+    '-c:v', 'libx264', '-preset', 'fast', '-crf', '22', '-pix_fmt', 'yuv420p', '-r', '30', '-an',
+    outputPath,
+  ];
+  return new Promise((resolve, reject) => {
+    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    proc.stderr.on('data', d => { stderr += String(d).slice(0, 2000); });
+    proc.on('error', reject);
+    proc.on('close', code => code === 0
+      ? resolve()
+      : reject(new Error(`ffmpeg placeholder exit ${code}: ${stderr.slice(-300)}`)));
   });
 }
 
@@ -276,7 +308,18 @@ export async function renderVideo({ visuals, segments, audioBase64, audioMimeTyp
     const rawPath = path.join(tmpDir, `raw_${i}`);
     const outPath = path.join(tmpDir, `clip_${i}.mp4`);
 
+    const isSvg = /^data:image\/svg/i.test(visual.url) || extensionForUrl(visual.url, '') === '.svg';
+
     try {
+      if (isSvg) {
+        // FFmpeg normalmente é compilado sem librsvg — SVG não decodifica.
+        // Gera um clipe animado equivalente direto no FFmpeg, variando por índice.
+        console.log('    🎨 Fallback SVG detectado — gerando clipe de gradiente animado');
+        await makePlaceholderClip(outPath, duration, i);
+        processedClips.push(outPath);
+        continue;
+      }
+
       // Download the file (video or image)
       await downloadFile(visual.url, rawPath);
 
@@ -299,20 +342,11 @@ export async function renderVideo({ visuals, segments, audioBase64, audioMimeTyp
       processedClips.push(outPath);
     } catch (err) {
       console.warn(`  ⚠️ Clipe ${i + 1} falhou: ${err.message}. Usando placeholder visual...`);
-      // Generate a non-black placeholder clip instead of skipping
+      // Generate a non-black, varied placeholder clip instead of skipping
       try {
-        await new Promise((resolve, reject) => {
-          ffmpeg()
-            .input('color=c=0x101826:s=1920x1080:r=30')
-            .inputOptions(['-f', 'lavfi'])
-            .outputOptions(['-t', String(duration), '-c:v', 'libx264', '-crf', '28', '-an'])
-            .output(outPath)
-            .on('end', resolve)
-            .on('error', reject)
-            .run();
-        });
+        await makePlaceholderClip(outPath, duration, i);
         processedClips.push(outPath);
-      } catch {}
+      } catch (e2) { console.warn(`  ⚠️ Placeholder do clipe ${i + 1} falhou: ${e2.message}`); }
     }
   }
 
