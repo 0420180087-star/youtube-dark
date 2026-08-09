@@ -381,7 +381,9 @@ async function loadUserKeys(userEmail) {
       GEMINI_API_KEYS = data.gemini_api_keys.filter(Boolean);
       GEMINI_KEY_INDEX = 0;
       GEMINI_API_KEY = GEMINI_API_KEYS[0];
+      keyCooldowns.clear();
       log('🔑', `Loaded ${GEMINI_API_KEYS.length} Gemini key(s) for ${email}`);
+
     } else {
       log('ℹ️', `Nenhuma chave Gemini salva em user_settings para ${email}${envGemini ? ' — usando a chave do ambiente.' : '.'}`);
     }
