@@ -12,14 +12,12 @@ Verificado por leitura de código/SQL neste turno:
 - A pasta `pages/` na raiz **já não existe** (nada a deletar).
 - Não existe nenhum arquivo de teste no projeto.
 
-Não confirmado (sem acesso ao seu banco/GitHub daqui) — preciso de você:
+Confirmado pelos dados que você trouxe:
 
-1. Últimas 20-30 linhas de `autopilot_logs` (`select step, message, created_at from autopilot_logs order by created_at desc limit 30`).
-2. Log da execução mais recente do workflow "Auto-Post" que deveria ter publicado.
-3. App OAuth no Google Cloud: "Testing" ou "In production"?
-4. Uso da YouTube Data API v3 em Quotas — bateu 10.000 unidades/dia?
+- **A causa real das falhas de hoje é 429 do Gemini no passo `script`**, não YouTube nem OAuth. Foram 4 tentativas (17:20 → 20:10 de 08/08), todas `Request failed with status code 429`, até "aguardando ação manual". O vídeo nunca passou do roteiro — por isso nada é publicado.
+- OAuth está "In production" (refresh_token não expira em 7 dias) e a cota da YouTube Data API está em 0 (pico 51 unidades). **Nenhuma das duas hipóteses é o problema** — a Fase 3, item 4 (cota do YouTube) passa a ser prevenção, não correção urgente.
+- A execução manual do runner terminou com "1 projeto(s), 0 elegível(is)" porque `nextRun=2026-08-09T16:17` ainda está no futuro. Comportamento correto, mas hoje não há como forçar um projeto específico ignorando o agendamento.
 
-Posso começar pela Fase 1 sem essas respostas; elas afetam apenas o diagnóstico das Fases 3/4.
 
 ## Fase 1 — Segurança crítica
 
