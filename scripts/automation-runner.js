@@ -193,12 +193,151 @@ let GEMINI_API_KEYS = GEMINI_API_KEY ? [GEMINI_API_KEY] : [];
 let GEMINI_KEY_INDEX = 0;
 let PEXELS_API_KEY = ENV_PEXELS_API_KEY || VITE_PEXELS_API_KEY || '';
 
-function rotateGeminiKey() {
-  if (GEMINI_API_KEYS.length <= 1) return;
-  GEMINI_KEY_INDEX = (GEMINI_KEY_INDEX + 1) % GEMINI_API_KEYS.length;
-  GEMINI_API_KEY = GEMINI_API_KEYS[GEMINI_KEY_INDEX];
-  log('🔁', `Rotated to Gemini key #${GEMINI_KEY_INDEX + 1}/${GEMINI_API_KEYS.length}`);
+// ─── Cota do Gemini: detecção, cooldown por chave e rotação ─────────────────
+// Portado de src/services/geminiCore.ts (isQuotaError / getCooldownMs /
+// keyCooldowns / isKeyReady) para o runner ter o MESMO comportamento do
+// navegador. Não duplicar limiares: 503 → 15s, diária → 30min, RPM → 65s.
+
+/** key -> { availableAt, reason, cooldownMs } */
+const keyCooldowns = new Map();
+
+function isQuotaError(err) {
+  if (!err) return false;
+  const status = err.response?.status || err.status || err.error?.code || err.code;
+  if (status === 429 || status === '429' || status === 503 || status === '503') return true;
+
+  const body = err.response?.data;
+  const bodyStatus = String(body?.error?.status || '').toUpperCase();
+  if (['RESOURCE_EXHAUSTED', 'TOO_MANY_REQUESTS', 'UNAVAILABLE'].includes(bodyStatus)) return true;
+  const bodyCode = body?.error?.code;
+  if (bodyCode === 429 || bodyCode === 503) return true;
+
+  const msg = String(err.message || '').toLowerCase();
+  return [
+    'quota', 'rate_limit', 'rate limit', 'too many requests', 'resource_exhausted',
+    'requests per', 'limit exceeded', 'exceeded your current quota', '429', '503',
+    'unavailable', 'high demand', 'overloaded', 'try again later',
+  ].some((kw) => msg.includes(kw));
 }
+
+/** Extrai o RetryInfo/retry-after quando o Google manda; senão heurística. */
+function getCooldownMs(err) {
+  const body = err?.response?.data;
+  const retryAfter = err?.response?.headers?.['retry-after'];
+  if (retryAfter) {
+    const s = parseInt(retryAfter, 10);
+    if (!isNaN(s) && s > 0) return s * 1000;
+  }
+
+  const details = body?.error?.details;
+  if (Array.isArray(details)) {
+    for (const d of details) {
+      const delay = d?.retryDelay || d?.retry_delay;
+      if (typeof delay === 'string') {
+        const s = parseFloat(delay.replace('s', ''));
+        if (!isNaN(s) && s > 0) return Math.ceil(s * 1000);
+      }
+    }
+  }
+
+  const status = err?.response?.status || body?.error?.code;
+  const raw = `${err?.message || ''} ${JSON.stringify(body?.error?.message || '')}`.toLowerCase();
+
+  if (status === 503 || raw.includes('unavailable') || raw.includes('high demand') || raw.includes('overloaded')) {
+    return 15_000;
+  }
+  if (raw.includes('per-day') || raw.includes('per_day') || raw.includes('rpd') || raw.includes('daily')) {
+    return 30 * 60 * 1000;
+  }
+  return 65_000;
+}
+
+function quotaReason(err) {
+  const status = err?.response?.status || err?.response?.data?.error?.code;
+  const raw = String(err?.message || '').toLowerCase();
+  if (status === 503 || raw.includes('unavailable') || raw.includes('overloaded')) return 'Servidor sobrecarregado (503)';
+  if (raw.includes('per-day') || raw.includes('rpd') || raw.includes('daily')) return 'Limite diário (RPD) atingido';
+  return 'Limite por minuto (RPM/429) atingido';
+}
+
+function maskKey(key) {
+  if (!key) return '(vazia)';
+  return `${key.slice(0, 4)}…${key.slice(-4)}`;
+}
+
+function isKeyReady(key) {
+  const cd = keyCooldowns.get(key);
+  if (!cd) return true;
+  if (Date.now() >= cd.availableAt) {
+    keyCooldowns.delete(key);
+    return true;
+  }
+  return false;
+}
+
+/** Menor tempo restante até alguma chave voltar. null se alguma já está pronta. */
+function shortestCooldownMs() {
+  if (GEMINI_API_KEYS.some((k) => isKeyReady(k))) return null;
+  let min = Infinity;
+  for (const k of GEMINI_API_KEYS) {
+    const cd = keyCooldowns.get(k);
+    if (cd) min = Math.min(min, cd.availableAt - Date.now());
+  }
+  return min === Infinity ? null : Math.max(1000, min);
+}
+
+/** Registra o evento de cota no Supabase para o painel de Saúde ver. */
+async function recordQuotaEvent(key, err, cooldownMs) {
+  if (!SCHEMA.automation_quota_events) return;
+  try {
+    await supabase.from('automation_quota_events').insert({
+      user_email: CURRENT_USER_EMAIL || 'unknown@runner',
+      runner: 'github-actions',
+      key_masked: maskKey(key),
+      reason: quotaReason(err),
+      cooldown_ms: cooldownMs,
+    });
+  } catch (e) {
+    log('⚠️', `Falha ao registrar evento de cota: ${e.message}`);
+  }
+}
+
+/** Coloca a chave atual em cooldown e persiste o evento. */
+async function cooldownCurrentKey(err) {
+  const key = GEMINI_API_KEY;
+  const ms = getCooldownMs(err);
+  keyCooldowns.set(key, { availableAt: Date.now() + ms, reason: quotaReason(err), cooldownMs: ms });
+  log('🧊', `Chave ${maskKey(key)} em cooldown por ${Math.round(ms / 1000)}s — ${quotaReason(err)}`);
+  await recordQuotaEvent(key, err, ms);
+}
+
+/** Move para a próxima chave PRONTA. Retorna false se todas estão em cooldown. */
+function rotateGeminiKey() {
+  if (!GEMINI_API_KEYS.length) return false;
+  for (let i = 1; i <= GEMINI_API_KEYS.length; i++) {
+    const idx = (GEMINI_KEY_INDEX + i) % GEMINI_API_KEYS.length;
+    const candidate = GEMINI_API_KEYS[idx];
+    if (isKeyReady(candidate)) {
+      GEMINI_KEY_INDEX = idx;
+      GEMINI_API_KEY = candidate;
+      log('🔁', `Usando chave Gemini #${idx + 1}/${GEMINI_API_KEYS.length} (${maskKey(candidate)})`);
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Erro sinalizando "todas as chaves em cooldown" — não gasta tentativa. */
+class GeminiQuotaExhaustedError extends Error {
+  constructor(waitMs, reason) {
+    super(`Cota Gemini esgotada em todas as ${GEMINI_API_KEYS.length} chave(s) — ${reason}. Retomando em ${Math.ceil(waitMs / 60000)} min.`);
+    this.name = 'GeminiQuotaExhaustedError';
+    this.isQuotaExhausted = true;
+    this.waitMs = waitMs;
+    this.reason = reason;
+  }
+}
+
 
 // E-mail do dono do projeto em execução — usado nos logs remotos (a coluna
 // autopilot_logs.user_email é NOT NULL em bancos já existentes).
