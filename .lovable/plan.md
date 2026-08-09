@@ -12,22 +12,34 @@ Verificado por leitura de código/SQL neste turno:
 - A pasta `pages/` na raiz **já não existe** (nada a deletar).
 - Não existe nenhum arquivo de teste no projeto.
 
-Confirmado pelos dados que você trouxe:
+Sobre os dados que você trouxe:
 
-- **A causa real das falhas de hoje é 429 do Gemini no passo `script`**, não YouTube nem OAuth. Foram 4 tentativas (17:20 → 20:10 de 08/08), todas `Request failed with status code 429`, até "aguardando ação manual". O vídeo nunca passou do roteiro — por isso nada é publicado.
-- OAuth está "In production" (refresh_token não expira em 7 dias) e a cota da YouTube Data API está em 0 (pico 51 unidades). **Nenhuma das duas hipóteses é o problema** — a Fase 3, item 4 (cota do YouTube) passa a ser prevenção, não correção urgente.
-- A execução manual do runner terminou com "1 projeto(s), 0 elegível(is)" porque `nextRun=2026-08-09T16:17` ainda está no futuro. Comportamento correto, mas hoje não há como forçar um projeto específico ignorando o agendamento.
+- O "429 no passo `script`" veio das **mensagens de erro que você colou/mostrou** (4 tentativas de 17:20 → 20:10 de 08/08, `Request failed with status code 429`). Eu **não consultei `autopilot_logs`** — não tenho acesso ao seu banco daqui. Então isso é evidência sua, não verificação minha. Primeiro item da Fase 0.5 é justamente confirmar no banco antes de qualquer código.
+- OAuth "In production" e cota da YouTube Data API em 0 (pico 51 unidades) também são leituras suas — trato como corretas e a cota do YouTube segue como prevenção, não urgência.
+- O log foi "1 projeto(s) encontrados, 0 elegível(is)": encontrou 1, filtrou 1. Como `if (PROJECT_ID) return true` (linha 1730) **já bypassa autoGenerate/nextRun**, o resultado indica que o run **não recebeu `project_id`** — não que o filtro esteja errado. Nada a mudar na elegibilidade; ver Fase 0.5 item 6.
 
-## Fase 0.5 — Desbloquear o 429 do Gemini (nova prioridade máxima)
+## Fase 0.5 — Desbloquear o 429 do Gemini (prioridade máxima)
 
-Isto é o que impede a publicação hoje; vem antes da Fase 1.
+Correções confirmadas por leitura do código neste turno:
 
-- `scripts/automation-runner.js`: tratar 429 como classe própria em `geminiGenerate`/`geminiTTS`/`geminiGenerateImage` — ao receber 429, marcar a chave como "esfriando" e **rotacionar imediatamente** para a próxima chave de `gemini_api_keys` antes de contar como tentativa; só falha o passo quando todas as chaves estiverem em cooldown.
-- Respeitar o `retryDelay` que o Gemini devolve no corpo do erro (`RetryInfo`) em vez do backoff fixo, e não consumir uma das 4 tentativas do vídeo quando o erro for exclusivamente 429.
-- Quando todas as chaves estiverem em 429, reagendar o vídeo em ~1h com mensagem explícita ("cota Gemini esgotada — retomando às HH:MM") em vez de "aguardando ação manual" após 4 tentativas.
-- Mesma lógica de rotação/cooldown em `src/services/geminiCore.ts` para o modo manual no navegador.
-- `AutomationHealth.tsx`: novo check "Cota Gemini" mostrando quantas chaves estão em cooldown e o último 429 registrado.
-- Runner: quando `PROJECT_ID` for passado no `workflow_dispatch`, ignorar `nextRun` e forçar a execução daquele projeto (hoje ele reporta "0 elegíveis" e não há como testar sob demanda).
+- `rotateGeminiKey()` (linha 190 do runner) **nunca é chamado** — o runner carrega N chaves de `gemini_api_keys` e usa só a primeira para sempre. É por isso que um 429 derruba o passo inteiro mesmo com várias chaves salvas.
+- `geminiWithRetry` (linha 361) detecta quota só por `status===429 || mensagem contém "quota"`, espera 30s/60s fixos e **não troca de chave**.
+- `geminiGenerateImage` (linha 394) **não passa por `geminiWithRetry`**: tem loop próprio imagen-3 → `FLASH_MODELS`, sem rotação de chave e sem qualquer tratamento de 429.
+- `geminiCore.ts` (navegador) já tem tudo isso resolvido: `isQuotaError` (92), `getCooldownMs` (132) com distinção 503=15s / diária=30min / por-minuto=65s, `keyCooldowns` + `isKeyReady` + `cooldownKey`, `getKeysStatusSummary`.
+
+Itens:
+
+1. **Portar** (não reinventar) a lógica de `geminiCore.ts` para o runner: `isQuotaError`, `getCooldownMs`, mapa `keyCooldowns` por chave, `isKeyReady`. Mesmos limiares (503→15s, diária→30min, por-minuto→65s) e leitura de `retry-after`/`RetryInfo` quando presente.
+2. `geminiWithRetry`: em quota, colocar a chave atual em cooldown e **rotacionar para a próxima chave pronta** (ativando de fato `rotateGeminiKey`) antes de contar tentativa; só falha quando **todas** estiverem em cooldown.
+3. Ao falhar por todas em cooldown, reagendar o vídeo usando o **menor cooldown restante** (regra do `getCooldownMs`, não 1h fixo): por-minuto → minutos; diária → ~30min/próxima virada. Status explícito "cota Gemini esgotada — retomando às HH:MM".
+4. **`geminiGenerateImage` — implementação separada** dos itens 1-3: envolver cada tentativa de modelo no mesmo wrapper de cooldown/rotação, preservando o fallback imagen-3 → `FLASH_MODELS` e sem tratar 403/400/404 como quota.
+5. **Teto para não consumir tentativa em 429**: contador `quotaSkips` + janela de tempo por vídeo (máx. 48h desde `firstQuotaAt` ou 12 skips). Ao estourar o teto, o vídeo volta ao fluxo normal de falha ("cota insuficiente — ação manual"), evitando retry infinito silencioso.
+6. **Não** mexer no filtro de elegibilidade. Em vez disso: log explícito quando `PROJECT_ID` estiver vazio no `workflow_dispatch` e mensagem separando "encontrados=0" (query/id não bateu) de "elegíveis=0" (agendamento), para o próximo teste sob demanda ser conclusivo.
+7. `geminiCore.ts`: **nenhuma duplicação**. Só o que falta lá é persistir o evento de quota (item 8).
+8. **Persistência de eventos de cota**: nova tabela `automation_quota_events` (`user_email`, `runner`, `key_masked`, `reason`, `cooldown_ms`, `created_at`) em `supabase/bootstrap.sql`. O runner grava a cada cooldown (o navegador também, best-effort) — é a única forma do painel ver o que aconteceu no GitHub Actions.
+9. `AutomationHealth.tsx`: check "Cota Gemini" lendo `automation_quota_events` (últimas 24h) — chaves afetadas, último 429 e runner de origem. `getKeysStatusSummary()` só complementa como estado da aba atual, rotulado como tal.
+
+
 
 
 ## Fase 1 — Segurança crítica
