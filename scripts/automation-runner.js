@@ -2001,7 +2001,11 @@ async function main() {
     log('⏭️', `${skippedOff.length} projeto(s) com Auto-Pilot desligado: ${skippedOff.join(', ')}`);
   }
 
-  log('📋', `${projects.length} projeto(s) encontrados, ${eligible.length} elegível(is)`);
+  log('📋', `${projects.length} projeto(s) encontrados (query OK), ${eligible.length} elegível(is) (após filtro de agendamento)`);
+  if (projects.length > 0 && eligible.length === 0) {
+    log('ℹ️', 'Encontrou projeto(s) mas nenhum elegível: é agendamento/Auto-Pilot, não a query. Rode o workflow com project_id para forçar.');
+  }
+
 
   let successCount = 0;
   let errorCount = 0;
