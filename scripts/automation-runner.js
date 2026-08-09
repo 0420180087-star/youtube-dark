@@ -1822,26 +1822,69 @@ async function processProject(projectRow) {
     }
 
     if (videoId) {
+      // Falha exclusivamente por cota do Gemini NÃO gasta tentativa — o vídeo é
+      // reagendado para quando a cota virar. Teto de segurança: no máximo
+      // MAX_QUOTA_SKIPS reagendamentos ou QUOTA_SKIP_WINDOW_MS desde o 1º 429;
+      // depois disso volta ao fluxo normal de falha (cota insuficiente de fato).
+      const prevSkips = resumeVideo?.quotaSkips || 0;
+      const firstQuotaAt = resumeVideo?.firstQuotaAt || new Date().toISOString();
+      const withinWindow = Date.now() - new Date(firstQuotaAt).getTime() < QUOTA_SKIP_WINDOW_MS;
+      const isQuotaStall = !!err.isQuotaExhausted && prevSkips < MAX_QUOTA_SKIPS && withinWindow;
+
+      if (isQuotaStall) {
+        const waitMs = Math.min(Math.max(err.waitMs || 65_000, 60_000), 6 * 60 * 60 * 1000);
+        const nextRetryAt = new Date(Date.now() + waitMs).toISOString();
+        await updateRunnerVideo(projectId, data, videoId, {
+          status: 'STANDBY',
+          standbyInfo,
+          retryCount: resumeVideo?.retryCount || 0, // tentativa preservada
+          quotaSkips: prevSkips + 1,
+          firstQuotaAt,
+          nextRetryAt,
+          lastError: `Cota Gemini esgotada — retomando às ${new Date(nextRetryAt).toLocaleString('pt-BR')}`,
+        }, 'Quota standby saved');
+
+        await safeInsertAutopilotLog({
+          project_id: projectId,
+          status: 'retrying',
+          message: `Cota do Gemini esgotada em "${currentStep}" (${err.reason || 'cota'}). Retomando às ${new Date(nextRetryAt).toLocaleString('pt-BR')} sem gastar tentativa (${prevSkips + 1}/${MAX_QUOTA_SKIPS}).`,
+          step: currentStep,
+          video_title: videoTitle,
+          elapsed_ms: duration * 1000,
+          runner: 'github-actions',
+        });
+
+        log('🧊', `Cota esgotada — retomada agendada para ${nextRetryAt} (skip ${prevSkips + 1}/${MAX_QUOTA_SKIPS})`);
+        return false;
+      }
+
       // Auto-retry with backoff instead of waiting for a human click.
       const previousRetries = (resumeVideo?.retryCount || 0);
       const retryCount = previousRetries + 1;
       const exhausted = retryCount >= MAX_AUTO_RETRIES;
       const nextRetryAt = exhausted ? null : new Date(Date.now() + retryBackoffMs(previousRetries)).toISOString();
+      const quotaCapped = !!err.isQuotaExhausted;
 
       await updateRunnerVideo(projectId, data, videoId, {
         status: 'STANDBY',
         standbyInfo,
         retryCount,
         nextRetryAt: nextRetryAt || undefined,
-        lastError: err.message,
+        quotaSkips: prevSkips,
+        firstQuotaAt: resumeVideo?.firstQuotaAt,
+        lastError: quotaCapped
+          ? `Cota do Gemini insuficiente há mais de ${Math.round(QUOTA_SKIP_WINDOW_MS / 3600000)}h — aumente o limite ou adicione outra chave. ${err.message}`
+          : err.message,
       }, 'Standby video saved');
 
       await safeInsertAutopilotLog({
         project_id: projectId,
         status: exhausted ? 'error' : 'retrying',
-        message: exhausted
-          ? `Falhou ${retryCount}x em "${currentStep}" — aguardando ação manual. Último erro: ${err.message}`
-          : `Falhou em "${currentStep}" (tentativa ${retryCount}/${MAX_AUTO_RETRIES}). Nova tentativa automática em ${new Date(nextRetryAt).toLocaleString('pt-BR')}. Erro: ${err.message}`,
+        message: quotaCapped
+          ? `Cota do Gemini insuficiente de forma persistente (${prevSkips} reagendamentos em até ${Math.round(QUOTA_SKIP_WINDOW_MS / 3600000)}h). Adicione outra chave em Configurações ou aumente o limite no Google AI Studio.`
+          : exhausted
+            ? `Falhou ${retryCount}x em "${currentStep}" — aguardando ação manual. Último erro: ${err.message}`
+            : `Falhou em "${currentStep}" (tentativa ${retryCount}/${MAX_AUTO_RETRIES}). Nova tentativa automática em ${new Date(nextRetryAt).toLocaleString('pt-BR')}. Erro: ${err.message}`,
         step: currentStep,
         video_title: videoTitle,
         elapsed_ms: duration * 1000,
@@ -1853,6 +1896,7 @@ async function processProject(projectRow) {
         : `Retry agendado para ${nextRetryAt}`);
       return false;
     }
+
 
     await persistProjectData(projectId, data, 'Standby project saved');
     await safeInsertAutopilotLog({
