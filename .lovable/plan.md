@@ -1,0 +1,54 @@
+# Correção completa — segurança, concorrência e confiabilidade
+
+## Fase 0 — Diagnóstico (o que já foi confirmado agora)
+
+Verificado por leitura de código/SQL neste turno:
+
+- `supabase/bootstrap.sql` já cria `token_status`, `token_checked_at`, `token_error` em `project_auth` (linhas 28 e 69). Se o painel ainda reporta erro, é porque o bootstrap **não foi executado** no banco atual — não porque falta no repositório.
+- Todas as policies são `for all using (true) with check (true)` e há `grant select, insert, update, delete ... to anon, authenticated` em **todas** as tabelas, incluindo `project_auth` e `user_settings`. A exposição descrita é real.
+- `src/context/ProjectContext.tsx:538` faz `release_autopilot_lock` incondicional antes de retentar o `acquire` — o force-release existe.
+- `src/services/geminiThumbnail.ts:490` ainda usa `['gemini-2.0-flash-exp','gemini-2.0-flash']` em `sceneModels`.
+- `scripts/automation-runner.js` já tem `raceTimeout` + `NET_TIMEOUT.TEXT/TTS` aplicados em `geminiGenerate`/`geminiTTS`; a varredura restante ainda precisa ser fechada.
+- A pasta `pages/` na raiz **já não existe** (nada a deletar).
+- Não existe nenhum arquivo de teste no projeto.
+
+Não confirmado (sem acesso ao seu banco/GitHub daqui) — preciso de você:
+
+1. Últimas 20-30 linhas de `autopilot_logs` (`select step, message, created_at from autopilot_logs order by created_at desc limit 30`).
+2. Log da execução mais recente do workflow "Auto-Post" que deveria ter publicado.
+3. App OAuth no Google Cloud: "Testing" ou "In production"?
+4. Uso da YouTube Data API v3 em Quotas — bateu 10.000 unidades/dia?
+
+Posso começar pela Fase 1 sem essas respostas; elas afetam apenas o diagnóstico das Fases 3/4.
+
+## Fase 1 — Segurança crítica
+
+- `supabase/bootstrap.sql`: `revoke all on public.project_auth, public.user_settings from anon, authenticated`, remover suas policies permissivas e manter acesso apenas por `service_role`. `projects`/`autopilot_logs`/`user_profiles` seguem permissivos (dívida técnica registrada em comentário no topo do arquivo).
+- Nova Edge Function `user-data` (service role) com ações: ler/gravar `user_settings` do e-mail informado e ler o status de token de `project_auth` (retornando **apenas** `token_status`, `token_error`, `youtube_channel_title` e um booleano `has_refresh_token` — nunca os tokens).
+- Trocar os acessos diretos do navegador por essa função: `src/pages/Settings.tsx` (leitura e upsert de `user_settings`), `src/components/AutomationHealth.tsx` (chaves + canais), `src/context/ProjectContext.tsx:830` (delete de `project_auth` ao excluir projeto → nova ação `delete_project_auth`).
+- `refresh-token`: passa a exigir cabeçalho `Authorization` com o `id_token` do Google já obtido no login, validado contra `https://oauth2.googleapis.com/tokeninfo`, e o e-mail usado é o do token — não o do corpo. Mesmo tratamento em `exchange-code`. Sessão opaca própria e criptografia dos tokens em repouso ficam documentadas como próximo passo no `SETUP.md`.
+
+## Fase 2 — Concorrência e integridade
+
+- `ProjectContext.tsx`: remover o force-release; ao falhar o `acquire`, abortar com mensagem clara ("execução já em andamento em outro runner"), como o runner já faz.
+- `scripts/automation-runner.js`: marcador de idempotência antes do upload (`uploadStartedAt` + `youtubeVideoId` persistidos no vídeo). No início de `stepUploadYouTube`, se já houver `youtubeVideoId`, pular o envio e só concluir. A escrita pós-upload (`status: 'PUBLISHED'`) ganha retry agressivo (5 tentativas com backoff) e, se falhar, log destacado `MANUAL_INTERVENTION_REQUIRED` sem reenvio automático.
+
+## Fase 3 — Confiabilidade do pipeline
+
+- `AutomationHealth.tsx`: tratar o `error` da query de canais (via nova Edge Function) e mostrar "Falha ao verificar: …" em vez de "sem canal válido".
+- Fechar a varredura de timeouts: centralizar em um helper único por lado (`raceTimeout` no runner, `withTimeout` em `src/services/`) e aplicar em toda chamada de rede restante de `scripts/*.js` e `src/services/*.ts`.
+- `geminiThumbnail.ts`: `sceneModels` passa a usar a mesma lista `IMAGE_MODELS`.
+- `scripts/youtubeUploader.js`: detectar `quotaExceeded`/`dailyLimitExceeded` (403) e sinalizar retry só após a virada de cota (meia-noite Pacífico), com mensagem de status explícita em vez de "tentativas esgotadas".
+
+## Fase 4 — Limpeza, deploy e testes
+
+- `pages/` já removida — nada a fazer.
+- `.github/workflows/deploy.yml`: remover a dependência do job do site em `supabase-deploy` e documentar `SUPABASE_ACCESS_TOKEN`, `SUPABASE_PROJECT_REF`, `SUPABASE_DB_URL` no `SETUP.md`.
+- `npm audit fix` (apenas correções não-destrutivas).
+- Testes de regressão em `src/test/`: (a) varredura estática que falha se alguma chamada de rede do pipeline ficar sem timeout; (b) teste que falha se aparecer `release_autopilot_lock` sem lock próprio confirmado no fluxo de aquisição.
+
+## O que você precisa fazer depois
+
+- Rodar o `supabase/bootstrap.sql` atualizado uma vez no SQL Editor (é o que aplica revoke/colunas).
+- Fazer deploy das Edge Functions (`user-data`, `refresh-token`, `exchange-code`).
+- Reabrir Configurações e salvar as chaves novamente.
