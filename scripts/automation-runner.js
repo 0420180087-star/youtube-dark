@@ -56,8 +56,10 @@ const SCHEMA = {
   user_settings: true,
   autopilot_logs: true,
   automation_heartbeat: true,
+  automation_quota_events: true,
   lockRpc: true,
 };
+
 
 async function tableExists(name) {
   const { error } = await supabase.from(name).select('*').limit(1);
@@ -76,6 +78,10 @@ async function preflight() {
     SCHEMA[name] = await tableExists(name);
     if (!SCHEMA[name]) missing.push(`tabela ${name}`);
   }
+
+  // Tabela opcional (observabilidade de cota) — ausência não bloqueia o run.
+  SCHEMA.automation_quota_events = await tableExists('automation_quota_events');
+
 
   // Probe the lock RPC with a project id that cannot exist: a working RPC
   // returns false, a missing one returns a 404/undefined-function error.
@@ -187,12 +193,151 @@ let GEMINI_API_KEYS = GEMINI_API_KEY ? [GEMINI_API_KEY] : [];
 let GEMINI_KEY_INDEX = 0;
 let PEXELS_API_KEY = ENV_PEXELS_API_KEY || VITE_PEXELS_API_KEY || '';
 
-function rotateGeminiKey() {
-  if (GEMINI_API_KEYS.length <= 1) return;
-  GEMINI_KEY_INDEX = (GEMINI_KEY_INDEX + 1) % GEMINI_API_KEYS.length;
-  GEMINI_API_KEY = GEMINI_API_KEYS[GEMINI_KEY_INDEX];
-  log('🔁', `Rotated to Gemini key #${GEMINI_KEY_INDEX + 1}/${GEMINI_API_KEYS.length}`);
+// ─── Cota do Gemini: detecção, cooldown por chave e rotação ─────────────────
+// Portado de src/services/geminiCore.ts (isQuotaError / getCooldownMs /
+// keyCooldowns / isKeyReady) para o runner ter o MESMO comportamento do
+// navegador. Não duplicar limiares: 503 → 15s, diária → 30min, RPM → 65s.
+
+/** key -> { availableAt, reason, cooldownMs } */
+const keyCooldowns = new Map();
+
+function isQuotaError(err) {
+  if (!err) return false;
+  const status = err.response?.status || err.status || err.error?.code || err.code;
+  if (status === 429 || status === '429' || status === 503 || status === '503') return true;
+
+  const body = err.response?.data;
+  const bodyStatus = String(body?.error?.status || '').toUpperCase();
+  if (['RESOURCE_EXHAUSTED', 'TOO_MANY_REQUESTS', 'UNAVAILABLE'].includes(bodyStatus)) return true;
+  const bodyCode = body?.error?.code;
+  if (bodyCode === 429 || bodyCode === 503) return true;
+
+  const msg = String(err.message || '').toLowerCase();
+  return [
+    'quota', 'rate_limit', 'rate limit', 'too many requests', 'resource_exhausted',
+    'requests per', 'limit exceeded', 'exceeded your current quota', '429', '503',
+    'unavailable', 'high demand', 'overloaded', 'try again later',
+  ].some((kw) => msg.includes(kw));
 }
+
+/** Extrai o RetryInfo/retry-after quando o Google manda; senão heurística. */
+function getCooldownMs(err) {
+  const body = err?.response?.data;
+  const retryAfter = err?.response?.headers?.['retry-after'];
+  if (retryAfter) {
+    const s = parseInt(retryAfter, 10);
+    if (!isNaN(s) && s > 0) return s * 1000;
+  }
+
+  const details = body?.error?.details;
+  if (Array.isArray(details)) {
+    for (const d of details) {
+      const delay = d?.retryDelay || d?.retry_delay;
+      if (typeof delay === 'string') {
+        const s = parseFloat(delay.replace('s', ''));
+        if (!isNaN(s) && s > 0) return Math.ceil(s * 1000);
+      }
+    }
+  }
+
+  const status = err?.response?.status || body?.error?.code;
+  const raw = `${err?.message || ''} ${JSON.stringify(body?.error?.message || '')}`.toLowerCase();
+
+  if (status === 503 || raw.includes('unavailable') || raw.includes('high demand') || raw.includes('overloaded')) {
+    return 15_000;
+  }
+  if (raw.includes('per-day') || raw.includes('per_day') || raw.includes('rpd') || raw.includes('daily')) {
+    return 30 * 60 * 1000;
+  }
+  return 65_000;
+}
+
+function quotaReason(err) {
+  const status = err?.response?.status || err?.response?.data?.error?.code;
+  const raw = String(err?.message || '').toLowerCase();
+  if (status === 503 || raw.includes('unavailable') || raw.includes('overloaded')) return 'Servidor sobrecarregado (503)';
+  if (raw.includes('per-day') || raw.includes('rpd') || raw.includes('daily')) return 'Limite diário (RPD) atingido';
+  return 'Limite por minuto (RPM/429) atingido';
+}
+
+function maskKey(key) {
+  if (!key) return '(vazia)';
+  return `${key.slice(0, 4)}…${key.slice(-4)}`;
+}
+
+function isKeyReady(key) {
+  const cd = keyCooldowns.get(key);
+  if (!cd) return true;
+  if (Date.now() >= cd.availableAt) {
+    keyCooldowns.delete(key);
+    return true;
+  }
+  return false;
+}
+
+/** Menor tempo restante até alguma chave voltar. null se alguma já está pronta. */
+function shortestCooldownMs() {
+  if (GEMINI_API_KEYS.some((k) => isKeyReady(k))) return null;
+  let min = Infinity;
+  for (const k of GEMINI_API_KEYS) {
+    const cd = keyCooldowns.get(k);
+    if (cd) min = Math.min(min, cd.availableAt - Date.now());
+  }
+  return min === Infinity ? null : Math.max(1000, min);
+}
+
+/** Registra o evento de cota no Supabase para o painel de Saúde ver. */
+async function recordQuotaEvent(key, err, cooldownMs) {
+  if (!SCHEMA.automation_quota_events) return;
+  try {
+    await supabase.from('automation_quota_events').insert({
+      user_email: CURRENT_USER_EMAIL || 'unknown@runner',
+      runner: 'github-actions',
+      key_masked: maskKey(key),
+      reason: quotaReason(err),
+      cooldown_ms: cooldownMs,
+    });
+  } catch (e) {
+    log('⚠️', `Falha ao registrar evento de cota: ${e.message}`);
+  }
+}
+
+/** Coloca a chave atual em cooldown e persiste o evento. */
+async function cooldownCurrentKey(err) {
+  const key = GEMINI_API_KEY;
+  const ms = getCooldownMs(err);
+  keyCooldowns.set(key, { availableAt: Date.now() + ms, reason: quotaReason(err), cooldownMs: ms });
+  log('🧊', `Chave ${maskKey(key)} em cooldown por ${Math.round(ms / 1000)}s — ${quotaReason(err)}`);
+  await recordQuotaEvent(key, err, ms);
+}
+
+/** Move para a próxima chave PRONTA. Retorna false se todas estão em cooldown. */
+function rotateGeminiKey() {
+  if (!GEMINI_API_KEYS.length) return false;
+  for (let i = 1; i <= GEMINI_API_KEYS.length; i++) {
+    const idx = (GEMINI_KEY_INDEX + i) % GEMINI_API_KEYS.length;
+    const candidate = GEMINI_API_KEYS[idx];
+    if (isKeyReady(candidate)) {
+      GEMINI_KEY_INDEX = idx;
+      GEMINI_API_KEY = candidate;
+      log('🔁', `Usando chave Gemini #${idx + 1}/${GEMINI_API_KEYS.length} (${maskKey(candidate)})`);
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Erro sinalizando "todas as chaves em cooldown" — não gasta tentativa. */
+class GeminiQuotaExhaustedError extends Error {
+  constructor(waitMs, reason) {
+    super(`Cota Gemini esgotada em todas as ${GEMINI_API_KEYS.length} chave(s) — ${reason}. Retomando em ${Math.ceil(waitMs / 60000)} min.`);
+    this.name = 'GeminiQuotaExhaustedError';
+    this.isQuotaExhausted = true;
+    this.waitMs = waitMs;
+    this.reason = reason;
+  }
+}
+
 
 // E-mail do dono do projeto em execução — usado nos logs remotos (a coluna
 // autopilot_logs.user_email é NOT NULL em bancos já existentes).
@@ -236,7 +381,9 @@ async function loadUserKeys(userEmail) {
       GEMINI_API_KEYS = data.gemini_api_keys.filter(Boolean);
       GEMINI_KEY_INDEX = 0;
       GEMINI_API_KEY = GEMINI_API_KEYS[0];
+      keyCooldowns.clear();
       log('🔑', `Loaded ${GEMINI_API_KEYS.length} Gemini key(s) for ${email}`);
+
     } else {
       log('ℹ️', `Nenhuma chave Gemini salva em user_settings para ${email}${envGemini ? ' — usando a chave do ambiente.' : '.'}`);
     }
@@ -358,23 +505,52 @@ async function geminiGenerate(prompt, maxTokens = 4096) {
 }
 
 
+// Em erro de cota: cooldown na chave + rotação para a próxima PRONTA, sem
+// gastar tentativa. Só falha quando TODAS as chaves estão em cooldown — e nesse
+// caso lança GeminiQuotaExhaustedError (o vídeo é reagendado, não marcado como
+// falha definitiva).
 async function geminiWithRetry(fn, retries = 3) {
-  for (let i = 0; i < retries; i++) {
+  let attempt = 0;
+  let lastErr = null;
+
+  // Garante que a chave atual está pronta antes de começar.
+  if (!isKeyReady(GEMINI_API_KEY) && !rotateGeminiKey()) {
+    const wait = shortestCooldownMs() || 65_000;
+    throw new GeminiQuotaExhaustedError(wait, keyCooldowns.get(GEMINI_API_KEY)?.reason || 'cota');
+  }
+
+  while (attempt < retries) {
     try {
       return await fn();
     } catch (err) {
-      const isQuota = err?.response?.status === 429 ||
-                      (err?.message || '').toLowerCase().includes('quota');
-      if (isQuota && i < retries - 1) {
-        const wait = (i + 1) * 30000;
-        log('⏳', `Quota error, waiting ${wait/1000}s before retry ${i+2}/${retries}...`);
-        await new Promise(r => setTimeout(r, wait));
-      } else {
-        throw err;
+      lastErr = err;
+      if (!isQuotaError(err)) throw err;
+
+      await cooldownCurrentKey(err);
+
+      if (rotateGeminiKey()) {
+        log('⏭️', 'Erro de cota — trocando de chave sem gastar tentativa.');
+        continue; // rotação não consome tentativa
       }
+
+      const wait = shortestCooldownMs() || getCooldownMs(err);
+      // Espera curta (RPM/503) pode ser absorvida aqui mesmo.
+      if (wait <= 90_000 && attempt < retries - 1) {
+        attempt++;
+        log('⏳', `Todas as chaves em cooldown — aguardando ${Math.round(wait / 1000)}s (tentativa ${attempt + 1}/${retries}).`);
+        await new Promise((r) => setTimeout(r, wait + 1000));
+        for (const k of GEMINI_API_KEYS) isKeyReady(k); // expira cooldowns vencidos
+        rotateGeminiKey();
+        continue;
+      }
+
+      throw new GeminiQuotaExhaustedError(wait, quotaReason(err));
     }
   }
+
+  throw lastErr || new Error('geminiWithRetry: falha desconhecida');
 }
+
 
 async function geminiGenerateJSON(prompt, maxTokens = 4096) {
   const raw = await geminiWithRetry(() => geminiGenerate(prompt, maxTokens));
@@ -391,58 +567,81 @@ async function geminiGenerateJSON(prompt, maxTokens = 4096) {
   return JSON.parse(jsonStr);
 }
 
+// Implementação própria (não usa geminiWithRetry): o fallback aqui é por
+// MODELO, não por tentativa. Cada modelo é tentado com a chave atual e, em erro
+// de cota, a chave entra em cooldown e o mesmo modelo é retentado com a próxima
+// chave pronta. 400/403/404 = modelo indisponível → próximo modelo.
 async function geminiGenerateImage(prompt) {
-  // 1️⃣ Try imagen-3 (allowlisted accounts)
-  try {
-    const res = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:predict?key=${GEMINI_API_KEY}`,
-      { instances: [{ prompt }], parameters: { sampleCount: 1, aspectRatio: '16:9' } },
-      { timeout: 45000 }
-    );
-    const b64 = res.data.predictions?.[0]?.bytesBase64Encoded;
-    if (b64) return b64;
-  } catch (err) {
-    const code = err?.response?.status;
-    if (code && code !== 403 && code !== 400 && code !== 404) {
-      log('⚠️', `imagen-3 error ${code}: ${err.message}`);
-    }
-  }
-
-  // 2️⃣ Fallback to Gemini image-generation models (no allowlist needed).
-  // Apenas modelos que realmente devolvem inlineData — `gemini-2.0-flash-exp`
-  // não gera imagem e só queimava cota.
-  const FLASH_MODELS = [
-    'gemini-2.5-flash-image',
-    'gemini-2.0-flash-preview-image-generation',
+  const IMAGE_MODELS = [
+    { model: 'imagen-3.0-generate-001', kind: 'imagen' },
+    { model: 'gemini-2.5-flash-image', kind: 'flash' },
+    { model: 'gemini-2.0-flash-preview-image-generation', kind: 'flash' },
   ];
 
-  for (const model of FLASH_MODELS) {
-    try {
-      const res = await axios.post(
+  const callModel = async ({ model, kind }) => {
+    if (kind === 'imagen') {
+      const res = await raceTimeout(
+        axios.post(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:predict?key=${GEMINI_API_KEY}`,
+          { instances: [{ prompt }], parameters: { sampleCount: 1, aspectRatio: '16:9' } },
+          { timeout: NET_TIMEOUT.IMAGE }
+        ),
+        NET_TIMEOUT.IMAGE + 5_000,
+        `Gemini (${model})`
+      );
+      return res.data.predictions?.[0]?.bytesBase64Encoded || null;
+    }
+
+    const res = await raceTimeout(
+      axios.post(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
         {
           contents: [{ parts: [{ text: `Generate a 16:9 cinematic image: ${prompt}` }] }],
           generationConfig: { responseModalities: ['IMAGE', 'TEXT'] },
         },
-        { timeout: 45000 }
-      );
-      const parts = res.data.candidates?.[0]?.content?.parts || [];
-      const imgPart = parts.find((p) => p.inlineData?.data);
-      if (imgPart?.inlineData?.data) {
-        log('🖼️', `Imagem gerada via ${model}`);
-        return imgPart.inlineData.data;
-      }
-    } catch (err) {
-      const code = err?.response?.status;
-      if (code !== 400 && code !== 404) {
-        log('⚠️', `${model} falhou: ${err.message}`);
+        { timeout: NET_TIMEOUT.IMAGE }
+      ),
+      NET_TIMEOUT.IMAGE + 5_000,
+      `Gemini (${model})`
+    );
+    const parts = res.data.candidates?.[0]?.content?.parts || [];
+    return parts.find((p) => p.inlineData?.data)?.inlineData?.data || null;
+  };
+
+  for (const entry of IMAGE_MODELS) {
+    // Uma volta por chave disponível para este modelo.
+    for (let keyTry = 0; keyTry < Math.max(1, GEMINI_API_KEYS.length); keyTry++) {
+      if (!isKeyReady(GEMINI_API_KEY) && !rotateGeminiKey()) break;
+      try {
+        const b64 = await callModel(entry);
+        if (b64) {
+          log('🖼️', `Imagem gerada via ${entry.model}`);
+          return b64;
+        }
+        break; // respondeu sem imagem — trocar de modelo, não de chave
+      } catch (err) {
+        const code = err?.response?.status;
+        if (isQuotaError(err)) {
+          await cooldownCurrentKey(err);
+          if (rotateGeminiKey()) continue; // mesma modelo, próxima chave
+          break; // todas em cooldown — tenta o próximo modelo (pode ser mais barato)
+        }
+        if (code !== 400 && code !== 403 && code !== 404) {
+          log('⚠️', `${entry.model} falhou: ${err.message}`);
+        }
+        break; // modelo indisponível → próximo modelo
       }
     }
+  }
+
+  if (shortestCooldownMs()) {
+    throw new GeminiQuotaExhaustedError(shortestCooldownMs(), 'cota de imagem esgotada');
   }
 
   log('⚠️', 'Todos os modelos de imagem falharam — usando fallback');
   return null;
 }
+
 
 // ─── Generate a Node-side ambient music track via FFmpeg (no API needed) ─────
 function generateAmbienceTrack(outputPath, durationSec, tone = '') {
@@ -1230,6 +1429,12 @@ async function updateRunnerVideo(projectId, data, videoId, updates, logMessage) 
 const MAX_AUTO_RETRIES = 4;
 const RETRY_BACKOFF_MS = [5 * 60 * 1000, 20 * 60 * 1000, 60 * 60 * 1000, 4 * 60 * 60 * 1000];
 
+// Teto para reagendamentos por cota (que não gastam tentativa): evita mascarar
+// cota permanentemente insuficiente como retry infinito silencioso.
+const MAX_QUOTA_SKIPS = 12;
+const QUOTA_SKIP_WINDOW_MS = 48 * 60 * 60 * 1000;
+
+
 function retryBackoffMs(retryCount) {
   return RETRY_BACKOFF_MS[Math.min(retryCount, RETRY_BACKOFF_MS.length - 1)];
 }
@@ -1623,26 +1828,69 @@ async function processProject(projectRow) {
     }
 
     if (videoId) {
+      // Falha exclusivamente por cota do Gemini NÃO gasta tentativa — o vídeo é
+      // reagendado para quando a cota virar. Teto de segurança: no máximo
+      // MAX_QUOTA_SKIPS reagendamentos ou QUOTA_SKIP_WINDOW_MS desde o 1º 429;
+      // depois disso volta ao fluxo normal de falha (cota insuficiente de fato).
+      const prevSkips = resumeVideo?.quotaSkips || 0;
+      const firstQuotaAt = resumeVideo?.firstQuotaAt || new Date().toISOString();
+      const withinWindow = Date.now() - new Date(firstQuotaAt).getTime() < QUOTA_SKIP_WINDOW_MS;
+      const isQuotaStall = !!err.isQuotaExhausted && prevSkips < MAX_QUOTA_SKIPS && withinWindow;
+
+      if (isQuotaStall) {
+        const waitMs = Math.min(Math.max(err.waitMs || 65_000, 60_000), 6 * 60 * 60 * 1000);
+        const nextRetryAt = new Date(Date.now() + waitMs).toISOString();
+        await updateRunnerVideo(projectId, data, videoId, {
+          status: 'STANDBY',
+          standbyInfo,
+          retryCount: resumeVideo?.retryCount || 0, // tentativa preservada
+          quotaSkips: prevSkips + 1,
+          firstQuotaAt,
+          nextRetryAt,
+          lastError: `Cota Gemini esgotada — retomando às ${new Date(nextRetryAt).toLocaleString('pt-BR')}`,
+        }, 'Quota standby saved');
+
+        await safeInsertAutopilotLog({
+          project_id: projectId,
+          status: 'retrying',
+          message: `Cota do Gemini esgotada em "${currentStep}" (${err.reason || 'cota'}). Retomando às ${new Date(nextRetryAt).toLocaleString('pt-BR')} sem gastar tentativa (${prevSkips + 1}/${MAX_QUOTA_SKIPS}).`,
+          step: currentStep,
+          video_title: videoTitle,
+          elapsed_ms: duration * 1000,
+          runner: 'github-actions',
+        });
+
+        log('🧊', `Cota esgotada — retomada agendada para ${nextRetryAt} (skip ${prevSkips + 1}/${MAX_QUOTA_SKIPS})`);
+        return false;
+      }
+
       // Auto-retry with backoff instead of waiting for a human click.
       const previousRetries = (resumeVideo?.retryCount || 0);
       const retryCount = previousRetries + 1;
       const exhausted = retryCount >= MAX_AUTO_RETRIES;
       const nextRetryAt = exhausted ? null : new Date(Date.now() + retryBackoffMs(previousRetries)).toISOString();
+      const quotaCapped = !!err.isQuotaExhausted;
 
       await updateRunnerVideo(projectId, data, videoId, {
         status: 'STANDBY',
         standbyInfo,
         retryCount,
         nextRetryAt: nextRetryAt || undefined,
-        lastError: err.message,
+        quotaSkips: prevSkips,
+        firstQuotaAt: resumeVideo?.firstQuotaAt,
+        lastError: quotaCapped
+          ? `Cota do Gemini insuficiente há mais de ${Math.round(QUOTA_SKIP_WINDOW_MS / 3600000)}h — aumente o limite ou adicione outra chave. ${err.message}`
+          : err.message,
       }, 'Standby video saved');
 
       await safeInsertAutopilotLog({
         project_id: projectId,
         status: exhausted ? 'error' : 'retrying',
-        message: exhausted
-          ? `Falhou ${retryCount}x em "${currentStep}" — aguardando ação manual. Último erro: ${err.message}`
-          : `Falhou em "${currentStep}" (tentativa ${retryCount}/${MAX_AUTO_RETRIES}). Nova tentativa automática em ${new Date(nextRetryAt).toLocaleString('pt-BR')}. Erro: ${err.message}`,
+        message: quotaCapped
+          ? `Cota do Gemini insuficiente de forma persistente (${prevSkips} reagendamentos em até ${Math.round(QUOTA_SKIP_WINDOW_MS / 3600000)}h). Adicione outra chave em Configurações ou aumente o limite no Google AI Studio.`
+          : exhausted
+            ? `Falhou ${retryCount}x em "${currentStep}" — aguardando ação manual. Último erro: ${err.message}`
+            : `Falhou em "${currentStep}" (tentativa ${retryCount}/${MAX_AUTO_RETRIES}). Nova tentativa automática em ${new Date(nextRetryAt).toLocaleString('pt-BR')}. Erro: ${err.message}`,
         step: currentStep,
         video_title: videoTitle,
         elapsed_ms: duration * 1000,
@@ -1654,6 +1902,7 @@ async function processProject(projectRow) {
         : `Retry agendado para ${nextRetryAt}`);
       return false;
     }
+
 
     await persistProjectData(projectId, data, 'Standby project saved');
     await safeInsertAutopilotLog({
@@ -1694,8 +1943,10 @@ async function main() {
 
   // If specific project ID provided, only process that one
   if (PROJECT_ID) {
-    log('🎯', `Targeting specific project: ${PROJECT_ID}`);
+    log('🎯', `Execução forçada para o projeto: ${PROJECT_ID} (ignora autoGenerate e nextRun)`);
     query = query.eq('id', PROJECT_ID);
+  } else {
+    log('🗓️', 'Nenhum project_id informado — rodando apenas projetos com Auto-Pilot ligado e agendamento vencido. Para forçar um projeto, informe project_id no workflow_dispatch.');
   }
 
   const { data: projects, error } = await query;
@@ -1707,10 +1958,14 @@ async function main() {
   }
 
   if (!projects?.length) {
-    log('📭', 'No projects found');
-    await writeHeartbeat('nenhum projeto encontrado');
+    // "encontrados=0" ≠ "elegíveis=0": aqui a QUERY não achou nada.
+    log('📭', PROJECT_ID
+      ? `Nenhum projeto com id="${PROJECT_ID}" (0 encontrados). Confira o id exato em projects.id — não é problema de agendamento.`
+      : 'Nenhum projeto na tabela projects (0 encontrados).');
+    await writeHeartbeat(PROJECT_ID ? `id não encontrado: ${PROJECT_ID}` : 'nenhum projeto encontrado');
     process.exit(0);
   }
+
 
   // Filter eligible projects
   const now = new Date();
@@ -1746,7 +2001,11 @@ async function main() {
     log('⏭️', `${skippedOff.length} projeto(s) com Auto-Pilot desligado: ${skippedOff.join(', ')}`);
   }
 
-  log('📋', `${projects.length} projeto(s) encontrados, ${eligible.length} elegível(is)`);
+  log('📋', `${projects.length} projeto(s) encontrados (query OK), ${eligible.length} elegível(is) (após filtro de agendamento)`);
+  if (projects.length > 0 && eligible.length === 0) {
+    log('ℹ️', 'Encontrou projeto(s) mas nenhum elegível: é agendamento/Auto-Pilot, não a query. Rode o workflow com project_id para forçar.');
+  }
+
 
   let successCount = 0;
   let errorCount = 0;

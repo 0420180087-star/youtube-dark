@@ -109,6 +109,43 @@ export const AutomationHealth: React.FC = () => {
       }
     }
 
+    // 2b. Cota do Gemini — lida de automation_quota_events (compartilhado entre
+    // o navegador e o runner do GitHub Actions). O estado em memória da aba
+    // (getKeysStatusSummary) só reflete ESTA aba, então não serve para o painel.
+    if (user?.email) {
+      const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const { data: quota, error: quotaError } = await supabase
+        .from('automation_quota_events')
+        .select('runner, key_masked, reason, cooldown_ms, created_at')
+        .eq('user_email', user.email.trim().toLowerCase())
+        .gte('created_at', since)
+        .order('created_at', { ascending: false })
+        .limit(50);
+
+      if (quotaError) {
+        result.push({
+          label: 'Cota Gemini',
+          state: 'warn',
+          detail: `Não foi possível ler automation_quota_events: ${quotaError.message}. Execute supabase/bootstrap.sql no SQL Editor.`,
+        });
+      } else if (!quota?.length) {
+        result.push({
+          label: 'Cota Gemini',
+          state: 'ok',
+          detail: 'Nenhum erro 429/503 do Gemini nas últimas 24h.',
+        });
+      } else {
+        const keys = new Set(quota.map((q: any) => q.key_masked));
+        const last = quota[0] as any;
+        const daily = quota.filter((q: any) => (q.cooldown_ms || 0) >= 30 * 60 * 1000).length;
+        result.push({
+          label: 'Cota Gemini',
+          state: daily > 0 ? 'fail' : 'warn',
+          detail: `${quota.length} evento(s) de cota nas últimas 24h em ${keys.size} chave(s)${daily > 0 ? ` — ${daily} de limite diário` : ''}. Último: ${last.reason} (${last.runner}, chave ${last.key_masked}, ${new Date(last.created_at).toLocaleString('pt-BR')}).${daily > 0 ? ' Adicione outra chave em Configurações ou aumente o limite no Google AI Studio.' : ''}`,
+        });
+      }
+    }
+
 
     // 3. Canais do YouTube por projeto (com Auto-Pilot ligado)
     const autoProjects = projects.filter(p => p.scheduleSettings?.autoGenerate);

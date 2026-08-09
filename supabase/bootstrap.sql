@@ -61,6 +61,30 @@ create table if not exists user_settings (
   updated_at      timestamptz default now()
 );
 
+-- Sinal de vida do runner headless (GitHub Actions). Faltava aqui: sem ela o
+-- painel de Saúde marcava "Runner headless" como falha para sempre.
+create table if not exists automation_heartbeat (
+  runner       text primary key,
+  last_seen_at timestamptz default now(),
+  detail       text
+);
+
+-- Eventos de cota do Gemini (429/503). O runner roda em outro processo, então o
+-- estado em memória do navegador nunca reflete o que aconteceu no GitHub
+-- Actions — esta tabela é a única fonte compartilhada.
+create table if not exists automation_quota_events (
+  id          bigserial primary key,
+  user_email  text,
+  runner      text,
+  key_masked  text,
+  reason      text,
+  cooldown_ms integer,
+  created_at  timestamptz default now()
+);
+create index if not exists idx_quota_events_user_created
+  on automation_quota_events(user_email, created_at desc);
+
+
 -- Garante colunas em bancos que só rodaram o SQL antigo do SETUP.md
 alter table project_auth
   add column if not exists youtube_channel_id    text,
@@ -154,17 +178,33 @@ drop policy if exists "user_settings: own row"          on user_settings;
 drop policy if exists "user_settings: app managed rows" on user_settings;
 create policy "user_settings: app managed rows" on user_settings for all using (true) with check (true);
 
+alter table automation_heartbeat    enable row level security;
+alter table automation_quota_events enable row level security;
+
+drop policy if exists "automation_heartbeat: app managed rows" on automation_heartbeat;
+create policy "automation_heartbeat: app managed rows" on automation_heartbeat for all using (true) with check (true);
+
+drop policy if exists "automation_quota_events: app managed rows" on automation_quota_events;
+create policy "automation_quota_events: app managed rows" on automation_quota_events for all using (true) with check (true);
+
 -- GRANTs — necessários pois as policies acima liberam para anon/authenticated
 grant select, insert, update, delete on public.user_profiles  to anon, authenticated;
 grant select, insert, update, delete on public.projects       to anon, authenticated;
 grant select, insert, update, delete on public.project_auth   to anon, authenticated;
 grant select, insert, update, delete on public.autopilot_logs to anon, authenticated;
 grant select, insert, update, delete on public.user_settings  to anon, authenticated;
+grant select on public.automation_heartbeat    to anon, authenticated;
+grant select, insert on public.automation_quota_events to anon, authenticated;
+grant usage, select on sequence public.automation_quota_events_id_seq to anon, authenticated;
 grant all on public.user_profiles  to service_role;
 grant all on public.projects       to service_role;
 grant all on public.project_auth   to service_role;
 grant all on public.autopilot_logs to service_role;
 grant all on public.user_settings  to service_role;
+grant all on public.automation_heartbeat    to service_role;
+grant all on public.automation_quota_events to service_role;
+grant usage, select on sequence public.automation_quota_events_id_seq to service_role;
+
 
 -- ─────────────────────────────────────────────────────────────────────────
 -- 3. FUNÇÕES AUXILIARES
