@@ -1943,8 +1943,10 @@ async function main() {
 
   // If specific project ID provided, only process that one
   if (PROJECT_ID) {
-    log('🎯', `Targeting specific project: ${PROJECT_ID}`);
+    log('🎯', `Execução forçada para o projeto: ${PROJECT_ID} (ignora autoGenerate e nextRun)`);
     query = query.eq('id', PROJECT_ID);
+  } else {
+    log('🗓️', 'Nenhum project_id informado — rodando apenas projetos com Auto-Pilot ligado e agendamento vencido. Para forçar um projeto, informe project_id no workflow_dispatch.');
   }
 
   const { data: projects, error } = await query;
@@ -1956,10 +1958,14 @@ async function main() {
   }
 
   if (!projects?.length) {
-    log('📭', 'No projects found');
-    await writeHeartbeat('nenhum projeto encontrado');
+    // "encontrados=0" ≠ "elegíveis=0": aqui a QUERY não achou nada.
+    log('📭', PROJECT_ID
+      ? `Nenhum projeto com id="${PROJECT_ID}" (0 encontrados). Confira o id exato em projects.id — não é problema de agendamento.`
+      : 'Nenhum projeto na tabela projects (0 encontrados).');
+    await writeHeartbeat(PROJECT_ID ? `id não encontrado: ${PROJECT_ID}` : 'nenhum projeto encontrado');
     process.exit(0);
   }
+
 
   // Filter eligible projects
   const now = new Date();
