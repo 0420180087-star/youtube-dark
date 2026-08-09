@@ -201,7 +201,33 @@ const cooldownKey = (key: string, err: any) => {
     keyCooldowns.set(key, { availableAt: Date.now() + ms, reason });
     const masked = key.length > 8 ? `...${key.slice(-6)}` : '***';
     console.warn(`[DarkStream AI] ⏸️ Chave ${masked} em cooldown por ${Math.round(ms / 1000)}s — ${reason}`);
+    // Persistência best-effort: o painel de Saúde precisa ver eventos de cota de
+    // TODOS os runners (aba atual + GitHub Actions), não só o estado em memória.
+    void recordQuotaEvent(masked, reason, ms);
 };
+
+/** Grava o evento de cota no Supabase (best-effort, nunca lança). */
+const recordQuotaEvent = async (keyMasked: string, reason: string, cooldownMs: number) => {
+    try {
+        const { supabase } = await import('../lib/supabaseClient');
+        if (!supabase) return;
+        let email = '';
+        try {
+            const enc = localStorage.getItem('ds_user_profile');
+            if (enc) email = (JSON.parse(await decryptData(enc)).email || '').trim().toLowerCase();
+        } catch {}
+        await supabase.from('automation_quota_events').insert({
+            user_email: email || null,
+            runner: 'browser',
+            key_masked: keyMasked,
+            reason,
+            cooldown_ms: cooldownMs,
+        });
+    } catch {
+        // Tabela ausente ou sem permissão — observabilidade não pode quebrar o pipeline.
+    }
+};
+
 
 /** Public: clear all cooldowns */
 export const clearExhaustedKeys = () => {
