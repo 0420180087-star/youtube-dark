@@ -178,17 +178,32 @@ drop policy if exists "user_settings: own row"          on user_settings;
 drop policy if exists "user_settings: app managed rows" on user_settings;
 create policy "user_settings: app managed rows" on user_settings for all using (true) with check (true);
 
+alter table automation_heartbeat    enable row level security;
+alter table automation_quota_events enable row level security;
+
+drop policy if exists "automation_heartbeat: app managed rows" on automation_heartbeat;
+create policy "automation_heartbeat: app managed rows" on automation_heartbeat for all using (true) with check (true);
+
+drop policy if exists "automation_quota_events: app managed rows" on automation_quota_events;
+create policy "automation_quota_events: app managed rows" on automation_quota_events for all using (true) with check (true);
+
 -- GRANTs — necessários pois as policies acima liberam para anon/authenticated
 grant select, insert, update, delete on public.user_profiles  to anon, authenticated;
 grant select, insert, update, delete on public.projects       to anon, authenticated;
 grant select, insert, update, delete on public.project_auth   to anon, authenticated;
 grant select, insert, update, delete on public.autopilot_logs to anon, authenticated;
 grant select, insert, update, delete on public.user_settings  to anon, authenticated;
+grant select on public.automation_heartbeat    to anon, authenticated;
+grant select on public.automation_quota_events to anon, authenticated;
 grant all on public.user_profiles  to service_role;
 grant all on public.projects       to service_role;
 grant all on public.project_auth   to service_role;
 grant all on public.autopilot_logs to service_role;
 grant all on public.user_settings  to service_role;
+grant all on public.automation_heartbeat    to service_role;
+grant all on public.automation_quota_events to service_role;
+grant usage, select on sequence public.automation_quota_events_id_seq to service_role;
+
 
 -- ─────────────────────────────────────────────────────────────────────────
 -- 3. FUNÇÕES AUXILIARES
