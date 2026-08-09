@@ -194,7 +194,8 @@ grant select, insert, update, delete on public.project_auth   to anon, authentic
 grant select, insert, update, delete on public.autopilot_logs to anon, authenticated;
 grant select, insert, update, delete on public.user_settings  to anon, authenticated;
 grant select on public.automation_heartbeat    to anon, authenticated;
-grant select on public.automation_quota_events to anon, authenticated;
+grant select, insert on public.automation_quota_events to anon, authenticated;
+grant usage, select on sequence public.automation_quota_events_id_seq to anon, authenticated;
 grant all on public.user_profiles  to service_role;
 grant all on public.projects       to service_role;
 grant all on public.project_auth   to service_role;
