@@ -503,23 +503,52 @@ async function geminiGenerate(prompt, maxTokens = 4096) {
 }
 
 
+// Em erro de cota: cooldown na chave + rotação para a próxima PRONTA, sem
+// gastar tentativa. Só falha quando TODAS as chaves estão em cooldown — e nesse
+// caso lança GeminiQuotaExhaustedError (o vídeo é reagendado, não marcado como
+// falha definitiva).
 async function geminiWithRetry(fn, retries = 3) {
-  for (let i = 0; i < retries; i++) {
+  let attempt = 0;
+  let lastErr = null;
+
+  // Garante que a chave atual está pronta antes de começar.
+  if (!isKeyReady(GEMINI_API_KEY) && !rotateGeminiKey()) {
+    const wait = shortestCooldownMs() || 65_000;
+    throw new GeminiQuotaExhaustedError(wait, keyCooldowns.get(GEMINI_API_KEY)?.reason || 'cota');
+  }
+
+  while (attempt < retries) {
     try {
       return await fn();
     } catch (err) {
-      const isQuota = err?.response?.status === 429 ||
-                      (err?.message || '').toLowerCase().includes('quota');
-      if (isQuota && i < retries - 1) {
-        const wait = (i + 1) * 30000;
-        log('⏳', `Quota error, waiting ${wait/1000}s before retry ${i+2}/${retries}...`);
-        await new Promise(r => setTimeout(r, wait));
-      } else {
-        throw err;
+      lastErr = err;
+      if (!isQuotaError(err)) throw err;
+
+      await cooldownCurrentKey(err);
+
+      if (rotateGeminiKey()) {
+        log('⏭️', 'Erro de cota — trocando de chave sem gastar tentativa.');
+        continue; // rotação não consome tentativa
       }
+
+      const wait = shortestCooldownMs() || getCooldownMs(err);
+      // Espera curta (RPM/503) pode ser absorvida aqui mesmo.
+      if (wait <= 90_000 && attempt < retries - 1) {
+        attempt++;
+        log('⏳', `Todas as chaves em cooldown — aguardando ${Math.round(wait / 1000)}s (tentativa ${attempt + 1}/${retries}).`);
+        await new Promise((r) => setTimeout(r, wait + 1000));
+        for (const k of GEMINI_API_KEYS) isKeyReady(k); // expira cooldowns vencidos
+        rotateGeminiKey();
+        continue;
+      }
+
+      throw new GeminiQuotaExhaustedError(wait, quotaReason(err));
     }
   }
+
+  throw lastErr || new Error('geminiWithRetry: falha desconhecida');
 }
+
 
 async function geminiGenerateJSON(prompt, maxTokens = 4096) {
   const raw = await geminiWithRetry(() => geminiGenerate(prompt, maxTokens));
