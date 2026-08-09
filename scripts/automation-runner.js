@@ -1429,6 +1429,12 @@ async function updateRunnerVideo(projectId, data, videoId, updates, logMessage) 
 const MAX_AUTO_RETRIES = 4;
 const RETRY_BACKOFF_MS = [5 * 60 * 1000, 20 * 60 * 1000, 60 * 60 * 1000, 4 * 60 * 60 * 1000];
 
+// Teto para reagendamentos por cota (que não gastam tentativa): evita mascarar
+// cota permanentemente insuficiente como retry infinito silencioso.
+const MAX_QUOTA_SKIPS = 12;
+const QUOTA_SKIP_WINDOW_MS = 48 * 60 * 60 * 1000;
+
+
 function retryBackoffMs(retryCount) {
   return RETRY_BACKOFF_MS[Math.min(retryCount, RETRY_BACKOFF_MS.length - 1)];
 }
