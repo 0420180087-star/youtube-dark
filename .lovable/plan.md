@@ -18,6 +18,17 @@ Confirmado pelos dados que você trouxe:
 - OAuth está "In production" (refresh_token não expira em 7 dias) e a cota da YouTube Data API está em 0 (pico 51 unidades). **Nenhuma das duas hipóteses é o problema** — a Fase 3, item 4 (cota do YouTube) passa a ser prevenção, não correção urgente.
 - A execução manual do runner terminou com "1 projeto(s), 0 elegível(is)" porque `nextRun=2026-08-09T16:17` ainda está no futuro. Comportamento correto, mas hoje não há como forçar um projeto específico ignorando o agendamento.
 
+## Fase 0.5 — Desbloquear o 429 do Gemini (nova prioridade máxima)
+
+Isto é o que impede a publicação hoje; vem antes da Fase 1.
+
+- `scripts/automation-runner.js`: tratar 429 como classe própria em `geminiGenerate`/`geminiTTS`/`geminiGenerateImage` — ao receber 429, marcar a chave como "esfriando" e **rotacionar imediatamente** para a próxima chave de `gemini_api_keys` antes de contar como tentativa; só falha o passo quando todas as chaves estiverem em cooldown.
+- Respeitar o `retryDelay` que o Gemini devolve no corpo do erro (`RetryInfo`) em vez do backoff fixo, e não consumir uma das 4 tentativas do vídeo quando o erro for exclusivamente 429.
+- Quando todas as chaves estiverem em 429, reagendar o vídeo em ~1h com mensagem explícita ("cota Gemini esgotada — retomando às HH:MM") em vez de "aguardando ação manual" após 4 tentativas.
+- Mesma lógica de rotação/cooldown em `src/services/geminiCore.ts` para o modo manual no navegador.
+- `AutomationHealth.tsx`: novo check "Cota Gemini" mostrando quantas chaves estão em cooldown e o último 429 registrado.
+- Runner: quando `PROJECT_ID` for passado no `workflow_dispatch`, ignorar `nextRun` e forçar a execução daquele projeto (hoje ele reporta "0 elegíveis" e não há como testar sob demanda).
+
 
 ## Fase 1 — Segurança crítica
 
