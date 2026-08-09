@@ -565,58 +565,81 @@ async function geminiGenerateJSON(prompt, maxTokens = 4096) {
   return JSON.parse(jsonStr);
 }
 
+// Implementação própria (não usa geminiWithRetry): o fallback aqui é por
+// MODELO, não por tentativa. Cada modelo é tentado com a chave atual e, em erro
+// de cota, a chave entra em cooldown e o mesmo modelo é retentado com a próxima
+// chave pronta. 400/403/404 = modelo indisponível → próximo modelo.
 async function geminiGenerateImage(prompt) {
-  // 1️⃣ Try imagen-3 (allowlisted accounts)
-  try {
-    const res = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:predict?key=${GEMINI_API_KEY}`,
-      { instances: [{ prompt }], parameters: { sampleCount: 1, aspectRatio: '16:9' } },
-      { timeout: 45000 }
-    );
-    const b64 = res.data.predictions?.[0]?.bytesBase64Encoded;
-    if (b64) return b64;
-  } catch (err) {
-    const code = err?.response?.status;
-    if (code && code !== 403 && code !== 400 && code !== 404) {
-      log('⚠️', `imagen-3 error ${code}: ${err.message}`);
-    }
-  }
-
-  // 2️⃣ Fallback to Gemini image-generation models (no allowlist needed).
-  // Apenas modelos que realmente devolvem inlineData — `gemini-2.0-flash-exp`
-  // não gera imagem e só queimava cota.
-  const FLASH_MODELS = [
-    'gemini-2.5-flash-image',
-    'gemini-2.0-flash-preview-image-generation',
+  const IMAGE_MODELS = [
+    { model: 'imagen-3.0-generate-001', kind: 'imagen' },
+    { model: 'gemini-2.5-flash-image', kind: 'flash' },
+    { model: 'gemini-2.0-flash-preview-image-generation', kind: 'flash' },
   ];
 
-  for (const model of FLASH_MODELS) {
-    try {
-      const res = await axios.post(
+  const callModel = async ({ model, kind }) => {
+    if (kind === 'imagen') {
+      const res = await raceTimeout(
+        axios.post(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:predict?key=${GEMINI_API_KEY}`,
+          { instances: [{ prompt }], parameters: { sampleCount: 1, aspectRatio: '16:9' } },
+          { timeout: NET_TIMEOUT.IMAGE }
+        ),
+        NET_TIMEOUT.IMAGE + 5_000,
+        `Gemini (${model})`
+      );
+      return res.data.predictions?.[0]?.bytesBase64Encoded || null;
+    }
+
+    const res = await raceTimeout(
+      axios.post(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
         {
           contents: [{ parts: [{ text: `Generate a 16:9 cinematic image: ${prompt}` }] }],
           generationConfig: { responseModalities: ['IMAGE', 'TEXT'] },
         },
-        { timeout: 45000 }
-      );
-      const parts = res.data.candidates?.[0]?.content?.parts || [];
-      const imgPart = parts.find((p) => p.inlineData?.data);
-      if (imgPart?.inlineData?.data) {
-        log('🖼️', `Imagem gerada via ${model}`);
-        return imgPart.inlineData.data;
-      }
-    } catch (err) {
-      const code = err?.response?.status;
-      if (code !== 400 && code !== 404) {
-        log('⚠️', `${model} falhou: ${err.message}`);
+        { timeout: NET_TIMEOUT.IMAGE }
+      ),
+      NET_TIMEOUT.IMAGE + 5_000,
+      `Gemini (${model})`
+    );
+    const parts = res.data.candidates?.[0]?.content?.parts || [];
+    return parts.find((p) => p.inlineData?.data)?.inlineData?.data || null;
+  };
+
+  for (const entry of IMAGE_MODELS) {
+    // Uma volta por chave disponível para este modelo.
+    for (let keyTry = 0; keyTry < Math.max(1, GEMINI_API_KEYS.length); keyTry++) {
+      if (!isKeyReady(GEMINI_API_KEY) && !rotateGeminiKey()) break;
+      try {
+        const b64 = await callModel(entry);
+        if (b64) {
+          log('🖼️', `Imagem gerada via ${entry.model}`);
+          return b64;
+        }
+        break; // respondeu sem imagem — trocar de modelo, não de chave
+      } catch (err) {
+        const code = err?.response?.status;
+        if (isQuotaError(err)) {
+          await cooldownCurrentKey(err);
+          if (rotateGeminiKey()) continue; // mesma modelo, próxima chave
+          break; // todas em cooldown — tenta o próximo modelo (pode ser mais barato)
+        }
+        if (code !== 400 && code !== 403 && code !== 404) {
+          log('⚠️', `${entry.model} falhou: ${err.message}`);
+        }
+        break; // modelo indisponível → próximo modelo
       }
     }
+  }
+
+  if (shortestCooldownMs()) {
+    throw new GeminiQuotaExhaustedError(shortestCooldownMs(), 'cota de imagem esgotada');
   }
 
   log('⚠️', 'Todos os modelos de imagem falharam — usando fallback');
   return null;
 }
+
 
 // ─── Generate a Node-side ambient music track via FFmpeg (no API needed) ─────
 function generateAmbienceTrack(outputPath, durationSec, tone = '') {
