@@ -56,8 +56,10 @@ const SCHEMA = {
   user_settings: true,
   autopilot_logs: true,
   automation_heartbeat: true,
+  automation_quota_events: true,
   lockRpc: true,
 };
+
 
 async function tableExists(name) {
   const { error } = await supabase.from(name).select('*').limit(1);
