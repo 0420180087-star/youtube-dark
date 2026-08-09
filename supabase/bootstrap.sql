@@ -61,6 +61,30 @@ create table if not exists user_settings (
   updated_at      timestamptz default now()
 );
 
+-- Sinal de vida do runner headless (GitHub Actions). Faltava aqui: sem ela o
+-- painel de Saúde marcava "Runner headless" como falha para sempre.
+create table if not exists automation_heartbeat (
+  runner       text primary key,
+  last_seen_at timestamptz default now(),
+  detail       text
+);
+
+-- Eventos de cota do Gemini (429/503). O runner roda em outro processo, então o
+-- estado em memória do navegador nunca reflete o que aconteceu no GitHub
+-- Actions — esta tabela é a única fonte compartilhada.
+create table if not exists automation_quota_events (
+  id          bigserial primary key,
+  user_email  text,
+  runner      text,
+  key_masked  text,
+  reason      text,
+  cooldown_ms integer,
+  created_at  timestamptz default now()
+);
+create index if not exists idx_quota_events_user_created
+  on automation_quota_events(user_email, created_at desc);
+
+
 -- Garante colunas em bancos que só rodaram o SQL antigo do SETUP.md
 alter table project_auth
   add column if not exists youtube_channel_id    text,
