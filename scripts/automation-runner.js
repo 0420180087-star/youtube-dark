@@ -79,6 +79,10 @@ async function preflight() {
     if (!SCHEMA[name]) missing.push(`tabela ${name}`);
   }
 
+  // Tabela opcional (observabilidade de cota) — ausência não bloqueia o run.
+  SCHEMA.automation_quota_events = await tableExists('automation_quota_events');
+
+
   // Probe the lock RPC with a project id that cannot exist: a working RPC
   // returns false, a missing one returns a 404/undefined-function error.
   const { error: lockErr } = await supabase.rpc('acquire_autopilot_lock', {
