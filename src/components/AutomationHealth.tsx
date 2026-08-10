@@ -23,10 +23,11 @@ interface Check {
   detail: string;
 }
 
+// Só tabelas legíveis pelo navegador. project_auth e user_settings são
+// restritas ao service_role (contêm tokens/chaves) e são verificadas via
+// Edge Function user-data nos checks 2 e 3.
 const REQUIRED_TABLES = [
   'projects',
-  'project_auth',
-  'user_settings',
   'autopilot_logs',
   'automation_heartbeat',
 ] as const;
