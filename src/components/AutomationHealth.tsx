@@ -13,6 +13,7 @@ import { CheckCircle2, XCircle, AlertTriangle, Loader2, Stethoscope, RefreshCw }
 import { supabase } from '../lib/supabaseClient';
 import { useAuth } from '../context/AuthContext';
 import { useProjects } from '../context/ProjectContext';
+import { getUserSettings, getProjectAuthStatuses } from '../services/userDataService';
 
 type State = 'ok' | 'warn' | 'fail' | 'checking';
 
