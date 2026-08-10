@@ -155,17 +155,11 @@ export const Settings: React.FC = () => {
 
             setGoogleClientId(cleanClientId);
 
-            // 4. Sync to Supabase so the GitHub Actions runner can read these keys
-            //    per user (no need to set workspace-wide env vars).
+            // 4. Sync to Supabase (via Edge Function user-data) so the GitHub
+            //    Actions runner can read these keys per user.
             if (supabase && user?.email) {
                 try {
-                    const { error } = await supabase.from('user_settings').upsert({
-                        user_email: user.email.trim().toLowerCase(),
-                        gemini_api_keys: keysToSave,
-                        pexels_api_key: pexelsKey.trim() || null,
-                        updated_at: new Date().toISOString(),
-                    }, { onConflict: 'user_email' });
-                    if (error) throw error;
+                    await saveUserSettings(keysToSave, pexelsKey.trim() || null);
                 } catch (e: any) {
                     console.warn('[Settings] cloud sync failed:', e);
                     alert(`Configurações salvas localmente, mas NÃO sincronizaram com o banco: ${e?.message || e}\n\nA automação do GitHub Actions não verá essas chaves. Rode supabase/bootstrap.sql no SQL Editor e salve novamente.`);
