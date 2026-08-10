@@ -3,6 +3,7 @@ import { Project, Video, ProjectStatus, VideoDuration, VisualScene, VisualEffect
 import { get, set } from 'idb-keyval';
 import { useAuth } from './AuthContext';
 import { supabase } from '../lib/supabaseClient';
+import { deleteProjectAuth } from '../services/userDataService';
 import { 
     generateVideoIdeas, 
     VideoIdea as GeminiVideoIdea
