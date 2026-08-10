@@ -880,6 +880,20 @@ export const generateSingleNarratorText = async (topic: string, sectionTitle: st
 
 const formatTimestamp = (seconds: number): string => { const mins = Math.floor(seconds / 60); const secs = Math.floor(seconds % 60); return `${mins}:${secs.toString().padStart(2, '0')}`; };
 
+/** Falha rápido se a chamada travar — sem isso o pipeline ficava pendurado. */
+const withTimeout = <T,>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout>;
+    return Promise.race([
+        promise.finally(() => clearTimeout(timer)),
+        new Promise<T>((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`${label}_timeout (${ms}ms)`)), ms);
+        }),
+    ]);
+};
+
+/** Metadados são texto curto: se passar disso, a chamada travou. */
+const METADATA_TIMEOUT_MS = 45_000;
+
 export const generateVideoMetadata = async (
   topic: string, 
   scriptSummary: string, 
@@ -915,7 +929,7 @@ RULES:
 - tags: 15-20 relevant SEO tags in ${language}
 - The title must generate curiosity and urgency`;
         
-        const response = await ai.models.generateContent({ 
+        const response = await withTimeout(ai.models.generateContent({
           model: "gemini-2.5-flash", 
           contents: prompt, 
           config: { 
@@ -931,7 +945,7 @@ RULES:
               required: ["youtubeTitle", "tags"]
             } 
           } 
-        });
+        }), METADATA_TIMEOUT_MS, 'metadata_title_tags');
         
         const data = JSON.parse(response.text || "{}");
         const detectedIsShorts = isShortsByFormat || data.isShorts || false;
@@ -970,7 +984,7 @@ RULES:
       }
       
       const prompt = `Generate optimized YouTube metadata for: "${topic}". Context: ${scriptSummary.substring(0, 1000)} ${timestampsContext} Tone: ${tone} Language: ${language}`;
-      const response = await ai.models.generateContent({ 
+      const response = await withTimeout(ai.models.generateContent({
           model: "gemini-2.5-flash", 
           contents: prompt, 
           config: { 
@@ -988,7 +1002,7 @@ RULES:
                   required: ["youtubeTitle", "youtubeDescription", "tags", "visibility"]
               } 
           } 
-      }); 
+      }), METADATA_TIMEOUT_MS, 'metadata_full');
       
       try {
           const data = JSON.parse(response.text || "{}");
@@ -1087,16 +1101,8 @@ const concatArrayBuffers = (buffers: ArrayBuffer[]): ArrayBuffer => {
     return out.buffer;
 };
 
-/** Falha rápido se a chamada travar — sem isso o pipeline ficava pendurado. */
-const withTimeout = <T,>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
-    let timer: ReturnType<typeof setTimeout>;
-    return Promise.race([
-        promise.finally(() => clearTimeout(timer)),
-        new Promise<T>((_, reject) => {
-            timer = setTimeout(() => reject(new Error(`${label}_timeout (${ms}ms)`)), ms);
-        }),
-    ]);
-};
+// withTimeout está definido acima (antes de generateVideoMetadata).
+
 
 const TTS_TIMEOUT_MS = 60_000;
 

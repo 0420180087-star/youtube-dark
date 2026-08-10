@@ -13,6 +13,7 @@ import { CheckCircle2, XCircle, AlertTriangle, Loader2, Stethoscope, RefreshCw }
 import { supabase } from '../lib/supabaseClient';
 import { useAuth } from '../context/AuthContext';
 import { useProjects } from '../context/ProjectContext';
+import { getUserSettings, getProjectAuthStatuses } from '../services/userDataService';
 
 type State = 'ok' | 'warn' | 'fail' | 'checking';
 
@@ -22,10 +23,11 @@ interface Check {
   detail: string;
 }
 
+// Só tabelas legíveis pelo navegador. project_auth e user_settings são
+// restritas ao service_role (contêm tokens/chaves) e são verificadas via
+// Edge Function user-data nos checks 2 e 3.
 const REQUIRED_TABLES = [
   'projects',
-  'project_auth',
-  'user_settings',
   'autopilot_logs',
   'automation_heartbeat',
 ] as const;
@@ -81,30 +83,24 @@ export const AutomationHealth: React.FC = () => {
         : `Faltando: ${missing.join(', ')}. Execute supabase/bootstrap.sql no SQL Editor.`,
     });
 
-    // 2. Chaves de API
+    // 2. Chaves de API — via Edge Function (user_settings não é legível pelo navegador)
     if (user?.email) {
-      const email = user.email.trim().toLowerCase();
-      const { data: settings, error: settingsError } = await supabase
-        .from('user_settings')
-        .select('gemini_api_keys, pexels_api_key')
-        .eq('user_email', email)
-        .maybeSingle();
-      const geminiCount = settings?.gemini_api_keys?.length || 0;
-      const hasPexels = !!settings?.pexels_api_key;
-      if (settingsError) {
-        // Erro de leitura ≠ "sem chaves": bancos antigos não têm as colunas.
-        result.push({
-          label: 'Chaves de API',
-          state: 'fail',
-          detail: `Não foi possível ler user_settings: ${settingsError.message}. Execute supabase/bootstrap.sql no SQL Editor.`,
-        });
-      } else {
+      try {
+        const settings = await getUserSettings();
+        const geminiCount = settings.gemini_api_keys?.length || 0;
+        const hasPexels = !!settings.pexels_api_key;
         result.push({
           label: 'Chaves de API',
           state: geminiCount > 0 ? (hasPexels ? 'ok' : 'warn') : 'fail',
           detail: geminiCount === 0
             ? 'Nenhuma chave Gemini salva. Sem ela o runner não gera nada — salve em Configurações.'
             : `${geminiCount} chave(s) Gemini${hasPexels ? ' + Pexels' : ' — Pexels ausente, os visuais cairão para geração por IA'}.`,
+        });
+      } catch (e: any) {
+        result.push({
+          label: 'Chaves de API',
+          state: 'fail',
+          detail: `Não foi possível ler as configurações: ${e?.message || e}. Faça deploy da Edge Function user-data e rode supabase/bootstrap.sql.`,
         });
       }
     }
@@ -147,26 +143,29 @@ export const AutomationHealth: React.FC = () => {
     }
 
 
-    // 3. Canais do YouTube por projeto (com Auto-Pilot ligado)
+    // 3. Canais do YouTube por projeto (com Auto-Pilot ligado) — via Edge Function
     const autoProjects = projects.filter(p => p.scheduleSettings?.autoGenerate);
     if (autoProjects.length > 0 && user?.email) {
-      const { data: authRows } = await supabase
-        .from('project_auth')
-        .select('project_id, youtube_refresh_token, token_status, token_error')
-        .eq('user_email', user.email);
-
-      const disconnected = autoProjects.filter(p => {
-        const row = authRows?.find((r: any) => r.project_id === p.id);
-        return !row?.youtube_refresh_token || row?.token_status === 'revoked';
-      });
-
-      result.push({
-        label: 'Canais do YouTube',
-        state: disconnected.length === 0 ? 'ok' : 'warn',
-        detail: disconnected.length === 0
-          ? `${autoProjects.length} projeto(s) com canal conectado e token válido.`
-          : `${disconnected.length} projeto(s) sem canal válido (${disconnected.map(p => p.title).join(', ')}). Os vídeos serão gerados e ficarão agendados até a reconexão.`,
-      });
+      try {
+        const authRows = await getProjectAuthStatuses();
+        const disconnected = autoProjects.filter(p => {
+          const row = authRows.find(r => r.project_id === p.id);
+          return !row?.has_refresh_token || row?.token_status === 'revoked';
+        });
+        result.push({
+          label: 'Canais do YouTube',
+          state: disconnected.length === 0 ? 'ok' : 'warn',
+          detail: disconnected.length === 0
+            ? `${autoProjects.length} projeto(s) com canal conectado e token válido.`
+            : `${disconnected.length} projeto(s) sem canal válido (${disconnected.map(p => p.title).join(', ')}). Os vídeos serão gerados e ficarão agendados até a reconexão.`,
+        });
+      } catch (e: any) {
+        result.push({
+          label: 'Canais do YouTube',
+          state: 'warn',
+          detail: `Falha ao verificar: ${e?.message || e}`,
+        });
+      }
     }
 
     // 4. Heartbeat do runner headless

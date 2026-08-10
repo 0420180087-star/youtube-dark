@@ -3,6 +3,7 @@ import { Project, Video, ProjectStatus, VideoDuration, VisualScene, VisualEffect
 import { get, set } from 'idb-keyval';
 import { useAuth } from './AuthContext';
 import { supabase } from '../lib/supabaseClient';
+import { deleteProjectAuth } from '../services/userDataService';
 import { 
     generateVideoIdeas, 
     VideoIdea as GeminiVideoIdea
@@ -827,8 +828,11 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
           console.warn('[Supabase] Falha ao excluir projeto remoto:', id, e);
         }
         try {
-          await supabase.from('project_auth').delete().eq('project_id', id).eq('user_email', userEmailRef.current);
-        } catch {}
+          // project_auth guarda refresh tokens: só a Edge Function (service role) acessa.
+          await deleteProjectAuth(id);
+        } catch (e) {
+          console.warn('[Supabase] Falha ao excluir project_auth remoto:', id, e);
+        }
         try {
           await supabase.from('autopilot_logs').delete().eq('project_id', id);
         } catch {}

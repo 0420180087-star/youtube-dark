@@ -4,6 +4,7 @@ import { encryptData, decryptData } from '../services/securityService';
 import { supabase } from '../lib/supabaseClient';
 import { Settings as SettingsIcon, User, Key, Shield, LogOut, Save, CheckCircle, RefreshCw, AlertTriangle, Trash2, Youtube, LogIn, Copy, ExternalLink, Plus, X, Link2, Activity } from 'lucide-react';
 import { getKeyStatus, clearExhaustedKeys } from '../services/geminiService';
+import { getUserSettings, saveUserSettings } from '../services/userDataService';
 
 export const Settings: React.FC = () => {
     const { user, login, logout, googleClientId, setGoogleClientId, isLoading: isAuthLoading, youtubeChannel, disconnectYoutube } = useAuth();
@@ -75,12 +76,7 @@ export const Settings: React.FC = () => {
         const loadFromCloud = async () => {
             if (!supabase || !user?.email) return;
             try {
-                const { data, error } = await supabase
-                    .from('user_settings')
-                    .select('gemini_api_keys, pexels_api_key')
-                    .eq('user_email', user.email.trim().toLowerCase())
-                    .maybeSingle();
-                if (error || !data) return;
+                const data = await getUserSettings();
                 if (Array.isArray(data.gemini_api_keys) && data.gemini_api_keys.length) {
                     setApiKeys(data.gemini_api_keys);
                 }
@@ -159,17 +155,11 @@ export const Settings: React.FC = () => {
 
             setGoogleClientId(cleanClientId);
 
-            // 4. Sync to Supabase so the GitHub Actions runner can read these keys
-            //    per user (no need to set workspace-wide env vars).
+            // 4. Sync to Supabase (via Edge Function user-data) so the GitHub
+            //    Actions runner can read these keys per user.
             if (supabase && user?.email) {
                 try {
-                    const { error } = await supabase.from('user_settings').upsert({
-                        user_email: user.email.trim().toLowerCase(),
-                        gemini_api_keys: keysToSave,
-                        pexels_api_key: pexelsKey.trim() || null,
-                        updated_at: new Date().toISOString(),
-                    }, { onConflict: 'user_email' });
-                    if (error) throw error;
+                    await saveUserSettings(keysToSave, pexelsKey.trim() || null);
                 } catch (e: any) {
                     console.warn('[Settings] cloud sync failed:', e);
                     alert(`Configurações salvas localmente, mas NÃO sincronizaram com o banco: ${e?.message || e}\n\nA automação do GitHub Actions não verá essas chaves. Rode supabase/bootstrap.sql no SQL Editor e salve novamente.`);

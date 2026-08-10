@@ -155,11 +155,12 @@ drop policy if exists "user_profiles: own row"          on user_profiles;
 drop policy if exists "user_profiles: app managed rows" on user_profiles;
 create policy "user_profiles: app managed rows" on user_profiles for all using (true) with check (true);
 
+-- project_auth guarda refresh tokens do YouTube: acesso APENAS via service_role
+-- (Edge Functions exchange-code / refresh-token / user-data).
 drop policy if exists "project_auth: acesso por email"  on project_auth;
 drop policy if exists "project_auth: own rows only"     on project_auth;
 drop policy if exists "project_auth: own rows"          on project_auth;
 drop policy if exists "project_auth: app managed rows"  on project_auth;
-create policy "project_auth: app managed rows" on project_auth for all using (true) with check (true);
 
 drop policy if exists "projects: acesso por email"  on projects;
 drop policy if exists "projects: own rows only"     on projects;
@@ -173,10 +174,11 @@ drop policy if exists "autopilot_logs: own projects only"     on autopilot_logs;
 drop policy if exists "autopilot_logs: app managed rows"      on autopilot_logs;
 create policy "autopilot_logs: app managed rows" on autopilot_logs for all using (true) with check (true);
 
+-- user_settings guarda chaves de API: acesso APENAS via service_role
+-- (Edge Function user-data e runner do GitHub Actions).
 drop policy if exists "user_settings: own row only"    on user_settings;
 drop policy if exists "user_settings: own row"          on user_settings;
 drop policy if exists "user_settings: app managed rows" on user_settings;
-create policy "user_settings: app managed rows" on user_settings for all using (true) with check (true);
 
 alter table automation_heartbeat    enable row level security;
 alter table automation_quota_events enable row level security;
@@ -188,14 +190,17 @@ drop policy if exists "automation_quota_events: app managed rows" on automation_
 create policy "automation_quota_events: app managed rows" on automation_quota_events for all using (true) with check (true);
 
 -- GRANTs — necessários pois as policies acima liberam para anon/authenticated
+-- (dívida técnica registrada: projects/autopilot_logs/user_profiles seguem permissivos)
 grant select, insert, update, delete on public.user_profiles  to anon, authenticated;
 grant select, insert, update, delete on public.projects       to anon, authenticated;
-grant select, insert, update, delete on public.project_auth   to anon, authenticated;
 grant select, insert, update, delete on public.autopilot_logs to anon, authenticated;
-grant select, insert, update, delete on public.user_settings  to anon, authenticated;
 grant select on public.automation_heartbeat    to anon, authenticated;
 grant select, insert on public.automation_quota_events to anon, authenticated;
 grant usage, select on sequence public.automation_quota_events_id_seq to anon, authenticated;
+
+-- Revoke explícito: tokens do YouTube e chaves de API nunca pela chave anon.
+revoke all on public.project_auth  from anon, authenticated;
+revoke all on public.user_settings from anon, authenticated;
 grant all on public.user_profiles  to service_role;
 grant all on public.projects       to service_role;
 grant all on public.project_auth   to service_role;
