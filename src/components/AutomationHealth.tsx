@@ -81,30 +81,24 @@ export const AutomationHealth: React.FC = () => {
         : `Faltando: ${missing.join(', ')}. Execute supabase/bootstrap.sql no SQL Editor.`,
     });
 
-    // 2. Chaves de API
+    // 2. Chaves de API — via Edge Function (user_settings não é legível pelo navegador)
     if (user?.email) {
-      const email = user.email.trim().toLowerCase();
-      const { data: settings, error: settingsError } = await supabase
-        .from('user_settings')
-        .select('gemini_api_keys, pexels_api_key')
-        .eq('user_email', email)
-        .maybeSingle();
-      const geminiCount = settings?.gemini_api_keys?.length || 0;
-      const hasPexels = !!settings?.pexels_api_key;
-      if (settingsError) {
-        // Erro de leitura ≠ "sem chaves": bancos antigos não têm as colunas.
-        result.push({
-          label: 'Chaves de API',
-          state: 'fail',
-          detail: `Não foi possível ler user_settings: ${settingsError.message}. Execute supabase/bootstrap.sql no SQL Editor.`,
-        });
-      } else {
+      try {
+        const settings = await getUserSettings();
+        const geminiCount = settings.gemini_api_keys?.length || 0;
+        const hasPexels = !!settings.pexels_api_key;
         result.push({
           label: 'Chaves de API',
           state: geminiCount > 0 ? (hasPexels ? 'ok' : 'warn') : 'fail',
           detail: geminiCount === 0
             ? 'Nenhuma chave Gemini salva. Sem ela o runner não gera nada — salve em Configurações.'
             : `${geminiCount} chave(s) Gemini${hasPexels ? ' + Pexels' : ' — Pexels ausente, os visuais cairão para geração por IA'}.`,
+        });
+      } catch (e: any) {
+        result.push({
+          label: 'Chaves de API',
+          state: 'fail',
+          detail: `Não foi possível ler as configurações: ${e?.message || e}. Faça deploy da Edge Function user-data e rode supabase/bootstrap.sql.`,
         });
       }
     }
