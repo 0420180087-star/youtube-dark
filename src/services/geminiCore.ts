@@ -1087,16 +1087,8 @@ const concatArrayBuffers = (buffers: ArrayBuffer[]): ArrayBuffer => {
     return out.buffer;
 };
 
-/** Falha rápido se a chamada travar — sem isso o pipeline ficava pendurado. */
-const withTimeout = <T,>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
-    let timer: ReturnType<typeof setTimeout>;
-    return Promise.race([
-        promise.finally(() => clearTimeout(timer)),
-        new Promise<T>((_, reject) => {
-            timer = setTimeout(() => reject(new Error(`${label}_timeout (${ms}ms)`)), ms);
-        }),
-    ]);
-};
+// withTimeout está definido acima (antes de generateVideoMetadata).
+
 
 const TTS_TIMEOUT_MS = 60_000;
 
