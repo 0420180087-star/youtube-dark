@@ -929,7 +929,7 @@ RULES:
 - tags: 15-20 relevant SEO tags in ${language}
 - The title must generate curiosity and urgency`;
         
-        const response = await ai.models.generateContent({ 
+        const response = await withTimeout(ai.models.generateContent({
           model: "gemini-2.5-flash", 
           contents: prompt, 
           config: { 
@@ -945,7 +945,7 @@ RULES:
               required: ["youtubeTitle", "tags"]
             } 
           } 
-        });
+        }), METADATA_TIMEOUT_MS, 'metadata_title_tags');
         
         const data = JSON.parse(response.text || "{}");
         const detectedIsShorts = isShortsByFormat || data.isShorts || false;
