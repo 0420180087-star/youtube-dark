@@ -459,9 +459,11 @@ export async function stepGenerateMetadata(
   callbacks: PipelineCallbacks
 ) {
   callbacks.onStepStart('metadata', 'Otimizando SEO e descrição...');
-  const metadata = await generateVideoMetadata(
+
+  const fullText = script.segments.map((s: any) => s.narratorText).join(' ');
+  const buildMetadata = () => generateVideoMetadata(
     video.title,
-    script.segments.map((s: any) => s.narratorText).join(' '),
+    fullText,
     project.defaultTone,
     project.language,
     script.segments,
@@ -469,6 +471,37 @@ export async function stepGenerateMetadata(
     project.channelTheme,
     video.format || project.defaultFormat  // Pass format so isShorts is auto-detected
   );
+
+  // Watchdog: metadados são o passo mais curto do pipeline. Se travar (fila do
+  // Gemini em cooldown longo, resposta pendurada), seguimos com a descrição
+  // determinística em vez de deixar o pipeline parado para sempre.
+  let metadata: any;
+  try {
+    metadata = await Promise.race([
+      buildMetadata(),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('metadata_step_timeout')), 90_000)),
+    ]);
+  } catch (err: any) {
+    console.warn('[Pipeline] Metadados por IA falharam, usando fallback determinístico:', err?.message);
+    const { buildVideoDescription, buildTimestamps } = await import('./thumbnailDescriptionService');
+    const descResult = buildVideoDescription({
+      title: video.title,
+      script,
+      narrativeTone: project.defaultTone,
+      niche: project.channelTheme || '',
+      language: project.language,
+    });
+    const isShorts = !!((video.format || project.defaultFormat || '').includes('9:16'));
+    metadata = {
+      youtubeTitle: video.title,
+      youtubeDescription: descResult.fullDescription + '\n\n📋 CAPÍTULOS:\n' + buildTimestamps(script.segments),
+      tags: [],
+      categoryId: isShorts ? '22' : '24',
+      visibility: 'public' as const,
+      isShorts,
+    };
+  }
+
   callbacks.updateVideo(project.id, video.id, { videoMetadata: metadata });
   callbacks.onStepComplete('metadata');
   return metadata;
