@@ -75,12 +75,7 @@ export const Settings: React.FC = () => {
         const loadFromCloud = async () => {
             if (!supabase || !user?.email) return;
             try {
-                const { data, error } = await supabase
-                    .from('user_settings')
-                    .select('gemini_api_keys, pexels_api_key')
-                    .eq('user_email', user.email.trim().toLowerCase())
-                    .maybeSingle();
-                if (error || !data) return;
+                const data = await getUserSettings();
                 if (Array.isArray(data.gemini_api_keys) && data.gemini_api_keys.length) {
                     setApiKeys(data.gemini_api_keys);
                 }
