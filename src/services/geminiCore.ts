@@ -880,6 +880,20 @@ export const generateSingleNarratorText = async (topic: string, sectionTitle: st
 
 const formatTimestamp = (seconds: number): string => { const mins = Math.floor(seconds / 60); const secs = Math.floor(seconds % 60); return `${mins}:${secs.toString().padStart(2, '0')}`; };
 
+/** Falha rápido se a chamada travar — sem isso o pipeline ficava pendurado. */
+const withTimeout = <T,>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout>;
+    return Promise.race([
+        promise.finally(() => clearTimeout(timer)),
+        new Promise<T>((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`${label}_timeout (${ms}ms)`)), ms);
+        }),
+    ]);
+};
+
+/** Metadados são texto curto: se passar disso, a chamada travou. */
+const METADATA_TIMEOUT_MS = 45_000;
+
 export const generateVideoMetadata = async (
   topic: string, 
   scriptSummary: string, 
