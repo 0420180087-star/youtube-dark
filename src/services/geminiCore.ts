@@ -984,7 +984,7 @@ RULES:
       }
       
       const prompt = `Generate optimized YouTube metadata for: "${topic}". Context: ${scriptSummary.substring(0, 1000)} ${timestampsContext} Tone: ${tone} Language: ${language}`;
-      const response = await ai.models.generateContent({ 
+      const response = await withTimeout(ai.models.generateContent({
           model: "gemini-2.5-flash", 
           contents: prompt, 
           config: { 
@@ -1002,7 +1002,7 @@ RULES:
                   required: ["youtubeTitle", "youtubeDescription", "tags", "visibility"]
               } 
           } 
-      }); 
+      }), METADATA_TIMEOUT_MS, 'metadata_full');
       
       try {
           const data = JSON.parse(response.text || "{}");
