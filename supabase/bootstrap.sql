@@ -155,11 +155,12 @@ drop policy if exists "user_profiles: own row"          on user_profiles;
 drop policy if exists "user_profiles: app managed rows" on user_profiles;
 create policy "user_profiles: app managed rows" on user_profiles for all using (true) with check (true);
 
+-- project_auth guarda refresh tokens do YouTube: acesso APENAS via service_role
+-- (Edge Functions exchange-code / refresh-token / user-data).
 drop policy if exists "project_auth: acesso por email"  on project_auth;
 drop policy if exists "project_auth: own rows only"     on project_auth;
 drop policy if exists "project_auth: own rows"          on project_auth;
 drop policy if exists "project_auth: app managed rows"  on project_auth;
-create policy "project_auth: app managed rows" on project_auth for all using (true) with check (true);
 
 drop policy if exists "projects: acesso por email"  on projects;
 drop policy if exists "projects: own rows only"     on projects;
