@@ -142,26 +142,29 @@ export const AutomationHealth: React.FC = () => {
     }
 
 
-    // 3. Canais do YouTube por projeto (com Auto-Pilot ligado)
+    // 3. Canais do YouTube por projeto (com Auto-Pilot ligado) — via Edge Function
     const autoProjects = projects.filter(p => p.scheduleSettings?.autoGenerate);
     if (autoProjects.length > 0 && user?.email) {
-      const { data: authRows } = await supabase
-        .from('project_auth')
-        .select('project_id, youtube_refresh_token, token_status, token_error')
-        .eq('user_email', user.email);
-
-      const disconnected = autoProjects.filter(p => {
-        const row = authRows?.find((r: any) => r.project_id === p.id);
-        return !row?.youtube_refresh_token || row?.token_status === 'revoked';
-      });
-
-      result.push({
-        label: 'Canais do YouTube',
-        state: disconnected.length === 0 ? 'ok' : 'warn',
-        detail: disconnected.length === 0
-          ? `${autoProjects.length} projeto(s) com canal conectado e token válido.`
-          : `${disconnected.length} projeto(s) sem canal válido (${disconnected.map(p => p.title).join(', ')}). Os vídeos serão gerados e ficarão agendados até a reconexão.`,
-      });
+      try {
+        const authRows = await getProjectAuthStatuses();
+        const disconnected = autoProjects.filter(p => {
+          const row = authRows.find(r => r.project_id === p.id);
+          return !row?.has_refresh_token || row?.token_status === 'revoked';
+        });
+        result.push({
+          label: 'Canais do YouTube',
+          state: disconnected.length === 0 ? 'ok' : 'warn',
+          detail: disconnected.length === 0
+            ? `${autoProjects.length} projeto(s) com canal conectado e token válido.`
+            : `${disconnected.length} projeto(s) sem canal válido (${disconnected.map(p => p.title).join(', ')}). Os vídeos serão gerados e ficarão agendados até a reconexão.`,
+        });
+      } catch (e: any) {
+        result.push({
+          label: 'Canais do YouTube',
+          state: 'warn',
+          detail: `Falha ao verificar: ${e?.message || e}`,
+        });
+      }
     }
 
     // 4. Heartbeat do runner headless
