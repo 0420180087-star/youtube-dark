@@ -987,8 +987,7 @@ export const ProjectEditor: React.FC = () => {
               let videoUrl = undefined;
               let pexelsId: number | undefined;
 
-              const isDocumentary = scriptTone.toLowerCase().includes('documentary') || scriptTone.toLowerCase().includes('wendover') || scriptTone.toLowerCase().includes('explainer');
-              const pexelsChance = isDocumentary ? 0.7 : 0.4;
+              const pexelsChance = (project?.visualSourceMix?.pexelsPercentage || 50) / 100;
               const singleUsedIds = collectPexelsIds(newScenes);
 
               if (Math.random() < pexelsChance) {
