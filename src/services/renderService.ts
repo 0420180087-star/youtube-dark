@@ -569,6 +569,24 @@ export const renderVideoHeadless = async (
         const sceneTime = elapsed - scene.startTime;
         const sceneProgress = Math.min(1, sceneTime / scene.duration);
 
+        // Pause any video that has already started but is no longer on screen
+        // (not the current scene, nor the previous one mid-crossfade). Without
+        // this, every Pexels video clip keeps decoding in the background for
+        // the rest of the render — on longer videos (dozens of scenes) this
+        // stacks up and is a major source of dropped frames/stutter in the
+        // captured output, since this is a real-time recording.
+        const activeSceneIndexes = new Set([sceneIdx]);
+        if (sceneIdx > 0 && sceneTime < CROSSFADE) activeSceneIndexes.add(sceneIdx - 1);
+        for (let i = 0; i < renderScenes.length; i++) {
+          const s = renderScenes[i];
+          if (s.isVideo && s.videoStarted && !activeSceneIndexes.has(i)) {
+            const v = s.element as HTMLVideoElement;
+            if (!v.paused) {
+              try { v.pause(); } catch { /* ignore */ }
+            }
+          }
+        }
+
         // Solid background — prevents alpha bleed-through
         ctx2d.globalAlpha = 1;
         ctx2d.globalCompositeOperation = "source-over";
