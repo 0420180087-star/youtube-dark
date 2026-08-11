@@ -294,17 +294,46 @@ export async function stepGenerateVisuals(
   let done = 0;
   let geminiCalls = 0;
 
-  const report = (origin: string) => {
+  const report = (origin: string, reason?: string) => {
     done++;
-    callbacks.onProgress('visuals', `Cena ${done}/${total} pronta (${origin})`);
+    const suffix = reason ? ` — ${reason}` : '';
+    callbacks.onProgress('visuals', `Cena ${done}/${total} pronta (${origin}${suffix})`);
+  };
+
+  // Gemini fallback calls are spaced at least this far apart *globally*,
+  // across all concurrent workers (mirrors the manual editor's own 6s
+  // throttle). Without this, several slots that miss Pexels at the same
+  // instant all hit the Gemini image API together, which is a common way
+  // to trip rate limiting and cascade into even more fallbacks.
+  const GEMINI_MIN_INTERVAL_MS = 6_000;
+  let nextGeminiSlotAt = 0;
+  const waitForGeminiSlot = async () => {
+    const now = Date.now();
+    const wait = Math.max(0, nextGeminiSlotAt - now);
+    nextGeminiSlotAt = Math.max(now, nextGeminiSlotAt) + GEMINI_MIN_INTERVAL_MS;
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  };
+
+  // Turns a thrown error into a short, readable reason for the Activity Log
+  // (status/timeout/network) instead of a raw stack trace or nothing at all.
+  const describeError = (e: unknown): string => {
+    const msg = e instanceof Error ? e.message : String(e ?? '');
+    if (/rate.?limit|429/i.test(msg)) return 'rate limit da API';
+    if (/timeout/i.test(msg)) return 'timeout';
+    if (/network|fetch|cors/i.test(msg)) return 'erro de rede';
+    return msg.slice(0, 80) || 'erro desconhecido';
   };
 
   // ── 2. Resolve one slot, never blocking longer than SLOT_TIMEOUT_MS ─────
-  const resolveSlot = async (slot: VisualSlot): Promise<VisualScene> => {
+  const resolveSlot = async (
+    slot: VisualSlot
+  ): Promise<{ scene: VisualScene; origin: string; reason?: string }> => {
     let imgUrl = '';
     let videoUrl: string | undefined;
     let pexelsId: number | undefined;
     let origin = 'fallback';
+    let pexelsReason: string | undefined;
+    let iaReason: string | undefined;
 
     if (Math.random() < pexelsChance) {
       try {
@@ -321,14 +350,18 @@ export async function stepGenerateVisuals(
           imgUrl = result.thumbnailUrl;
           pexelsId = result.id;
           origin = 'Pexels';
+        } else {
+          pexelsReason = 'Pexels sem resultados';
         }
       } catch (e) {
+        pexelsReason = `Pexels: ${describeError(e)}`;
         console.warn('[Visuals] Pexels falhou, caindo para IA', e);
       }
     }
 
     if (!imgUrl) {
       try {
+        await waitForGeminiSlot();
         geminiCalls++;
         imgUrl = await generateSceneImage(
           slot.prompt,
@@ -339,6 +372,7 @@ export async function stepGenerateVisuals(
         );
         origin = 'IA';
       } catch (e) {
+        iaReason = `IA: ${describeError(e)}`;
         console.warn('[Visuals] Imagem IA falhou, usando fallback gerado', e);
         imgUrl = createFallbackVisualDataUrl(
           slot.prompt, project.defaultTone, video.format,
@@ -347,19 +381,28 @@ export async function stepGenerateVisuals(
       }
     }
 
+    const reason = [pexelsReason, iaReason].filter(Boolean).join(' → ') || undefined;
+
     return {
-      segmentIndex: slot.segmentIndex,
-      imageUrl: imgUrl,
-      videoUrl,
-      pexelsId,
-      prompt: slot.prompt,
-      effect: ANIMATION_EFFECTS[(slot.segmentIndex + slot.slotInSegment) % ANIMATION_EFFECTS.length],
-      startTime: slot.startTime,
-      duration: slot.duration,
+      scene: {
+        segmentIndex: slot.segmentIndex,
+        imageUrl: imgUrl,
+        videoUrl,
+        pexelsId,
+        prompt: slot.prompt,
+        effect: ANIMATION_EFFECTS[(slot.segmentIndex + slot.slotInSegment) % ANIMATION_EFFECTS.length],
+        startTime: slot.startTime,
+        duration: slot.duration,
+      },
+      origin,
+      // Pexels succeeding on the first try has nothing to explain.
+      reason: origin === 'Pexels' ? undefined : reason,
     };
   };
 
-  const resolveSlotGuarded = async (slot: VisualSlot): Promise<VisualScene> => {
+  const resolveSlotGuarded = async (
+    slot: VisualSlot
+  ): Promise<{ scene: VisualScene; origin: string; reason?: string }> => {
     const fallback = (): VisualScene => ({
       segmentIndex: slot.segmentIndex,
       imageUrl: createFallbackVisualDataUrl(
@@ -377,13 +420,13 @@ export async function stepGenerateVisuals(
     try {
       return await Promise.race([
         resolveSlot(slot),
-        new Promise<VisualScene>((_, rej) =>
+        new Promise<{ scene: VisualScene; origin: string; reason?: string }>((_, rej) =>
           setTimeout(() => rej(new Error('slot_timeout')), SLOT_TIMEOUT_MS)
         ),
       ]);
     } catch (e) {
       console.warn(`[Visuals] Cena ${slot.index + 1} estourou o tempo limite — usando fallback`, e);
-      return fallback();
+      return { scene: fallback(), origin: 'fallback', reason: 'tempo limite excedido' };
     }
   };
 
@@ -392,9 +435,9 @@ export async function stepGenerateVisuals(
   const worker = async () => {
     while (cursor < total) {
       const slot = slots[cursor++];
-      const scene = await resolveSlotGuarded(slot);
+      const { scene, origin, reason } = await resolveSlotGuarded(slot);
       resolved[slot.index] = scene;
-      report(scene.pexelsId ? 'Pexels' : scene.imageUrl.startsWith('data:image/svg') ? 'fallback' : 'IA');
+      report(origin, reason);
     }
   };
 
