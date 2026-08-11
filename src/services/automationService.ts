@@ -3,13 +3,12 @@
  * Modular, step-by-step video creation with STANDBY on failure.
  */
 
-import { Project, Video, ProjectStatus, VisualScene, VisualEffect, AutoPilotStep, StandbyInfo } from '../types';
+import { Project, Video, ProjectStatus, AutoPilotStep, StandbyInfo } from '../types';
 import {
   generateVideoIdeas,
   generateVideoScript,
   generateVideoMetadata,
   generateVoiceover,
-  generateSceneImage,
   generateDarkAmbience,
   generateThumbnail,
   decodeAudioData,
@@ -17,12 +16,10 @@ import {
   audioBufferToBase64,
   VideoIdea as GeminiVideoIdea
 } from './geminiService';
-import { searchContextualMedia } from './pexelsService';
 import { renderVideoHeadless } from './renderService';
 import { uploadVideoToYouTube } from './youtubeService';
-import { buildSlotVisualPrompt, createFallbackVisualDataUrl, getSegmentVisualPrompts } from './visualSceneService';
-
-const ANIMATION_EFFECTS: VisualEffect[] = ['zoom-in', 'zoom-out', 'pan-left', 'pan-right', 'zoom-in-fast'];
+import { buildSlotVisualPrompt, collectPexelsIds, getSegmentVisualPrompts } from './visualSceneService';
+import { resolveVisualSlots, VisualSlotSpec } from './visualsPipeline';
 
 export interface PipelineCallbacks {
   onStepStart: (step: AutoPilotStep, message: string) => void;
@@ -226,22 +223,12 @@ export async function stepGenerateVoice(
   }
 }
 
-interface VisualSlot {
-  index: number;
-  segmentIndex: number;
-  prompt: string;
-  narratorText: string;
-  sectionTitle: string;
-  startTime: number;
-  duration: number;
-  slotInSegment: number;
-}
-
 /** Caps so a long segment can't explode into dozens of AI calls. */
 const MAX_SLOTS_PER_SEGMENT = 8;
 const MAX_SLOTS_TOTAL = 60;
 const SLOT_TIMEOUT_MS = 90_000;
 const VISUALS_CONCURRENCY = 3;
+const GEMINI_MIN_INTERVAL_MS = 6_000;
 
 export async function stepGenerateVisuals(
   project: Project,
@@ -252,14 +239,13 @@ export async function stepGenerateVisuals(
   callbacks: PipelineCallbacks
 ) {
   callbacks.onStepStart('visuals', 'Buscando imagens e vídeos...');
-  const pexelsUsedIds = new Set<number>();
 
   // Max time any single image/video can stay on screen before being swapped.
   // Configurable per-project (defaults to 6s) — a target, not a hard rule.
   const MAX_MEDIA_DUR = Math.max(2, project.maxMediaDurationSeconds ?? 6);
 
   // ── 1. Build the full slot plan up front ────────────────────────────────
-  const slots: VisualSlot[] = [];
+  const slots: VisualSlotSpec[] = [];
 
   for (let i = 0; i < script.segments.length; i++) {
     const start = timestamps[i];
@@ -276,178 +262,43 @@ export async function stepGenerateVisuals(
       if (slots.length >= MAX_SLOTS_TOTAL) break;
       const basePrompt = prompts[j % prompts.length];
       slots.push({
-        index: slots.length,
         segmentIndex: i,
+        slotInSegment: j,
         prompt: buildSlotVisualPrompt(seg, basePrompt, i, j, slotCount, project.channelTheme),
         narratorText: seg.narratorText || basePrompt,
         sectionTitle: seg.sectionTitle || `Section ${i}`,
         startTime: start + j * slotDur,
         duration: slotDur,
-        slotInSegment: j,
       });
     }
   }
 
-  const total = slots.length;
-  const resolved: (VisualScene | null)[] = new Array(total).fill(null);
-  const pexelsChance = (project.visualSourceMix?.pexelsPercentage || 50) / 100;
-  let done = 0;
-  let geminiCalls = 0;
+  // On a resumed video the slot plan is deterministic from script/timestamps,
+  // so a matching-length existing scene list lines up by position and can be
+  // reused where still valid — this is what lets a retry skip straight past
+  // scenes that already succeeded instead of re-fetching the whole video.
+  const existingScenes = video.visualScenes && video.visualScenes.length === slots.length
+    ? video.visualScenes
+    : undefined;
+  const pexelsUsedIds = collectPexelsIds(existingScenes || []);
 
-  const report = (origin: string, reason?: string) => {
-    done++;
-    const suffix = reason ? ` — ${reason}` : '';
-    callbacks.onProgress('visuals', `Cena ${done}/${total} pronta (${origin}${suffix})`);
-  };
+  const scenes = await resolveVisualSlots({
+    project,
+    video,
+    slots,
+    pexelsUsedIds,
+    existingScenes,
+    force: false,
+    concurrency: VISUALS_CONCURRENCY,
+    slotTimeoutMs: SLOT_TIMEOUT_MS,
+    geminiThrottleMs: GEMINI_MIN_INTERVAL_MS,
+    onSlotResolved: ({ origin, reason, doneCount, total }) => {
+      const suffix = reason ? ` — ${reason}` : '';
+      callbacks.onProgress('visuals', `Cena ${doneCount}/${total} pronta (${origin}${suffix})`);
+    },
+  });
 
-  // Gemini fallback calls are spaced at least this far apart *globally*,
-  // across all concurrent workers (mirrors the manual editor's own 6s
-  // throttle). Without this, several slots that miss Pexels at the same
-  // instant all hit the Gemini image API together, which is a common way
-  // to trip rate limiting and cascade into even more fallbacks.
-  const GEMINI_MIN_INTERVAL_MS = 6_000;
-  let nextGeminiSlotAt = 0;
-  const waitForGeminiSlot = async () => {
-    const now = Date.now();
-    const wait = Math.max(0, nextGeminiSlotAt - now);
-    nextGeminiSlotAt = Math.max(now, nextGeminiSlotAt) + GEMINI_MIN_INTERVAL_MS;
-    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-  };
-
-  // Turns a thrown error into a short, readable reason for the Activity Log
-  // (status/timeout/network) instead of a raw stack trace or nothing at all.
-  const describeError = (e: unknown): string => {
-    const msg = e instanceof Error ? e.message : String(e ?? '');
-    if (/rate.?limit|429/i.test(msg)) return 'rate limit da API';
-    if (/timeout/i.test(msg)) return 'timeout';
-    if (/network|fetch|cors/i.test(msg)) return 'erro de rede';
-    return msg.slice(0, 80) || 'erro desconhecido';
-  };
-
-  // ── 2. Resolve one slot, never blocking longer than SLOT_TIMEOUT_MS ─────
-  const resolveSlot = async (
-    slot: VisualSlot
-  ): Promise<{ scene: VisualScene; origin: string; reason?: string }> => {
-    let imgUrl = '';
-    let videoUrl: string | undefined;
-    let pexelsId: number | undefined;
-    let origin = 'fallback';
-    let pexelsReason: string | undefined;
-    let iaReason: string | undefined;
-
-    if (Math.random() < pexelsChance) {
-      try {
-        const result = await searchContextualMedia(
-          slot.narratorText,
-          slot.sectionTitle,
-          project.defaultTone || 'Cinematic',
-          project.channelTheme || '',
-          pexelsUsedIds,
-          video.format || project.defaultFormat
-        );
-        if (result) {
-          videoUrl = result.videoUrl || undefined;
-          imgUrl = result.thumbnailUrl;
-          pexelsId = result.id;
-          origin = 'Pexels';
-        } else {
-          pexelsReason = 'Pexels sem resultados';
-        }
-      } catch (e) {
-        pexelsReason = `Pexels: ${describeError(e)}`;
-        console.warn('[Visuals] Pexels falhou, caindo para IA', e);
-      }
-    }
-
-    if (!imgUrl) {
-      try {
-        await waitForGeminiSlot();
-        geminiCalls++;
-        imgUrl = await generateSceneImage(
-          slot.prompt,
-          project.defaultTone,
-          video.format,
-          undefined,
-          45_000,
-        );
-        origin = 'IA';
-      } catch (e) {
-        iaReason = `IA: ${describeError(e)}`;
-        console.warn('[Visuals] Imagem IA falhou, usando fallback gerado', e);
-        imgUrl = createFallbackVisualDataUrl(
-          slot.prompt, project.defaultTone, video.format,
-          slot.segmentIndex * 100 + slot.slotInSegment,
-        );
-      }
-    }
-
-    const reason = [pexelsReason, iaReason].filter(Boolean).join(' → ') || undefined;
-
-    return {
-      scene: {
-        segmentIndex: slot.segmentIndex,
-        imageUrl: imgUrl,
-        videoUrl,
-        pexelsId,
-        prompt: slot.prompt,
-        effect: ANIMATION_EFFECTS[(slot.segmentIndex + slot.slotInSegment) % ANIMATION_EFFECTS.length],
-        startTime: slot.startTime,
-        duration: slot.duration,
-      },
-      origin,
-      // Pexels succeeding on the first try has nothing to explain.
-      reason: origin === 'Pexels' ? undefined : reason,
-    };
-  };
-
-  const resolveSlotGuarded = async (
-    slot: VisualSlot
-  ): Promise<{ scene: VisualScene; origin: string; reason?: string }> => {
-    const fallback = (): VisualScene => ({
-      segmentIndex: slot.segmentIndex,
-      imageUrl: createFallbackVisualDataUrl(
-        slot.prompt, project.defaultTone, video.format,
-        slot.segmentIndex * 100 + slot.slotInSegment,
-      ),
-      videoUrl: undefined,
-      pexelsId: undefined,
-      prompt: slot.prompt,
-      effect: ANIMATION_EFFECTS[(slot.segmentIndex + slot.slotInSegment) % ANIMATION_EFFECTS.length],
-      startTime: slot.startTime,
-      duration: slot.duration,
-    });
-
-    try {
-      return await Promise.race([
-        resolveSlot(slot),
-        new Promise<{ scene: VisualScene; origin: string; reason?: string }>((_, rej) =>
-          setTimeout(() => rej(new Error('slot_timeout')), SLOT_TIMEOUT_MS)
-        ),
-      ]);
-    } catch (e) {
-      console.warn(`[Visuals] Cena ${slot.index + 1} estourou o tempo limite — usando fallback`, e);
-      return { scene: fallback(), origin: 'fallback', reason: 'tempo limite excedido' };
-    }
-  };
-
-  // ── 3. Bounded-concurrency pool (order preserved by index) ──────────────
-  let cursor = 0;
-  const worker = async () => {
-    while (cursor < total) {
-      const slot = slots[cursor++];
-      const { scene, origin, reason } = await resolveSlotGuarded(slot);
-      resolved[slot.index] = scene;
-      report(origin, reason);
-    }
-  };
-
-  await Promise.all(
-    Array.from({ length: Math.min(VISUALS_CONCURRENCY, Math.max(1, total)) }, worker)
-  );
-
-  const scenes: VisualScene[] = resolved.filter((s): s is VisualScene => !!s);
-  console.log(`[Visuals] ✅ ${scenes.length} cenas (${geminiCalls} chamadas de IA)`);
-
+  console.log(`[Visuals] ✅ ${scenes.length} cenas resolvidas`);
   callbacks.updateVideo(project.id, video.id, { visualScenes: scenes, status: ProjectStatus.VIDEO_GENERATED });
   callbacks.onStepComplete('visuals');
   return scenes;
