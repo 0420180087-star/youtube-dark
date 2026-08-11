@@ -5,15 +5,15 @@ import { useProjects } from '../context/ProjectContext';
 import { useAuth } from '../context/AuthContext';
 import { ProjectStatus, VisualScene, VisualEffect } from '../types';
 import { 
-    generateVideoScript, generateVoiceover, generateSceneImage, 
+    generateVideoScript, generateVoiceover,
     generateDarkAmbience, decodeAudioData, mergeAudioBuffers, 
     audioBufferToBase64, generateThumbnail, generateVideoMetadata,
     generateSingleNarratorText, generateMissingNarratorTexts,
     generateThumbnailHook, clearExhaustedKeys, cancelGeminiSession
 } from '../services/geminiService';
-import { searchContextualMedia } from '../services/pexelsService';
 import { uploadVideoToYouTube } from '../services/youtubeService';
-import { buildSlotVisualPrompt, collectPexelsIds, createFallbackVisualDataUrl, getSegmentVisualPrompts } from '../services/visualSceneService';
+import { buildSlotVisualPrompt, collectPexelsIds, getSegmentVisualPrompts } from '../services/visualSceneService';
+import { resolveVisualSlots, VisualSlotSpec } from '../services/visualsPipeline';
 import {
   ScriptTab, AudioTab, VisualsTab, StudioTab, PublishTab,
 } from './ProjectEditorTabs';
@@ -30,14 +30,6 @@ const steps = [
   { id: 'video', label: 'Visuals', icon: ImageIcon, desc: 'Imagery' },
   { id: 'studio', label: 'Studio', icon: Film, desc: 'Preview' },
   { id: 'publish', label: 'Publish', icon: Upload, desc: 'Upload' },
-];
-
-const ANIMATION_EFFECTS: VisualEffect[] = [
-    'zoom-in', 'zoom-out', 'pan-left', 'pan-right', 
-    'zoom-in-fast', 'crash-zoom', 'ken-burns-extreme',
-    'handheld', 'vertigo', 'pulse-beat',
-    'whip-pan-left', 'whip-pan-right', 'zoom-punch', 'speed-ramp',
-    'hyperlapse', 'slow-motion'
 ];
 
 const YOUTUBE_CATEGORIES = [
@@ -451,17 +443,14 @@ export const ProjectEditor: React.FC = () => {
       const abort = new AbortController();
       visualsGenAbortRef.current = abort;
 
-      setIsGeneratingVisuals(true); 
-      let scenes = (video!.visualScenes && !force) ? [...video!.visualScenes] : []; 
-      
+      setIsGeneratingVisuals(true);
+      const priorScenes = (video!.visualScenes && !force) ? video!.visualScenes : [];
+
       if (force) {
           updateVideo(project!.id, video!.id, { visualScenes: [] });
-          scenes = [];
       }
 
-      const pexelsUsedIds = collectPexelsIds(scenes);
-      let lastImageCallMs = 0; // tracks last image API call timestamp for throttling
-      try { 
+      try {
           const segs = video!.script!.segments; 
           let totDur = 0; 
           
@@ -475,102 +464,67 @@ export const ProjectEditor: React.FC = () => {
           }
           
           const starts = video!.segmentTimestamps || segs.map((_, i) => i * (totDur / segs.length)); 
-          
-          for (let i = 0; i < segs.length; i++) { 
-              const start = starts[i]; 
-              const end = (starts[i + 1] !== undefined) ? starts[i + 1] : totDur; 
-              const totalSegmentDur = Math.max(1, end - start); 
+          const maxMediaDur = Math.max(2, project?.maxMediaDurationSeconds ?? 6);
 
-              setGeneratingIndex(i); 
-              setCurrentSegmentIndex(i); 
-              
-              const s = segs[i]; 
+          // ── Build the full slot plan up front (unchanged timing math) ──────
+          const slots: VisualSlotSpec[] = [];
+          const slotExisting: (VisualScene | null)[] = [];
+
+          for (let i = 0; i < segs.length; i++) {
+              const start = starts[i];
+              const end = (starts[i + 1] !== undefined) ? starts[i + 1] : totDur;
+              const totalSegmentDur = Math.max(1, end - start);
+              const s = segs[i];
               const prompts = getSegmentVisualPrompts(s);
-              
-              const maxMediaDur = Math.max(2, project?.maxMediaDurationSeconds ?? 6);
+
               const slotCount = Math.max(prompts.length, Math.ceil(totalSegmentDur / maxMediaDur));
               const useExactCut = slotCount === Math.ceil(totalSegmentDur / maxMediaDur) && slotCount >= prompts.length;
-              
+
               let currentSceneStart = start;
-
               for (let j = 0; j < slotCount; j++) {
-                  if (abort.signal.aborted) break;
-
                   const basePrompt = prompts[j % prompts.length];
                   const prompt = buildSlotVisualPrompt(s, basePrompt, i, j, slotCount, project?.channelTheme);
                   const remaining = (start + totalSegmentDur) - currentSceneStart;
                   const dur = useExactCut ? Math.min(maxMediaDur, remaining) : totalSegmentDur / slotCount;
 
-                  // Check if we already have this specific scene
-                  const existingScene = scenes.find(sc => sc.segmentIndex === i && Math.abs(sc.startTime - currentSceneStart) < 0.05);
-                  if (existingScene && !force) {
-                      currentSceneStart += dur;
-                      continue;
-                  }
-
-                  // Throttle: wait only what's needed since the last call (min 6s between image API calls)
-                  if (i > 0 || j > 0) {
-                      const MIN_INTERVAL_MS = 6_000;
-                      const since = Date.now() - lastImageCallMs;
-                      if (since < MIN_INTERVAL_MS) await new Promise(r => setTimeout(r, MIN_INTERVAL_MS - since));
-                  }
-                  lastImageCallMs = Date.now();
-                  
-                  let url = '';
-                  let videoUrl = undefined;
-                  let pexelsId: number | undefined;
-
-                  // Try to get a stock video first to save Gemini API quota
-                  const pexelsChance = (project?.visualSourceMix?.pexelsPercentage || 50) / 100;
-
-                  if (Math.random() < pexelsChance) {
-                      const pexelsResult = await searchContextualMedia(
-                        s.narratorText || prompt,
-                        s.sectionTitle || `Section ${i}`,
-                        scriptTone,
-                        project?.channelTheme || '',
-                        pexelsUsedIds,
-                        video!.format || 'Landscape 16:9'
-                      );
-                      if (pexelsResult) {
-                           videoUrl = pexelsResult.videoUrl || undefined;
-                          url = pexelsResult.thumbnailUrl;
-                           pexelsId = pexelsResult.id;
-                      }
-                  }
-
-                  if (!url) {
-                      // Fallback to Gemini Image Generation if no stock video found or chosen
-                      try {
-                          url = await generateSceneImage(prompt, scriptTone, video!.format || 'Landscape 16:9', visualsSessionId.current);
-                      } catch (e) {
-                          console.warn('Gemini image failed, using non-black generated fallback', e);
-                          url = createFallbackVisualDataUrl(prompt, scriptTone, video!.format || 'Landscape 16:9', i * 100 + j);
-                      }
-                  }
-                  
-                  setLastValidImage(url); 
-                  
-                  // Filter out any existing scene for this specific slot to avoid duplicates
-                  scenes = scenes.filter(sc => !(sc.segmentIndex === i && Math.abs(sc.startTime - currentSceneStart) < 0.05));
-
-                  scenes.push({ 
-                      segmentIndex: i, 
-                      imageUrl: url, 
-                      videoUrl: videoUrl,
-                      pexelsId,
-                      videoOffset: videoUrl ? Math.random() * 10 : 0, // Random start point for stock videos
-                      prompt: prompt, 
-                      effect: ANIMATION_EFFECTS[Math.floor(Math.random() * ANIMATION_EFFECTS.length)], 
-                      startTime: currentSceneStart, 
-                      duration: dur 
-                  }); 
-                  
+                  slots.push({
+                      segmentIndex: i, slotInSegment: j, prompt,
+                      narratorText: s.narratorText || basePrompt,
+                      sectionTitle: s.sectionTitle || `Section ${i}`,
+                      startTime: currentSceneStart, duration: dur,
+                  });
+                  slotExisting.push(
+                      priorScenes.find(sc => sc.segmentIndex === i && Math.abs(sc.startTime - currentSceneStart) < 0.05) || null
+                  );
                   currentSceneStart += dur;
-                  scenes.sort((a, b) => a.startTime - b.startTime); 
-                  updateVideo(project!.id, video!.id, { visualScenes: scenes, status: (i === segs.length - 1 && j === slotCount - 1) ? ProjectStatus.VIDEO_GENERATED : ProjectStatus.SCRIPTING }); 
               }
-          } 
+          }
+
+          const pexelsUsedIds = collectPexelsIds(priorScenes);
+          const liveScenes: VisualScene[] = [];
+          let lastSegmentSeen = -1;
+
+          await resolveVisualSlots({
+              project: project!, video: video!, slots, pexelsUsedIds,
+              existingScenes: slotExisting, force,
+              concurrency: 1, geminiThrottleMs: 6_000, geminiSessionId: visualsSessionId.current,
+              signal: abort.signal,
+              onSlotResolved: ({ scene, doneCount, total }) => {
+                  if (scene.segmentIndex !== lastSegmentSeen) {
+                      lastSegmentSeen = scene.segmentIndex;
+                      setGeneratingIndex(scene.segmentIndex);
+                      setCurrentSegmentIndex(scene.segmentIndex);
+                  }
+                  setLastValidImage(scene.imageUrl);
+                  liveScenes.push(scene);
+                  liveScenes.sort((a, b) => a.startTime - b.startTime);
+                  updateVideo(project!.id, video!.id, {
+                      visualScenes: [...liveScenes],
+                      status: doneCount === total ? ProjectStatus.VIDEO_GENERATED : ProjectStatus.SCRIPTING,
+                  });
+              },
+          });
+
           setActiveTab('studio');
       } catch (e: any) { alert(e.message); } finally { setIsGeneratingVisuals(false); setGeneratingIndex(null); } 
   };
@@ -973,65 +927,36 @@ export const ProjectEditor: React.FC = () => {
           const slotCount = Math.max(prompts.length, Math.ceil(totalDuration / maxMediaDur));
           const useExactCut = slotCount === Math.ceil(totalDuration / maxMediaDur) && slotCount >= prompts.length;
 
+          const slots: VisualSlotSpec[] = [];
           let currentStart = startTime;
-
           for (let j = 0; j < slotCount; j++) {
               const basePrompt = prompts[j % prompts.length];
               const prompt = buildSlotVisualPrompt(segment, basePrompt, idx, j, slotCount, project?.channelTheme);
               const remaining = (startTime + totalDuration) - currentStart;
               const dur = useExactCut ? Math.min(maxMediaDur, remaining) : totalDuration / slotCount;
-              
-              if (j > 0) await new Promise(r => setTimeout(r, 6000));
-              
-              let url = '';
-              let videoUrl = undefined;
-              let pexelsId: number | undefined;
-
-              const pexelsChance = (project?.visualSourceMix?.pexelsPercentage || 50) / 100;
-              const singleUsedIds = collectPexelsIds(newScenes);
-
-              if (Math.random() < pexelsChance) {
-                  const pexelsResult = await searchContextualMedia(
-                    segment.narratorText || prompt,
-                    segment.sectionTitle || `Section ${idx}`,
-                    scriptTone,
-                    project?.channelTheme || '',
-                    singleUsedIds,
-                    video!.format || 'Landscape 16:9'
-                  );
-                  if (pexelsResult) {
-                      videoUrl = pexelsResult.videoUrl || undefined;
-                      url = pexelsResult.thumbnailUrl;
-                      pexelsId = pexelsResult.id;
-                  }
-              }
-
-              if (!url) {
-                  try {
-                      url = await generateSceneImage(prompt, scriptTone, video!.format || 'Landscape 16:9', visualsSessionId.current);
-                  } catch (e) {
-                      console.warn('Gemini image failed, using non-black generated fallback', e);
-                      url = createFallbackVisualDataUrl(prompt, scriptTone, video!.format || 'Landscape 16:9', idx * 100 + j);
-                  }
-              }
-              
-              newScenes.push({
-                  segmentIndex: idx,
-                  imageUrl: url,
-                  videoUrl: videoUrl,
-                  pexelsId,
-                  videoOffset: videoUrl ? Math.random() * 10 : 0, // Random start point for stock videos
-                  prompt: prompt,
-                  effect: ANIMATION_EFFECTS[Math.floor(Math.random() * ANIMATION_EFFECTS.length)],
-                  startTime: currentStart,
-                  duration: Math.max(1, dur)
+              slots.push({
+                  segmentIndex: idx, slotInSegment: j, prompt,
+                  narratorText: segment.narratorText || basePrompt,
+                  sectionTitle: segment.sectionTitle || `Section ${idx}`,
+                  startTime: currentStart, duration: Math.max(1, dur),
               });
-              
               currentStart += dur;
-              setLastValidImage(url);
           }
-          
-          newScenes.sort((a, b) => a.startTime - b.startTime);
+
+          const singleUsedIds = collectPexelsIds(newScenes);
+          const resolvedScenes: VisualScene[] = [];
+
+          await resolveVisualSlots({
+              project: project!, video: video!, slots, pexelsUsedIds: singleUsedIds,
+              force: true, // regenerating this scene is always an explicit redo
+              concurrency: 1, geminiThrottleMs: 6_000, geminiSessionId: visualsSessionId.current,
+              onSlotResolved: ({ scene }) => {
+                  resolvedScenes.push(scene);
+                  setLastValidImage(scene.imageUrl);
+              },
+          });
+
+          newScenes = [...newScenes, ...resolvedScenes].sort((a, b) => a.startTime - b.startTime);
           updateVideo(project!.id, video!.id, { visualScenes: newScenes });
       } catch (e: any) {
           console.error(e);
