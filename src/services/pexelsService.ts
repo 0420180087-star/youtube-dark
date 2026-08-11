@@ -373,6 +373,13 @@ export const searchPexelsContextual = async (
 // LOW-LEVEL PEXELS API CALL
 // =============================================
 
+// Small helpers to describe a caught `unknown` error for the console logs
+// below, without resorting to `any`.
+const getErrorMessage = (e: unknown): string =>
+  e instanceof Error ? e.message : (typeof e === 'string' ? e : String(e ?? 'erro desconhecido'));
+const isAbortError = (e: unknown): boolean =>
+  typeof e === 'object' && e !== null && (e as { name?: string }).name === 'AbortError';
+
 // Aborts a fetch that hangs — prevents the visuals step from stalling forever.
 const fetchWithTimeout = async (url: string, init: RequestInit, timeoutMs = 12_000): Promise<Response> => {
   const controller = new AbortController();
@@ -399,7 +406,12 @@ const executePexelsSearch = async (
 
 
     if (!response.ok) {
-      console.warn(`[Pexels] API returned ${response.status} for "${query}"`);
+      const label = response.status === 429
+        ? 'rate limited (429) — cota da API estourada'
+        : response.status === 401 || response.status === 403
+        ? `auth falhou (${response.status}) — checar a API key`
+        : `HTTP ${response.status}`;
+      console.warn(`[Pexels] ${label} para "${query}"`);
       // Try photos fallback on hard errors
       return await executePexelsPhotoSearch(apiKey, query, orientation, minWidth, usedIds);
     }
@@ -433,8 +445,9 @@ const executePexelsSearch = async (
     }
 
     return results;
-  } catch (err) {
-    console.error(`[Pexels] Search failed for "${query}":`, err);
+  } catch (err: unknown) {
+    const label = isAbortError(err) ? 'timeout (12s)' : getErrorMessage(err);
+    console.error(`[Pexels] Busca falhou para "${query}": ${label}`);
     try {
       return await executePexelsPhotoSearch(apiKey, query, orientation, minWidth, usedIds);
     } catch {
@@ -459,7 +472,11 @@ const executePexelsPhotoSearch = async (
       { headers: { Authorization: apiKey } }
     );
 
-    if (!response.ok) return [];
+    if (!response.ok) {
+      const label = response.status === 429 ? 'rate limited (429)' : `HTTP ${response.status}`;
+      console.warn(`[Pexels] Fallback de fotos também falhou (${label}) para "${query}"`);
+      return [];
+    }
     const data = await response.json();
     const results: PexelsMedia[] = [];
     for (const photo of (data.photos || [])) {
@@ -474,8 +491,9 @@ const executePexelsPhotoSearch = async (
       });
     }
     return results;
-  } catch (err) {
-    console.warn(`[Pexels] Photo fallback failed for "${query}":`, err);
+  } catch (err: unknown) {
+    const label = isAbortError(err) ? 'timeout (12s)' : getErrorMessage(err);
+    console.warn(`[Pexels] Fallback de fotos falhou para "${query}": ${label}`);
     return [];
   }
 };
