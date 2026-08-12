@@ -30,7 +30,16 @@ jobs:
           cache: 'npm'
 
       - name: Instalar FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        run: |
+          # A imagem ubuntu-latest já vem com repositórios da Microsoft
+          # (azure-cli, dotnet) que não usamos aqui. Quando eles respondem
+          # 403 (aconteceu em 12/08), o "apt-get update" falha por inteiro
+          # mesmo os repositórios do Ubuntu tendo baixado certinho — e o
+          # ffmpeg nunca chega a ser instalado. Removendo-os antes evita
+          # que uma instabilidade da Microsoft derrube esse passo.
+          sudo grep -rl "packages.microsoft.com" /etc/apt/sources.list.d/ 2>/dev/null | xargs -r sudo rm -f
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
 
       - name: Verificar FFmpeg
         run: ffmpeg -version
