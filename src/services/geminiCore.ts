@@ -18,9 +18,18 @@ export const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
 // KEY LOADER — Collects all API keys from storage + env
 // =============================================
 
-const loadAllKeys = async (): Promise<string[]> => {
-    const raw: string[] = [];
+// Non-browser callers (the Node automation runner, where localStorage
+// doesn't exist) call this once instead of relying on browser storage.
+// Left null, behavior is 100% unchanged from before this existed.
+let injectedGeminiKeys: string[] | null = null;
+export function setInjectedGeminiKeys(keys: string[]): void {
+  injectedGeminiKeys = keys.filter(Boolean);
+}
 
+const loadAllKeys = async (): Promise<string[]> => {
+    const raw: string[] = [...(injectedGeminiKeys || [])];
+
+    if (!injectedGeminiKeys) {
     // 1. Identify user email for user-scoped keys
     let email = '';
     try {
@@ -56,6 +65,7 @@ const loadAllKeys = async (): Promise<string[]> => {
         if (e1 && typeof e1 === 'string') raw.push(e1);
         if (e2 && typeof e2 === 'string') raw.push(e2);
     } catch {}
+    }
 
     // 4. Deduplicate & validate
     const valid = [...new Set(raw.map(k => k.trim()))]
@@ -1223,5 +1233,3 @@ export const generateVoiceover = async (
 
     throw lastErr || new Error('Audio generation failed after retries');
 };
-
-
