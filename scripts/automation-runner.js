@@ -19,6 +19,15 @@ import { spawn } from 'child_process';
 import { renderVideo, cleanupTmp } from './videoRenderer.js';
 import { refreshAccessToken, uploadVideoFile, uploadThumbnail } from './youtubeUploader.js';
 
+// Shared visuals-resolution engine (Fase 2: unificação com o app). Same
+// Pexels→Gemini logic, reuse-on-resume, and no-placeholder guarantee as the
+// browser. Requires running this script with `tsx` (see package.json /
+// auto-post.yml) since these are .ts files — plain `node` can't resolve them.
+import { resolveVisualSlots } from '../src/services/visualsPipeline.ts';
+import { setInjectedPexelsKey } from '../src/services/pexelsService.ts';
+import { setInjectedGeminiKeys } from '../src/services/geminiCore.ts';
+import { buildSlotVisualPrompt, collectPexelsIds, getSegmentVisualPrompts } from '../src/services/visualSceneService.ts';
+
 // --- ENV ---
 const {
   SUPABASE_URL,
@@ -751,39 +760,6 @@ async function geminiTTS(text, voiceName = 'Fenrir', tone = 'Cinematic') {
   };
 }
 
-async function searchPexels(query, usedIds, isVideo = true) {
-  if (!PEXELS_API_KEY) return null;
-  const endpoint = isVideo
-    ? `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&per_page=15&orientation=landscape`
-    : `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=15&orientation=landscape`;
-
-  try {
-    const res = await axios.get(endpoint, {
-      headers: { Authorization: PEXELS_API_KEY },
-      timeout: 12_000,
-    });
-
-
-    const items = isVideo ? res.data.videos : res.data.photos;
-    if (!items?.length) return null;
-
-    const unused = items.filter((i) => !usedIds.has(i.id));
-    if (!unused.length) return null;
-
-    const pick = unused[Math.floor(Math.random() * Math.min(unused.length, 5))];
-    usedIds.add(pick.id);
-
-    if (isVideo) {
-      const file = pick.video_files?.find((f) => f.quality === 'hd') || pick.video_files?.[0];
-      return { id: pick.id, videoUrl: file?.link, thumbnailUrl: pick.image };
-    }
-    return { id: pick.id, imageUrl: pick.src?.large || pick.src?.original };
-  } catch (e) {
-    log('⚠️', `Pexels search failed for "${query}": ${e.message}`);
-    return null;
-  }
-}
-
 // --- TONE MODIFIERS ---
 
 const TONE_MODIFIERS = {
@@ -801,70 +777,6 @@ const TONE_MODIFIERS = {
   'Professional Business': 'corporate meeting city',
   'Urban Legend Storyteller': 'forest mystery night',
 };
-
-const SLOT_VARIATIONS = [
-  'wide establishing shot', 'close detail shot', 'dynamic movement shot',
-  'symbolic cinematic insert', 'dramatic atmosphere shot', 'human perspective shot',
-  'environment texture shot', 'high-energy transition shot'
-];
-
-function getSegmentVisualPrompts(segment) {
-  const explicit = (segment.visualDescriptions || []).map(p => String(p || '').trim()).filter(Boolean);
-  if (explicit.length) return explicit;
-  const title = String(segment.sectionTitle || '').trim();
-  const sentences = String(segment.narratorText || '')
-    .replace(/\s+/g, ' ')
-    .split(/(?<=[.!?])\s+/)
-    .map(s => s.replace(/["“”]/g, '').trim())
-    .filter(s => s.length > 20)
-    .slice(0, 4);
-  if (sentences.length) return sentences.map((s, idx) => `${title || 'Narrative beat'} — ${s.slice(0, 180)} — cinematic b-roll ${idx + 1}`);
-  return [title || 'cinematic atmosphere for this narrative moment'];
-}
-
-function buildSlotVisualPrompt(segment, basePrompt, segmentIndex, slotIndex, totalSlots, channelTheme) {
-  const variation = SLOT_VARIATIONS[(segmentIndex + slotIndex) % SLOT_VARIATIONS.length];
-  const context = String(segment.narratorText || '').replace(/\s+/g, ' ').trim().slice(0, 220);
-  return [
-    String(basePrompt || segment.sectionTitle || 'cinematic scene').trim(),
-    `topic: ${channelTheme || 'general'}`,
-    context ? `story context: ${context}` : '',
-    `visual variation ${slotIndex + 1} of ${totalSlots}: ${variation}`,
-    'must be visually distinct from previous shots',
-  ].filter(Boolean).join('. ');
-}
-
-const FALLBACK_PALETTES = [
-  ['#101826', '#0f766e'], ['#172033', '#b45309'], ['#111827', '#be123c'], ['#0f172a', '#2563eb'],
-  ['#1c1917', '#f97316'], ['#0b2b26', '#22c55e'], ['#2e1065', '#a855f7'], ['#1e1b4b', '#38bdf8'],
-  ['#450a0a', '#fb7185'], ['#152238', '#facc15'],
-];
-
-function createFallbackVisualDataUrl(prompt, seed = 0) {
-  const W = 1920, H = 1080;
-  const s = Math.abs(Math.trunc(Number(seed) || 0));
-  const [bg, accent] = FALLBACK_PALETTES[s % FALLBACK_PALETTES.length];
-  const layout = Math.floor(s / 10) % 4;
-  const label = String(prompt || 'cinematic scene').replace(/[<>&]/g, '').slice(0, 110);
-
-  const glow = [{ cx: '68%', cy: '34%' }, { cx: '24%', cy: '28%' }, { cx: '50%', cy: '72%' }, { cx: '82%', cy: '66%' }][layout];
-  const curve = [
-    'M0 778 C 538 626, 998 929, 1920 691 L 1920 1080 L 0 1080 Z',
-    'M0 670 C 653 950, 1267 562, 1920 842 L 1920 1080 L 0 1080 Z',
-    'M0 907 L 883 626, 1920 972 L 1920 1080 L 0 1080 Z',
-    'M0 1080 L 0 540 C 768 756, 1152 454, 1920 734 L 1920 1080 Z',
-  ][layout];
-  const circle = [
-    { cx: 346, cy: 238, r: 151 }, { cx: 1574, cy: 216, r: 194 },
-    { cx: 960, cy: 324, r: 119 }, { cx: 538, cy: 713, r: 238 },
-  ][layout];
-  const anchor = (layout === 1 || layout === 3) ? 'end' : 'start';
-  const tx = anchor === 'end' ? 1766 : 154;
-  const ty = layout === 2 ? 216 : 907;
-
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><defs><linearGradient id="g" x1="${layout % 2}" y1="0" x2="${1 - (layout % 2)}" y2="1"><stop offset="0" stop-color="${bg}"/><stop offset="1" stop-color="#020617"/></linearGradient><radialGradient id="r" cx="${glow.cx}" cy="${glow.cy}" r="55%"><stop offset="0" stop-color="${accent}" stop-opacity="0.55"/><stop offset="1" stop-color="${accent}" stop-opacity="0"/></radialGradient></defs><rect width="100%" height="100%" fill="url(#g)"/><rect width="100%" height="100%" fill="url(#r)"/><path d="${curve}" fill="${accent}" opacity="0.28"/><circle cx="${circle.cx}" cy="${circle.cy}" r="${circle.r}" fill="#f8fafc" opacity="0.08"/><text x="${tx}" y="${ty}" text-anchor="${anchor}" fill="#f8fafc" font-family="Arial,sans-serif" font-size="66" font-weight="700" opacity="0.82">${label}</text></svg>`;
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
-}
 
 function getToneModifier(tone) {
   return TONE_MODIFIERS[tone] || 'cinematic atmospheric';
@@ -1030,16 +942,23 @@ const VISUAL_CONCURRENCY = 3;
 // compartilhado por TODAS as chamadas de rede do runner).
 
 
-async function stepVisuals(script, projectData) {
+async function stepVisuals(script, projectData, existingScenes) {
   log('🎨', 'Step 4: Searching visuals...');
-  const usedIds = new Set();
-  const toneModifier = getToneModifier(projectData.defaultTone);
+
+  // Node has no localStorage — inject the keys loadUserKeys() already
+  // resolved for this project's user before calling into the shared
+  // (browser-authored) resolution engine.
+  setInjectedPexelsKey(PEXELS_API_KEY || null);
+  setInjectedGeminiKeys(GEMINI_API_KEYS);
 
   // Keep each media on screen at most this many seconds — configurable per-project
   const MAX_MEDIA_DUR = Math.max(2, Number(projectData.maxMediaDurationSeconds) || 6);
 
-  // 1. Plan all slots up front (capped so long segments can't explode).
+  // 1. Plan all slots up front (capped so long segments can't explode) —
+  // same shape/caps as before, now also tracking startTime/narratorText/
+  // sectionTitle, which the shared resolver uses for richer Pexels queries.
   const slots = [];
+  let cursorTime = 0;
   for (let i = 0; i < script.segments.length; i++) {
     const seg = script.segments[i];
     const prompts = getSegmentVisualPrompts(seg);
@@ -1052,87 +971,48 @@ async function stepVisuals(script, projectData) {
       if (slots.length >= VISUAL_MAX_SLOTS_TOTAL) break;
       const basePrompt = prompts[j % prompts.length];
       slots.push({
-        index: slots.length,
         segmentIndex: i,
         slotInSegment: j,
         duration: slotDur,
+        startTime: cursorTime,
+        narratorText: seg.narratorText || basePrompt,
+        sectionTitle: seg.sectionTitle || `Section ${i}`,
         prompt: buildSlotVisualPrompt(seg, basePrompt, i, j, slotCount, projectData.channelTheme),
       });
+      cursorTime += slotDur;
     }
   }
 
   const total = slots.length;
-  const resolved = new Array(total).fill(null);
-  let done = 0;
-
-  const resolveSlot = async (slot) => {
-    const { prompt, segmentIndex: i, slotInSegment: j } = slot;
-    const query = `${prompt} ${toneModifier}`.split(' ').slice(0, 4).join(' ');
-
-    let result = await searchPexels(query, usedIds);
-    if (!result) result = await searchPexels(prompt.split(' ').slice(0, 3).join(' '), usedIds);
-    if (!result) result = await searchPexels(projectData.channelTheme || 'cinematic', usedIds);
-    if (!result) {
-      result = await searchPexels(query, usedIds, false)
-        || await searchPexels(projectData.channelTheme || 'cinematic', usedIds, false);
-    }
-
-    let generatedImageUrl = null;
-    if (!result?.imageUrl && !result?.thumbnailUrl) {
-      try {
-        const b64 = await raceTimeout(
-          geminiGenerateImage(`${prompt}. Cinematic video scene, no text, no watermark, 16:9.`),
-          45_000,
-          'scene_image',
-        );
-        if (b64) generatedImageUrl = `data:image/jpeg;base64,${b64}`;
-      } catch (e) {
-        log('⚠️', `  AI image failed (${e.message}) — using generated fallback`);
-      }
-    }
-
-    return {
-      segmentIndex: i,
-      prompt,
-      duration: slot.duration,
-      videoUrl: result?.videoUrl,
-      imageUrl: result?.imageUrl || result?.thumbnailUrl || generatedImageUrl
-        || createFallbackVisualDataUrl(prompt, i * 100 + j),
-      effect: ['zoom-in', 'zoom-out', 'pan-left', 'pan-right', 'zoom-in-fast'][(i + j) % 5],
-    };
+  const pexelsUsedIds = collectPexelsIds(existingScenes || []);
+  const project = {
+    visualSourceMix: projectData.visualSourceMix,
+    defaultTone: projectData.defaultTone,
+    channelTheme: projectData.channelTheme,
+    defaultFormat: projectData.defaultFormat,
   };
+  const video = { format: projectData.defaultFormat || 'Landscape 16:9' };
 
-  const resolveSlotGuarded = async (slot) => {
-    try {
-      return await raceTimeout(resolveSlot(slot), VISUAL_SLOT_TIMEOUT_MS, 'slot');
-    } catch (e) {
-      log('⚠️', `  Scene ${slot.index + 1} timed out (${e.message}) — fallback visual`);
-      return {
-        segmentIndex: slot.segmentIndex,
-        prompt: slot.prompt,
-        duration: slot.duration,
-        videoUrl: undefined,
-        imageUrl: createFallbackVisualDataUrl(slot.prompt, slot.segmentIndex * 100 + slot.slotInSegment),
-        effect: ['zoom-in', 'zoom-out', 'pan-left', 'pan-right', 'zoom-in-fast'][(slot.segmentIndex + slot.slotInSegment) % 5],
-      };
-    }
-  };
+  // 2. Resolve every slot through the shared engine: Pexels → Gemini, with
+  // throttling, reuse of `existingScenes` where still valid, and no
+  // placeholder in the output unless Pexels+Gemini are both down for the
+  // entire video (see visualsPipeline.ts).
+  const scenes = await resolveVisualSlots({
+    project,
+    video,
+    slots,
+    pexelsUsedIds,
+    existingScenes: existingScenes && existingScenes.length === total ? existingScenes : undefined,
+    force: false,
+    concurrency: VISUAL_CONCURRENCY,
+    slotTimeoutMs: VISUAL_SLOT_TIMEOUT_MS,
+    geminiThrottleMs: 6_000,
+    onSlotResolved: ({ origin, reason, doneCount, total: t }) => {
+      const suffix = reason ? ` — ${reason}` : '';
+      log('🔍', `  Scene ${doneCount}/${t} ready (${origin}${suffix})`);
+    },
+  });
 
-  // 2. Bounded-concurrency pool, order preserved by index.
-  let cursor = 0;
-  const worker = async () => {
-    while (cursor < total) {
-      const slot = slots[cursor++];
-      resolved[slot.index] = await resolveSlotGuarded(slot);
-      done++;
-      log('🔍', `  Scene ${done}/${total} ready`);
-    }
-  };
-  await Promise.all(
-    Array.from({ length: Math.min(VISUAL_CONCURRENCY, Math.max(1, total)) }, worker)
-  );
-
-  const scenes = resolved.filter(Boolean);
   log('✅', `Found ${scenes.length} visual scenes (max ${MAX_MEDIA_DUR}s per media)`);
   return scenes;
 }
@@ -1464,18 +1344,6 @@ function findRetryableVideo(data, now = Date.now(), youtubeReady = false) {
 }
 
 
-// Artifacts persisted in Supabase are usable on resume; placeholders are not.
-function isUsableUrl(url) {
-  return typeof url === 'string' && /^https?:\/\//.test(url);
-}
-
-function reusableScenes(video) {
-  const scenes = video?.visualScenes;
-  if (!Array.isArray(scenes) || scenes.length === 0) return null;
-  const allUsable = scenes.every((s) => isUsableUrl(s?.videoUrl) || isUsableUrl(s?.imageUrl));
-  return allUsable ? scenes : null;
-}
-
 // --- YOUTUBE TOKEN HEALTH ---
 // Checked BEFORE generating anything, so we never burn 10 minutes of compute
 // only to discover the channel is disconnected.
@@ -1706,15 +1574,13 @@ async function processProject(projectRow) {
     const audioMimeType = voiceResult.mimeType;
     await updateRunnerVideo(projectId, data, videoId, { audioUrl: '__runner_audio__', status: 'AUDIO_GENERATED' }, 'Voice state saved');
 
-    // Step 4: Visuals — reused on resume when the persisted URLs are real
+    // Step 4: Visuals — existing scenes from a resumed video are reused
+    // per-slot by the shared engine wherever still valid (finer-grained
+    // than before: a video that had 18/20 good scenes only redoes the 2
+    // that failed, instead of all-or-nothing).
     currentStep = 'visuals';
-    let scenes = isResume ? reusableScenes(resumeVideo) : null;
-    if (scenes) {
-      log('♻️', `Visuais reaproveitados (${scenes.length} cenas)`);
-    } else {
-      await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Buscando/gerando visuais', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
-      scenes = await stepVisuals(script, data);
-    }
+    await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Buscando/gerando visuais', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
+    const scenes = await stepVisuals(script, data, isResume ? resumeVideo?.visualScenes : undefined);
     await updateRunnerVideo(projectId, data, videoId, { visualScenes: scenes, status: 'VIDEO_GENERATED' }, 'Visuals saved');
 
     // Step 5: Thumbnail (optional — does not break pipeline)
@@ -2025,4 +1891,3 @@ main().catch(async (err) => {
   await writeHeartbeat(`erro fatal: ${err.message}`);
   process.exit(1);
 });
-
