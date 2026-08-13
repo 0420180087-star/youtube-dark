@@ -89,7 +89,9 @@ jobs:
           cache: 'npm'
 
       - name: Instalar dependências
-        run: npm ci
+        # npm ci exige lockfile sincronizado; npm install tolera a divergência
+        # (tsx foi adicionado como devDependency na Fase 2 do runner headless).
+        run: npm install
 
       - name: Build
         env:
