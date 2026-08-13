@@ -148,7 +148,16 @@ const EMOTION_VISUAL_MAP: Record<string, string[]> = {
 // PEXELS KEY LOADER
 // =============================================
 
+// Non-browser callers (the Node automation runner, where localStorage
+// doesn't exist) call this once instead of relying on browser storage.
+// Left null, behavior is 100% unchanged from before this existed.
+let injectedPexelsKey: string | null = null;
+export function setInjectedPexelsKey(key: string | null): void {
+  injectedPexelsKey = key;
+}
+
 export const getPexelsKey = async (): Promise<string | null> => {
+  if (injectedPexelsKey !== null) return injectedPexelsKey;
   const stored = localStorage.getItem('ds_pexels_api_key');
   if (stored) {
     try { return await decryptData(stored); } catch {}
