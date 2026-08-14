@@ -487,7 +487,9 @@ export const generateSceneImage = async (
         const fullPrompt = `Create a visually stunning image of: ${prompt}. STYLE: ${toneInstruction}, 8k resolution, professional film still, aspect ratio ${aspectRatio}.`;
 
         let lastErr: any = null;
-        const sceneModels = ['gemini-2.0-flash-exp', 'gemini-2.0-flash'];
+        // Same models as renderImageFromPrompt above — gemini-2.0-flash and
+        // -flash-exp don't return image data at all (see IMAGE_MODELS comment).
+        const sceneModels = IMAGE_MODELS;
         // Split the budget across the candidate models so one hang can't eat it all.
         const perModelTimeout = Math.max(15_000, Math.floor(timeoutMs / sceneModels.length));
 
