@@ -500,7 +500,7 @@ function raceTimeout(promise, ms, label) {
 async function geminiGenerate(prompt, maxTokens = 4096) {
   const res = await raceTimeout(
     axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
       {
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: { maxOutputTokens: maxTokens, temperature: 0.9 },
