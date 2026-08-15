@@ -497,7 +497,10 @@ function raceTimeout(promise, ms, label) {
   ]).finally(() => clearTimeout(timer));
 }
 
+let geminiRequestCount = 0;
+
 async function geminiGenerate(prompt, maxTokens = 4096) {
+  geminiRequestCount++;
   const res = await raceTimeout(
     axios.post(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
@@ -588,6 +591,7 @@ async function geminiGenerateImage(prompt) {
   ];
 
   const callModel = async ({ model, kind }) => {
+    geminiRequestCount++;
     if (kind === 'imagen') {
       const res = await raceTimeout(
         axios.post(
@@ -1424,6 +1428,38 @@ async function checkYoutubeTokenHealth(projectId, userEmail) {
   }
 }
 
+/**
+ * Checks whether we already KNOW (from a persisted event, possibly written
+ * by a PREVIOUS, separate process) that this user's Gemini key was rate
+ * limited very recently. The in-memory `keyCooldowns` map only lives for the
+ * duration of a single process — each GitHub Actions run starts a fresh
+ * Node process, so without this check a run has no memory of a 429 that
+ * happened 2 minutes ago in the *previous* run, and burns another request
+ * just to rediscover the same rate limit. This is the cross-run memory.
+ */
+async function recentQuotaExhaustion(userEmail) {
+  if (!SCHEMA.automation_quota_events || !userEmail) return null;
+  try {
+    const { data, error } = await supabase
+      .from('automation_quota_events')
+      .select('created_at, reason, cooldown_ms')
+      .eq('user_email', userEmail)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (error || !data?.length) return null;
+
+    const last = data[0];
+    const elapsedMs = Date.now() - new Date(last.created_at).getTime();
+    // Respects the cooldown computed for that event, capped to a sane range:
+    // long enough to actually avoid re-hammering a per-minute limit, short
+    // enough that a transient blip doesn't stall the project for hours.
+    const windowMs = Math.min(Math.max(last.cooldown_ms || 65_000, 60_000), 30 * 60 * 1000);
+    return elapsedMs < windowMs ? { ...last, remainingMs: windowMs - elapsedMs } : null;
+  } catch {
+    return null;
+  }
+}
+
 async function processProject(projectRow) {
   const projectId = projectRow.id;
   const data = projectRow.data || {};
@@ -1468,8 +1504,27 @@ async function processProject(projectRow) {
     return false;
   }
 
+  // Cross-run circuit breaker (see recentQuotaExhaustion) — a persisted
+  // 429/quota event from moments ago (even from a *previous*, already-
+  // finished process) means this key almost certainly still has no
+  // headroom; skip this project now rather than pay for rediscovering that.
+  const recentExhaustion = await recentQuotaExhaustion(CURRENT_USER_EMAIL);
+  if (recentExhaustion) {
+    const secondsAgo = Math.round((Date.now() - new Date(recentExhaustion.created_at).getTime()) / 1000);
+    const waitMin = Math.ceil(recentExhaustion.remainingMs / 60_000);
+    log('🧊', `Pulando "${data.channelTheme}" — cota Gemini reportada esgotada há ${secondsAgo}s (${recentExhaustion.reason}). Evitando bater na mesma chave de novo; próxima janela em ~${waitMin} min.`);
+    await safeInsertAutopilotLog({
+      project_id: projectId,
+      status: 'retrying',
+      message: `Pulado nesta execução: cota Gemini esgotada recentemente (${recentExhaustion.reason}) — evitando nova tentativa imediata`,
+      step: 'idea',
+      runner: 'github-actions',
+    });
+    await releaseLock(projectId);
+    return false;
+  }
 
-  // Ensure projectId is accessible inside data for token lookup
+
   data.id = projectId;
 
   // Proactive YouTube check — decides upfront whether this run can publish and
@@ -1883,6 +1938,7 @@ async function main() {
   }
 
   await writeHeartbeat(`ciclo concluído: ${successCount} ok, ${errorCount} falha(s), ${eligible.length} elegível(is)`);
+  log('📊', `Chamadas ao Gemini nesta execução: ${geminiRequestCount}`);
   log('🏁', `=== Done! ✅ ${successCount} success, ❌ ${errorCount} errors ===`);
 }
 
