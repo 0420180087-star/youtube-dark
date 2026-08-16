@@ -937,8 +937,12 @@ async function stepVoice(script, projectData) {
   }
 }
 
-const VISUAL_MAX_SLOTS_PER_SEGMENT = 8;
-const VISUAL_MAX_SLOTS_TOTAL = 60;
+// Safety net only (not a normal operating limit) — protects against a
+// corrupted/pathological duration value, not against legitimate long-form
+// videos. A 25-min "Deep Dive" at a 4s pace needs ~375 slots; this leaves
+// comfortable headroom above that so Long/Deep-Dive videos are never
+// silently truncated.
+const VISUAL_MAX_SLOTS_TOTAL = 500;
 const VISUAL_SLOT_TIMEOUT_MS = 90_000;
 const VISUAL_CONCURRENCY = 3;
 
@@ -955,20 +959,25 @@ async function stepVisuals(script, projectData, existingScenes) {
   setInjectedPexelsKey(PEXELS_API_KEY || null);
   setInjectedGeminiKeys(GEMINI_API_KEYS);
 
-  // Keep each media on screen at most this many seconds — configurable per-project
+  // Keep each media on screen at most this many seconds — configurable per-project.
+  // This is the authoritative limit; slot count is derived from it below,
+  // never the other way around.
   const MAX_MEDIA_DUR = Math.max(2, Number(projectData.maxMediaDurationSeconds) || 6);
 
-  // 1. Plan all slots up front (capped so long segments can't explode) —
-  // same shape/caps as before, now also tracking startTime/narratorText/
-  // sectionTitle, which the shared resolver uses for richer Pexels queries.
+  // 1. Plan all slots up front — same shape as before, now also tracking
+  // startTime/narratorText/sectionTitle, which the shared resolver uses for
+  // richer Pexels queries.
   const slots = [];
   let cursorTime = 0;
   for (let i = 0; i < script.segments.length; i++) {
     const seg = script.segments[i];
     const prompts = getSegmentVisualPrompts(seg);
     const segDur = Math.max(2, Number(seg.estimatedDuration) || 5);
-    const desired = Math.max(prompts.length, Math.ceil(segDur / MAX_MEDIA_DUR));
-    const slotCount = Math.max(1, Math.min(desired, VISUAL_MAX_SLOTS_PER_SEGMENT));
+    // No per-segment cap: however many slots it takes to keep every slot at
+    // or under MAX_MEDIA_DUR is how many it gets. A previous fixed cap of 8
+    // silently let a long segment's slots run longer than configured —
+    // exactly the "images stay static too long" bug.
+    const slotCount = Math.max(1, prompts.length, Math.ceil(segDur / MAX_MEDIA_DUR));
     const slotDur = segDur / slotCount;
 
     for (let j = 0; j < slotCount; j++) {
