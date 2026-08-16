@@ -96,16 +96,20 @@ function getVideoDuration(filePath) {
 // ─── Convert image to video clip with Ken Burns effect ────────────────────────
 function imageToVideoClip(imagePath, outputPath, duration, effect = 'zoom-in') {
   return new Promise((resolve, reject) => {
-    // Ken Burns zoom/pan filters
+    // Ken Burns zoom/pan filters. fps=30 makes zoompan generate frames at
+    // exactly the output rate (see -r 30 below) — without it, zoompan
+    // defaults to an internal 25fps and FFmpeg has to convert 25→30fps for
+    // the final encode, which duplicates frames unevenly and reads as
+    // judder in the zoom/pan motion.
     const filters = {
-      'zoom-in':      "scale=8000:-2,zoompan=z='min(zoom+0.0015,1.5)':d=FRAMES:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080,scale=1920:1080",
-      'zoom-out':     "scale=8000:-2,zoompan=z='if(lte(zoom,1.0),1.5,max(1.001,zoom-0.0015))':d=FRAMES:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080,scale=1920:1080",
-      'pan-right':    "scale=8000:-2,zoompan=z=1.3:x='min(x+1,iw-iw/zoom)':y='ih/2-(ih/zoom/2)':d=FRAMES:s=1920x1080,scale=1920:1080",
-      'pan-left':     "scale=8000:-2,zoompan=z=1.3:x='max(x-1,0)':y='ih/2-(ih/zoom/2)':d=FRAMES:s=1920x1080,scale=1920:1080",
-      'zoom-in-fast': "scale=8000:-2,zoompan=z='min(zoom+0.003,1.8)':d=FRAMES:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080,scale=1920:1080",
+      'zoom-in':      "scale=8000:-2,zoompan=z='min(zoom+0.0015,1.5)':d=FRAMES:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080:fps=30,scale=1920:1080",
+      'zoom-out':     "scale=8000:-2,zoompan=z='if(lte(zoom,1.0),1.5,max(1.001,zoom-0.0015))':d=FRAMES:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080:fps=30,scale=1920:1080",
+      'pan-right':    "scale=8000:-2,zoompan=z=1.3:x='min(x+1,iw-iw/zoom)':y='ih/2-(ih/zoom/2)':d=FRAMES:s=1920x1080:fps=30,scale=1920:1080",
+      'pan-left':     "scale=8000:-2,zoompan=z=1.3:x='max(x-1,0)':y='ih/2-(ih/zoom/2)':d=FRAMES:s=1920x1080:fps=30,scale=1920:1080",
+      'zoom-in-fast': "scale=8000:-2,zoompan=z='min(zoom+0.003,1.8)':d=FRAMES:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080:fps=30,scale=1920:1080",
     };
 
-    const frames = Math.ceil(duration * 25); // 25fps for zoompan
+    const frames = Math.ceil(duration * 30); // matches fps=30 above and -r 30 below — no implicit rate conversion
     const filterStr = (filters[effect] || filters['zoom-in']).replace(/FRAMES/g, frames);
 
     ffmpeg()
@@ -291,33 +295,54 @@ function mixAudio(videoPath, voicePath, musicPath, outputPath) {
 export async function renderVideo({ visuals, segments, audioBase64, audioMimeType = 'audio/pcm', musicUrl, thumbnailBase64, tmpDir }) {
   fs.mkdirSync(tmpDir, { recursive: true });
 
-  const processedClips = [];
+  // { index, path } for every scene that ended up with SOME real content
+  // (its own, or borrowed from a neighbor). Sorted back into order at the end.
+  const resolvedClips = [];
+  const pendingIndexes = []; // failed with no earlier clip to borrow from yet
+
+  const clipDuration = (i) => {
+    const visual = visuals[i];
+    const segment = segments[i] || segments[segments.length - 1] || {};
+    return Math.max(2, Number(visual?.duration) || Number(segment?.estimatedDuration) || 5);
+  };
+
+  const borrowNeighbor = (i, outPath) => {
+    if (resolvedClips.length === 0) return false;
+    const donor = resolvedClips[resolvedClips.length - 1];
+    try {
+      fs.copyFileSync(donor.path, outPath);
+      resolvedClips.push({ index: i, path: outPath });
+      console.log(`    ♻️ Reaproveitando clipe ${donor.index + 1} para a cena ${i + 1}`);
+      return true;
+    } catch (copyErr) {
+      console.warn(`  ⚠️ Falha ao reaproveitar clipe pra cena ${i + 1}: ${copyErr.message}`);
+      return false;
+    }
+  };
 
   for (let i = 0; i < visuals.length; i++) {
     const visual = visuals[i];
-    const segment = segments[i] || segments[segments.length - 1] || {};
-    const duration = Math.max(2, Number(visual.duration) || Number(segment.estimatedDuration) || 5);
+    const duration = clipDuration(i);
+    const outPath = path.join(tmpDir, `clip_${i}.mp4`);
 
     if (!visual?.url) {
-      console.warn(`  ⚠️ Clipe ${i + 1}: sem URL, pulando`);
+      console.warn(`  ⚠️ Clipe ${i + 1}: sem URL — tentando reaproveitar clipe adjacente`);
+      if (!borrowNeighbor(i, outPath)) pendingIndexes.push(i);
       continue;
     }
 
     console.log(`  🎬 Processando clipe ${i + 1}/${visuals.length} — ${duration.toFixed(1)}s...`);
 
     const rawPath = path.join(tmpDir, `raw_${i}`);
-    const outPath = path.join(tmpDir, `clip_${i}.mp4`);
-
     const isSvg = /^data:image\/svg/i.test(visual.url) || extensionForUrl(visual.url, '') === '.svg';
 
     try {
       if (isSvg) {
-        // FFmpeg normalmente é compilado sem librsvg — SVG não decodifica.
-        // Gera um clipe animado equivalente direto no FFmpeg, variando por índice.
-        console.log('    🎨 Fallback SVG detectado — gerando clipe de gradiente animado');
-        await makePlaceholderClip(outPath, duration, i);
-        processedClips.push(outPath);
-        continue;
+        // A resolveVisualSlots-generated SVG data URL can only reach here in
+        // the total-outage last-resort case (see visualsPipeline.ts) — the
+        // scene it belongs to has no real donor of its own either. Treat it
+        // the same as any other failure: borrow a neighbor if one exists.
+        throw new Error('SVG placeholder do resolvedor — sem conteúdo real para baixar');
       }
 
       // Download the file (video or image)
@@ -339,16 +364,45 @@ export async function renderVideo({ visuals, segments, audioBase64, audioMimeTyp
         await imageToVideoClip(imgPath, outPath, duration, visual.effect || 'zoom-in');
       }
 
-      processedClips.push(outPath);
+      resolvedClips.push({ index: i, path: outPath });
     } catch (err) {
-      console.warn(`  ⚠️ Clipe ${i + 1} falhou: ${err.message}. Usando placeholder visual...`);
-      // Generate a non-black, varied placeholder clip instead of skipping
+      console.warn(`  ⚠️ Clipe ${i + 1} falhou: ${err.message}. Tentando reaproveitar clipe adjacente...`);
+      if (!borrowNeighbor(i, outPath)) pendingIndexes.push(i);
+    }
+  }
+
+  // Clips that failed before any real clip existed yet (almost always just
+  // the first one or two) borrow from the first clip that DID succeed.
+  if (pendingIndexes.length > 0 && resolvedClips.length > 0) {
+    const donor = resolvedClips[0];
+    for (const i of pendingIndexes) {
+      const outPath = path.join(tmpDir, `clip_${i}.mp4`);
       try {
-        await makePlaceholderClip(outPath, duration, i);
-        processedClips.push(outPath);
+        fs.copyFileSync(donor.path, outPath);
+        resolvedClips.push({ index: i, path: outPath });
+        console.log(`    ♻️ Reaproveitando clipe ${donor.index + 1} para a cena ${i + 1}`);
+      } catch (copyErr) {
+        console.warn(`  ⚠️ Falha ao reaproveitar (2ª passada) pra cena ${i + 1}: ${copyErr.message}`);
+      }
+    }
+  }
+
+  // Absolute last resort — only reachable if literally every clip in the
+  // whole video failed (a full network outage), so there is nothing left to
+  // borrow from at all.
+  if (resolvedClips.length === 0) {
+    console.error('  ⚠️ Nenhum clipe real processado no vídeo inteiro — usando placeholders de último recurso');
+    for (let i = 0; i < visuals.length; i++) {
+      const outPath = path.join(tmpDir, `clip_${i}.mp4`);
+      try {
+        await makePlaceholderClip(outPath, clipDuration(i), i);
+        resolvedClips.push({ index: i, path: outPath });
       } catch (e2) { console.warn(`  ⚠️ Placeholder do clipe ${i + 1} falhou: ${e2.message}`); }
     }
   }
+
+  resolvedClips.sort((a, b) => a.index - b.index);
+  const processedClips = resolvedClips.map(c => c.path);
 
   if (processedClips.length === 0) throw new Error('Nenhum clipe processado com sucesso');
 
