@@ -223,9 +223,12 @@ export async function stepGenerateVoice(
   }
 }
 
-/** Caps so a long segment can't explode into dozens of AI calls. */
-const MAX_SLOTS_PER_SEGMENT = 8;
-const MAX_SLOTS_TOTAL = 60;
+/** Safety net only (not a normal operating limit) — protects against a
+ *  corrupted/pathological duration value, not against legitimate long-form
+ *  videos. A 25-min "Deep Dive" at a 4s pace needs ~375 slots; this leaves
+ *  comfortable headroom above that so Long/Deep-Dive videos are never
+ *  silently truncated. */
+const MAX_SLOTS_TOTAL = 500;
 const SLOT_TIMEOUT_MS = 90_000;
 const VISUALS_CONCURRENCY = 3;
 const GEMINI_MIN_INTERVAL_MS = 6_000;
@@ -241,7 +244,8 @@ export async function stepGenerateVisuals(
   callbacks.onStepStart('visuals', 'Buscando imagens e vídeos...');
 
   // Max time any single image/video can stay on screen before being swapped.
-  // Configurable per-project (defaults to 6s) — a target, not a hard rule.
+  // Configurable per-project (defaults to 6s) — this is the authoritative
+  // limit; slot count is derived from it, never the other way around.
   const MAX_MEDIA_DUR = Math.max(2, project.maxMediaDurationSeconds ?? 6);
 
   // ── 1. Build the full slot plan up front ────────────────────────────────
@@ -254,8 +258,11 @@ export async function stepGenerateVisuals(
     const seg = script.segments[i];
     const prompts: string[] = getSegmentVisualPrompts(seg);
 
-    const desired = Math.max(prompts.length, Math.ceil(totalSegmentDur / MAX_MEDIA_DUR));
-    const slotCount = Math.max(1, Math.min(desired, MAX_SLOTS_PER_SEGMENT));
+    // No per-segment cap: however many slots it takes to keep every slot at
+    // or under MAX_MEDIA_DUR is how many it gets. A previous fixed cap of 8
+    // silently let a long segment's slots run longer than configured —
+    // exactly the "images stay static too long" bug.
+    const slotCount = Math.max(1, prompts.length, Math.ceil(totalSegmentDur / MAX_MEDIA_DUR));
     const slotDur = totalSegmentDur / slotCount;
 
     for (let j = 0; j < slotCount; j++) {
@@ -455,10 +462,12 @@ async function resolveYoutubeAccessToken(callbacks: PipelineCallbacks): Promise<
 
 export async function runAutomationPipeline(
   project: Project,
-  callbacks: PipelineCallbacks
+  callbacks: PipelineCallbacks,
+  resumeVideo?: Video
 ): Promise<PipelineResult> {
-  // (removed legacy `steps` placeholder — pipeline is orchestrated explicitly below)
-  
+  const isResume = !!resumeVideo;
+  const previousRetries = resumeVideo?.retryCount || 0;
+
   let idea: any;
   let video: Video;
   let script: any;
@@ -468,40 +477,69 @@ export async function runAutomationPipeline(
   let thumbnailUrl: string | undefined;
   let metadata: any;
 
-  // Step 1: Idea
-  try {
-    idea = await stepGenerateIdea(project, callbacks);
-  } catch (e: any) {
-    return { success: false, failedStep: 'idea', errorMessage: e.message };
+  // Step 1: Idea — reused on resume (a STANDBY video already has its topic).
+  if (isResume) {
+    idea = {
+      topic: resumeVideo!.title,
+      specificContext: resumeVideo!.specificContext,
+      context: resumeVideo!.specificContext,
+    };
+    video = resumeVideo!;
+    callbacks.onProgress('idea', `Retomando "${video.title}" (tentativa ${previousRetries + 1}/${MAX_AUTO_RETRIES})`);
+    callbacks.updateVideo(project.id, video.id, { status: ProjectStatus.SCRIPTING, standbyInfo: undefined });
+  } else {
+    try {
+      idea = await stepGenerateIdea(project, callbacks);
+    } catch (e: any) {
+      return { success: false, failedStep: 'idea', errorMessage: e.message };
+    }
   }
 
-  // Step 2: Create video + Script
+  // Step 2: Create video (skipped on resume) + Script (reused if already valid)
   try {
-    video = callbacks.addVideo(
-      project.id,
-      idea.topic,
-      project.defaultDuration || 'Standard (5-8 min)',
-      project.defaultFormat || 'Landscape 16:9',
-      idea.specificContext || idea.context
-    );
-    script = await stepGenerateScript(project, video, callbacks);
+    if (!isResume) {
+      video = callbacks.addVideo(
+        project.id,
+        idea.topic,
+        project.defaultDuration || 'Standard (5-8 min)',
+        project.defaultFormat || 'Landscape 16:9',
+        idea.specificContext || idea.context
+      );
+    }
+    if (isResume && resumeVideo!.script?.segments?.length) {
+      script = resumeVideo!.script;
+      callbacks.onProgress('script', 'Roteiro reaproveitado da tentativa anterior');
+    } else {
+      script = await stepGenerateScript(project, video!, callbacks);
+    }
   } catch (e: any) {
     return { success: false, videoId: video!?.id, videoTitle: idea.topic, failedStep: 'script', errorMessage: e.message };
   }
 
-  // Step 3: Voice
+  // Step 3: Voice — reused on resume when a full narration was already generated.
   try {
-    voiceResult = await stepGenerateVoice(project, video!, script, callbacks);
+    if (isResume && resumeVideo!.audioUrl && resumeVideo!.segmentTimestamps?.length) {
+      voiceResult = {
+        audioUrl: resumeVideo!.audioUrl,
+        timestamps: resumeVideo!.segmentTimestamps,
+        totalDuration: estimateAudioDurationSeconds(resumeVideo!.audioUrl),
+      };
+      callbacks.onProgress('voice', 'Narração reaproveitada da tentativa anterior');
+    } else {
+      voiceResult = await stepGenerateVoice(project, video!, script, callbacks);
+    }
   } catch (e: any) {
-    markStandby(project.id, video!.id, 'voice', e.message, callbacks);
+    scheduleRetryOrStandby(project.id, video!.id, 'voice', e.message, previousRetries, callbacks);
     return { success: false, videoId: video!.id, videoTitle: video!.title, failedStep: 'voice', errorMessage: e.message };
   }
 
-  // Step 4: Visuals
+  // Step 4: Visuals — stepGenerateVisuals already reuses video.visualScenes
+  // internally (matching-length + usable URL check), so resuming here for
+  // free requires no special-casing at this level.
   try {
     scenes = await stepGenerateVisuals(project, video!, script, voiceResult.timestamps, voiceResult.totalDuration, callbacks);
   } catch (e: any) {
-    markStandby(project.id, video!.id, 'visuals', e.message, callbacks);
+    scheduleRetryOrStandby(project.id, video!.id, 'visuals', e.message, previousRetries, callbacks);
     return { success: false, videoId: video!.id, videoTitle: video!.title, failedStep: 'visuals', errorMessage: e.message };
   }
 
@@ -523,20 +561,31 @@ export async function runAutomationPipeline(
     thumbnailUrl = undefined;
   }
 
-  // Step 7: Metadata
+  // Step 7: Metadata — reused on resume if already generated.
   try {
-    metadata = await stepGenerateMetadata(project, video!, script, callbacks);
+    if (isResume && resumeVideo!.videoMetadata?.youtubeTitle) {
+      metadata = resumeVideo!.videoMetadata;
+      callbacks.onProgress('metadata', 'Metadados reaproveitados da tentativa anterior');
+    } else {
+      metadata = await stepGenerateMetadata(project, video!, script, callbacks);
+    }
   } catch (e: any) {
-    markStandby(project.id, video!.id, 'metadata', e.message, callbacks);
+    scheduleRetryOrStandby(project.id, video!.id, 'metadata', e.message, previousRetries, callbacks);
     return { success: false, videoId: video!.id, videoTitle: video!.title, failedStep: 'metadata', errorMessage: e.message };
   }
 
-  // Step 8: Upload
+  // Step 8: Upload (render + publish are fused here — always redone in full,
+  // there's no partial render artifact worth persisting/reusing)
   try {
     await stepUploadToYouTube(project, video!, metadata, thumbnailUrl, callbacks);
   } catch (e: any) {
-    markStandby(project.id, video!.id, 'upload', e.message, callbacks);
+    scheduleRetryOrStandby(project.id, video!.id, 'upload', e.message, previousRetries, callbacks);
     return { success: false, videoId: video!.id, videoTitle: video!.title, failedStep: 'upload', errorMessage: e.message };
+  }
+
+  // Full success — clear any retry bookkeeping left over from earlier attempts.
+  if (isResume) {
+    callbacks.updateVideo(project.id, video!.id, { retryCount: 0, nextRetryAt: undefined, lastError: undefined });
   }
 
   // Step 9: Auto-Shorts (non-blocking — failure never stops the main pipeline)
@@ -553,16 +602,82 @@ export async function runAutomationPipeline(
   return { success: true, videoId: video!.id, videoTitle: video!.title };
 }
 
-function markStandby(projectId: string, videoId: string, step: AutoPilotStep, error: string, callbacks: PipelineCallbacks) {
+// ── Auto-retry with backoff ────────────────────────────────────────────────
+// Mirrors scripts/automation-runner.js exactly: 4 attempts, 5min → 20min →
+// 1h → 4h. After MAX_AUTO_RETRIES the video stays in STANDBY with no
+// nextRetryAt — it's no longer auto-retried and needs a human to look at it
+// (or an explicit "Executar Agora", which retries regardless of this cap).
+export const MAX_AUTO_RETRIES = 4;
+const RETRY_BACKOFF_MS = [5 * 60 * 1000, 20 * 60 * 1000, 60 * 60 * 1000, 4 * 60 * 60 * 1000];
+function retryBackoffMs(previousRetries: number): number {
+  return RETRY_BACKOFF_MS[Math.min(previousRetries, RETRY_BACKOFF_MS.length - 1)];
+}
+
+/**
+ * A video is eligible for *automatic* (unattended) retry when it's in
+ * STANDBY, hasn't used up its attempts, and its backoff window has elapsed.
+ * An explicit "Executar Agora" click bypasses this (see ProjectContext) —
+ * a human asking for another try shouldn't be blocked by either check.
+ */
+export function findRetryableVideo(project: Project, now: number = Date.now()): Video | null {
+  const videos = project.videos || [];
+  const standby = videos.filter(v => v.status === ProjectStatus.STANDBY);
+  const eligible = standby.filter(v => {
+    if ((v.retryCount || 0) >= MAX_AUTO_RETRIES) return false;
+    if (!v.nextRetryAt) return true; // legacy standby video — retry on next cycle
+    return new Date(v.nextRetryAt).getTime() <= now;
+  });
+  if (eligible.length === 0) return null;
+  // Most recently updated first, so a fresh failure takes priority over an
+  // old one that's been sitting there through several backoff cycles.
+  return [...eligible].sort((a, b) =>
+    new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime()
+  )[0];
+}
+
+/** Raw base64 PCM16 mono @ 24kHz, as produced by audioBufferToBase64 — decoding
+ *  it back into an AudioBuffer just to read .duration would be wasteful, the
+ *  byte length alone gives the exact answer. Used to resume past a
+ *  successful voice step without re-generating narration. */
+function estimateAudioDurationSeconds(base64Pcm16Mono: string, sampleRate = 24000): number {
+  try {
+    return atob(base64Pcm16Mono).length / 2 / sampleRate;
+  } catch {
+    return 0;
+  }
+}
+
+function scheduleRetryOrStandby(
+  projectId: string,
+  videoId: string,
+  step: AutoPilotStep,
+  error: string,
+  previousRetries: number,
+  callbacks: PipelineCallbacks
+): { retryCount: number; exhausted: boolean; nextRetryAt?: string } {
   const standbyInfo: StandbyInfo = {
     failedStep: step,
     errorMessage: error,
     failedAt: new Date().toISOString()
   };
+  const retryCount = previousRetries + 1;
+  const exhausted = retryCount >= MAX_AUTO_RETRIES;
+  const nextRetryAt = exhausted ? undefined : new Date(Date.now() + retryBackoffMs(previousRetries)).toISOString();
+
   callbacks.updateVideo(projectId, videoId, {
     status: ProjectStatus.STANDBY,
-    standbyInfo
+    standbyInfo,
+    retryCount,
+    nextRetryAt,
+    lastError: error,
   });
+
+  const message = exhausted
+    ? `Falhou ${retryCount}x em "${STEP_LABELS[step]}" — aguardando ação manual. Último erro: ${error}`
+    : `Falhou em "${STEP_LABELS[step]}" (tentativa ${retryCount}/${MAX_AUTO_RETRIES}). Nova tentativa automática em ${new Date(nextRetryAt!).toLocaleString('pt-BR')}.`;
+  callbacks.onProgress(step, message);
+
+  return { retryCount, exhausted, nextRetryAt };
 }
 
 // --- SCHEDULER UTILITIES ---
