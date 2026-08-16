@@ -5,15 +5,35 @@ const easeInOutCubic = (x: number): number =>
   x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
 
 // ─── Scanlines overlay ───────────────────────────────────────────────────────
+// A single cached repeating pattern instead of ~270 individual fillRect
+// calls per frame — same visual result, far cheaper on the main thread
+// during the real-time capture (every dropped frame here is a stutter in
+// the recorded output).
+let scanlinePatternCache: CanvasPattern | null = null;
+const getScanlinePattern = (ctx: CanvasRenderingContext2D): CanvasPattern | null => {
+  if (scanlinePatternCache) return scanlinePatternCache;
+  const tile = document.createElement("canvas");
+  tile.width = 1;
+  tile.height = 4;
+  const tCtx = tile.getContext("2d");
+  if (!tCtx) return null;
+  tCtx.fillStyle = "rgba(0,0,0,1)";
+  tCtx.fillRect(0, 0, 1, 1); // one dark pixel out of every 4 rows, tiled
+  scanlinePatternCache = ctx.createPattern(tile, "repeat");
+  return scanlinePatternCache;
+};
+
 const drawScanlines = (
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number
 ) => {
+  const pattern = getScanlinePattern(ctx);
+  if (!pattern) return;
   ctx.save();
   ctx.globalAlpha = 0.04;
-  ctx.fillStyle = "rgba(0,0,0,1)";
-  for (let i = 0; i < height; i += 4) ctx.fillRect(0, i, width, 1);
+  ctx.fillStyle = pattern;
+  ctx.fillRect(0, 0, width, height);
   ctx.restore();
 };
 
@@ -67,36 +87,6 @@ type LoadedScene = {
   poster?: HTMLImageElement | HTMLCanvasElement;
 };
 
-const createTimelinePlaceholder = (startTime: number, duration: number, index: number): LoadedScene => {
-  const canvas = document.createElement("canvas");
-  canvas.width = 1920;
-  canvas.height = 1080;
-  const ctx = canvas.getContext("2d")!;
-  const palettes = [["#101826", "#0f766e"], ["#172033", "#b45309"], ["#111827", "#be123c"], ["#0f172a", "#2563eb"]];
-  const [c1, c2] = palettes[index % palettes.length];
-  const grad = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
-  grad.addColorStop(0, c1);
-  grad.addColorStop(1, "#020617");
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = c2;
-  ctx.globalAlpha = 0.35;
-  ctx.beginPath();
-  ctx.ellipse(canvas.width * 0.68, canvas.height * 0.42, canvas.width * 0.28, canvas.height * 0.22, -0.4, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.globalAlpha = 1;
-
-  return {
-    startTime,
-    duration,
-    effect: ["zoom-in", "pan-left", "pan-right", "zoom-out"][index % 4] as VisualEffect,
-    element: canvas,
-    isVideo: false,
-    ready: true,
-    videoStarted: false,
-    originalIndex: -1,
-  };
-};
 
 // ─── Load scene — tries video (via blob URL to bypass CORS), falls back to image
 const loadSceneMedia = async (
@@ -108,7 +98,7 @@ const loadSceneMedia = async (
     imageUrl: string;
   },
   index: number
-): Promise<LoadedScene> => {
+): Promise<LoadedScene | null> => {
 
   // 1. Try to load Pexels video — fetch as blob to bypass canvas CORS taint
   if (scene.videoUrl) {
@@ -182,7 +172,7 @@ const loadSceneMedia = async (
         poster,
       } as LoadedScene;
     } catch (e) {
-      console.warn("⚠️ Vídeo falhou (CORS/rede), usando thumbnail:", e);
+      console.warn("⚠️ Vídeo falhou (CORS/rede), tentando thumbnail:", e);
     }
   }
 
@@ -217,10 +207,21 @@ const loadSceneMedia = async (
       originalIndex: index,
     };
   } catch {
-    console.warn("⚠️ Imagem falhou, usando placeholder:", scene.imageUrl);
+    // Both video and image failed for this scene's own URLs. Don't build a
+    // placeholder here — return null and let the caller borrow an already-
+    // loaded neighbor instead, so the rendered video never shows a generic
+    // gradient in place of real content.
+    console.warn("⚠️ Imagem e vídeo falharam para esta cena:", scene.imageUrl);
+    return null;
   }
+};
 
-  // Placeholder — gradient canvas
+/** Absolute last resort — only reached if NO scene in the whole video loaded
+ *  successfully, so there is no neighbor left to borrow from. */
+const buildPlaceholderScene = (
+  scene: { startTime: number; duration: number; effect: VisualEffect },
+  index: number
+): LoadedScene => {
   const placeholder = document.createElement("canvas");
   placeholder.width = 1920;
   placeholder.height = 1080;
@@ -394,12 +395,42 @@ export const renderVideoHeadless = async (
   // Sort scenes by startTime to ensure correct order
   const sortedSceneInputs = [...video.visualScenes].sort((a, b) => a.startTime - b.startTime);
 
-  const loadedScenes: LoadedScene[] = await Promise.all(
+  const rawLoadedScenes: (LoadedScene | null)[] = await Promise.all(
     sortedSceneInputs.map((scene, i) => {
       onProgress(10 + (i / sortedSceneInputs.length) * 10, `Loading scene ${i + 1}/${sortedSceneInputs.length}...`);
       return loadSceneMedia(scene, i);
     })
   );
+
+  // Nearest already-loaded neighbor, searching outward from idx.
+  const findMediaDonor = (loaded: (LoadedScene | null)[], idx: number): number => {
+    for (let d = 1; d < loaded.length; d++) {
+      if (idx - d >= 0 && loaded[idx - d]) return idx - d;
+      if (idx + d < loaded.length && loaded[idx + d]) return idx + d;
+    }
+    return -1;
+  };
+
+  const loadedScenes: LoadedScene[] = rawLoadedScenes.map((loaded, idx) => {
+    if (loaded) return loaded;
+    const donorIdx = findMediaDonor(rawLoadedScenes, idx);
+    if (donorIdx !== -1) {
+      const donor = rawLoadedScenes[donorIdx]!;
+      console.warn(`⚠️ Cena ${idx + 1} sem mídia própria — reaproveitando cena ${donorIdx + 1}`);
+      return {
+        ...donor,
+        startTime: sortedSceneInputs[idx].startTime,
+        duration: sortedSceneInputs[idx].duration,
+        effect: sortedSceneInputs[idx].effect,
+        originalIndex: idx,
+        videoStarted: false,
+      };
+    }
+    // Only reachable if literally every scene in the video failed to load —
+    // a full network outage, not a per-scene hiccup.
+    console.error(`⚠️ Cena ${idx + 1}: nenhuma cena com mídia válida em todo o vídeo — usando placeholder de último recurso`);
+    return buildPlaceholderScene(sortedSceneInputs[idx], idx);
+  });
 
   // ── RECALCULATE SCENE TIMING based on actual audio duration ────────────────
   // Never stretch a scene past the configured media cut. If audio timing differs
@@ -411,7 +442,6 @@ export const renderVideoHeadless = async (
     const timed: LoadedScene[] = [];
     const usedSceneIndexes = new Set<number>();
     let cursor = 0;
-    let placeholderIdx = 0;
 
     while (cursor < totalDuration - 0.01) {
       const remaining = totalDuration - cursor;
@@ -427,7 +457,21 @@ export const renderVideoHeadless = async (
           videoStarted: false,
         });
       } else {
-        timed.push(createTimelinePlaceholder(cursor, duration, placeholderIdx++));
+        // No fresh original scene lines up with this stretch of the
+        // timeline (audio ran longer than planned, or a timing gap). Reuse
+        // whichever real scene is closest in time instead of a generic
+        // placeholder — a repeated shot reads far better than an obviously
+        // synthetic frame. baseScenes is non-empty here (checked above), so
+        // this always finds a real donor.
+        const donor = baseScenes.reduce((best, scene) =>
+          Math.abs(scene.startTime - cursor) < Math.abs(best.startTime - cursor) ? scene : best
+        );
+        timed.push({
+          ...donor,
+          startTime: cursor,
+          duration,
+          videoStarted: false,
+        });
       }
 
       cursor += duration;
