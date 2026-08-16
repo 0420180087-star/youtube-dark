@@ -27,6 +27,7 @@ import { resolveVisualSlots } from '../src/services/visualsPipeline.ts';
 import { setInjectedPexelsKey } from '../src/services/pexelsService.ts';
 import { setInjectedGeminiKeys } from '../src/services/geminiCore.ts';
 import { buildSlotVisualPrompt, collectPexelsIds, getSegmentVisualPrompts } from '../src/services/visualSceneService.ts';
+import { generateVoiceover } from '../src/services/geminiCore.ts';
 
 // --- ENV ---
 const {
@@ -705,64 +706,7 @@ function generateAmbienceTrack(outputPath, durationSec, tone = '') {
   });
 }
 
-/**
- * 🎙️ Generate TTS audio for a single text segment using Gemini TTS API.
- * Returns base64-encoded PCM/WAV audio.
- */
-async function geminiTTS(text, voiceName = 'Fenrir', tone = 'Cinematic') {
-  const SUPPORTED_VOICES = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'];
-  const VOICE_MAPPING = { 'Aoede': 'Kore', 'Leda': 'Kore' };
 
-  let finalVoice = voiceName;
-  if (!SUPPORTED_VOICES.includes(voiceName)) {
-    finalVoice = VOICE_MAPPING[voiceName] || 'Fenrir';
-  }
-
-  const t = (tone || '').toLowerCase();
-  let styleInstruction = 'Read clearly and naturally.';
-  if (t.includes('horror') || t.includes('dark') || t.includes('suspense')) {
-    styleInstruction = 'Read in a low, tense, and ominous tone with dramatic pauses.';
-  } else if (t.includes('child') || t.includes('kid')) {
-    styleInstruction = 'Read in a warm, enthusiastic, and friendly tone.';
-  } else if (t.includes('motiv') || t.includes('energ')) {
-    styleInstruction = 'Read in an energetic, inspiring, and powerful tone.';
-  }
-
-  const ttsPrompt = `Style: ${styleInstruction}\n\nText to read: "${text}"`;
-
-  const res = await raceTimeout(
-    axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        contents: [{ parts: [{ text: ttsPrompt }] }],
-        generationConfig: {
-          responseModalities: ['AUDIO'],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: finalVoice },
-            },
-          },
-        },
-      },
-      { timeout: NET_TIMEOUT.TTS }
-    ),
-    NET_TIMEOUT.TTS + 5_000,
-    'Gemini TTS'
-  );
-
-
-  const audioPart = res.data.candidates?.[0]?.content?.parts?.find(p => p.inlineData?.data);
-  if (!audioPart?.inlineData?.data) {
-    throw new Error('TTS returned no audio data');
-  }
-
-  // Retorna tanto o base64 quanto o mimeType para que o renderer
-  // saiba se é PCM raw (audio/pcm) ou WAV (audio/wav / audio/L16)
-  return {
-    data: audioPart.inlineData.data,
-    mimeType: audioPart.inlineData.mimeType || 'audio/pcm',
-  };
-}
 
 // --- TONE MODIFIERS ---
 
@@ -887,6 +831,10 @@ Return JSON with this structure:
 async function stepVoice(script, projectData) {
   log('🎙️', 'Step 3: Generating voice narration...');
 
+  // Node has no localStorage — inject the keys loadUserKeys() already
+  // resolved for this project's user (same pattern as the visuals step).
+  setInjectedGeminiKeys(GEMINI_API_KEYS);
+
   const segments = script.segments || [];
   if (segments.length === 0) throw new Error('No segments in script for TTS');
 
@@ -904,15 +852,10 @@ async function stepVoice(script, projectData) {
 
       log('🎤', `  Generating TTS for segment ${i + 1}/${segments.length} (${text.length} chars)...`);
 
-      const ttsResult = await geminiWithRetry(() =>
-        geminiTTS(text, projectData.defaultVoice || 'Fenrir', projectData.defaultTone || 'Cinematic')
-      );
+      const arrayBuffer = await generateVoiceover(text, projectData.defaultVoice || 'Fenrir', projectData.defaultTone || 'Cinematic');
+      geminiRequestCount++;
 
-      // ttsResult pode ser { data, mimeType } ou string (compatibilidade)
-      const audioData = typeof ttsResult === 'string' ? ttsResult : ttsResult.data;
-      const mimeType = typeof ttsResult === 'string' ? 'audio/pcm' : (ttsResult.mimeType || 'audio/pcm');
-
-      const normalizedPcm = await normalizeAudioChunkToPcm(Buffer.from(audioData, 'base64'), mimeType, tmpDir, i);
+      const normalizedPcm = await normalizeAudioChunkToPcm(Buffer.from(arrayBuffer), 'audio/pcm', tmpDir, i);
       audioChunks.push(normalizedPcm);
 
       // Small delay between segments to avoid rate limits
