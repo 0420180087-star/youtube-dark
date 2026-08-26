@@ -197,6 +197,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await saveEncryptedJSON('ds_user_profile', profile);
       await setSupabaseUserEmail(profile.email);
 
+      // Persiste o token do login básico imediatamente — já provado válido
+      // (acabou de responder ao userinfo acima) e suficiente para a Edge
+      // Function de configurações, que exige apenas QUALQUER token Google
+      // válido, não necessariamente com escopo do YouTube. Sem isso, salvar
+      // as chaves de API (Gemini/Pexels) ficava bloqueado até o usuário
+      // conectar o YouTube pelo menos uma vez — mesmo já estando logado.
+      await persistAccessToken(token);
+
       if (supabase && profile.email) {
         try {
           await supabase.from('user_profiles').upsert({
@@ -210,9 +218,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       }
 
-      // Após login: restaura um token existente se houver. Não disparamos OAuth
-      // "default" automaticamente porque uploads são isolados por projeto/canal.
-      // O usuário deve conectar o YouTube na aba Settings do projeto.
+      // Se o usuário já conectou o YouTube antes, troca pelo token com esse
+      // escopo assim que disponível — melhor esforço, silencioso.
       try {
         const check = await callRefreshTokenFull('', profile.email, googleClientId || undefined);
         if (check.accessToken) {
