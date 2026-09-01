@@ -1218,7 +1218,14 @@ async function safeInsertAutopilotLog(payload) {
   // autopilot_logs.user_email é NOT NULL em bancos já existentes — sem isso
   // todos os logs remotos eram silenciosamente rejeitados.
   const row = { user_email: payload.user_email || CURRENT_USER_EMAIL || 'unknown@runner', ...payload };
+  // Heartbeat por passo: um render de 40 min deixava o painel "Saúde da
+  // Automação" acusando "sem sinal" mesmo com tudo funcionando. Cada log de
+  // passo em andamento também renova o sinal de vida.
+  if (payload.status === 'running') {
+    await writeHeartbeat(`${payload.step || 'pipeline'}: ${payload.video_title || payload.project_id || ''} — ${payload.message || ''}`);
+  }
   try {
+
     const { error } = await supabase.from('autopilot_logs').insert(row);
     if (!error) return;
 
