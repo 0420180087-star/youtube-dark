@@ -175,11 +175,39 @@ async function releaseLock(projectId) {
     await supabase
       .from('projects')
       .update({ autopilot_locked_until: null, autopilot_locked_by: null })
-      .eq('id', String(projectId));
+      .eq('id', String(projectId))
+      .then(() => {});
   } catch (e) {
     log('⚠️', `Failed to release autopilot lock for ${projectId}: ${e.message}`);
   }
 }
+
+// O lock tem validade fixa (LOCK_MINUTES). Um projeto longo (render + upload)
+// pode passar dessa janela: o lock cai, a execução seguinte pega o MESMO
+// projeto e publica de novo. Renovar o prazo periodicamente enquanto o
+// projeto processa elimina essa duplicata.
+const LOCK_MINUTES = 45;
+const LOCK_RENEW_MS = 5 * 60 * 1000;
+
+async function renewLock(projectId) {
+  try {
+    await supabase
+      .from('projects')
+      .update({
+        autopilot_locked_until: new Date(Date.now() + LOCK_MINUTES * 60 * 1000).toISOString(),
+        autopilot_locked_by: 'github-actions',
+      })
+      .eq('id', String(projectId))
+      .eq('autopilot_locked_by', 'github-actions');
+  } catch { /* non-fatal — na pior hipótese o lock expira como antes */ }
+}
+
+function startLockRenewal(projectId) {
+  const timer = setInterval(() => { renewLock(projectId); }, LOCK_RENEW_MS);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
 
 // --- HEARTBEAT ---
 // Lets the app prove the headless runner is alive. Without this, "enqueued for
@@ -1190,7 +1218,14 @@ async function safeInsertAutopilotLog(payload) {
   // autopilot_logs.user_email é NOT NULL em bancos já existentes — sem isso
   // todos os logs remotos eram silenciosamente rejeitados.
   const row = { user_email: payload.user_email || CURRENT_USER_EMAIL || 'unknown@runner', ...payload };
+  // Heartbeat por passo: um render de 40 min deixava o painel "Saúde da
+  // Automação" acusando "sem sinal" mesmo com tudo funcionando. Cada log de
+  // passo em andamento também renova o sinal de vida.
+  if (payload.status === 'running') {
+    await writeHeartbeat(`${payload.step || 'pipeline'}: ${payload.video_title || payload.project_id || ''} — ${payload.message || ''}`);
+  }
   try {
+
     const { error } = await supabase.from('autopilot_logs').insert(row);
     if (!error) return;
 
@@ -1239,25 +1274,31 @@ function calculateNextRunIso(settings = {}) {
   return nextRun.toISOString();
 }
 
-async function persistProjectData(projectId, data, message = 'Project data persisted') {
-  const { error } = await supabase
-    .from('projects')
-    .update({ data, updated_at: new Date().toISOString() })
-    .eq('id', projectId);
-  if (error) log('⚠️', `${message} failed: ${error.message}`);
+async function persistProjectData(projectId, data, message = 'Project data persisted', attempts = 1) {
+  for (let i = 0; i < Math.max(1, attempts); i++) {
+    const { error } = await supabase
+      .from('projects')
+      .update({ data, updated_at: new Date().toISOString() })
+      .eq('id', projectId);
+    if (!error) return true;
+    log('⚠️', `${message} failed (tentativa ${i + 1}/${attempts}): ${error.message}`);
+    if (i < attempts - 1) await new Promise((r) => setTimeout(r, 2000 * (i + 1)));
+  }
+  return false;
 }
 
-async function updateRunnerVideo(projectId, data, videoId, updates, logMessage) {
+async function updateRunnerVideo(projectId, data, videoId, updates, logMessage, attempts = 1) {
   if (!data.videos) data.videos = [];
   const idx = data.videos.findIndex((v) => v.id === videoId);
-  if (idx === -1) return;
+  if (idx === -1) return false;
   data.videos[idx] = lightVideoRecord({
     ...data.videos[idx],
     ...updates,
     updatedAt: new Date().toISOString(),
   });
-  await persistProjectData(projectId, data, logMessage || `Video ${videoId} updated`);
+  return persistProjectData(projectId, data, logMessage || `Video ${videoId} updated`, attempts);
 }
+
 
 // --- RETRY POLICY ---
 // Transient failures (Gemini "OTHER", network timeouts, Pexels 429) must not
@@ -1417,10 +1458,14 @@ async function processProject(projectRow) {
   const data = projectRow.data || {};
   const startTime = Date.now();
   let videoTitle = data.channelTheme || projectId;
+  // Pedido explícito do usuário ("Executar Agora" no app) — ignora janela de
+  // horário e cooldown de cota, porque alguém está esperando o resultado.
+  const forceRun = !!data.scheduleSettings?.forceRun || !!PROJECT_ID;
+  let stopLockRenewal = () => {};
 
   // Acquire distributed lock — prevents browser scheduler from running
   // the same project at the same time as this GitHub Actions runner.
-  const { acquired: lockAcquired } = await acquireLock(projectId, 90);
+  const { acquired: lockAcquired } = await acquireLock(projectId, LOCK_MINUTES);
 
   if (!lockAcquired) {
     log('⏭️', `Lock não adquirido para "${data.channelTheme}" — já rodando em outro lugar`);
@@ -1433,6 +1478,10 @@ async function processProject(projectRow) {
     });
     return false;
   }
+
+  // Renova o lock enquanto o projeto processa — sem isso, um render longo
+  // deixaria o lock expirar e a execução seguinte publicaria o mesmo vídeo.
+  stopLockRenewal = startLockRenewal(projectId);
 
   // Load per-user API keys (Gemini/Pexels) — owner of this project
   CURRENT_USER_EMAIL = normalizeEmail(projectRow.user_email);
@@ -1452,30 +1501,10 @@ async function processProject(projectRow) {
       step: 'idea',
       runner: 'github-actions',
     });
+    stopLockRenewal();
     await releaseLock(projectId);
     return false;
   }
-
-  // Cross-run circuit breaker (see recentQuotaExhaustion) — a persisted
-  // 429/quota event from moments ago (even from a *previous*, already-
-  // finished process) means this key almost certainly still has no
-  // headroom; skip this project now rather than pay for rediscovering that.
-  const recentExhaustion = await recentQuotaExhaustion(CURRENT_USER_EMAIL);
-  if (recentExhaustion) {
-    const secondsAgo = Math.round((Date.now() - new Date(recentExhaustion.created_at).getTime()) / 1000);
-    const waitMin = Math.ceil(recentExhaustion.remainingMs / 60_000);
-    log('🧊', `Pulando "${data.channelTheme}" — cota Gemini reportada esgotada há ${secondsAgo}s (${recentExhaustion.reason}). Evitando bater na mesma chave de novo; próxima janela em ~${waitMin} min.`);
-    await safeInsertAutopilotLog({
-      project_id: projectId,
-      status: 'retrying',
-      message: `Pulado nesta execução: cota Gemini esgotada recentemente (${recentExhaustion.reason}) — evitando nova tentativa imediata`,
-      step: 'idea',
-      runner: 'github-actions',
-    });
-    await releaseLock(projectId);
-    return false;
-  }
-
 
   data.id = projectId;
 
@@ -1499,6 +1528,60 @@ async function processProject(projectRow) {
   const isResume = !!resumeVideo;
   let videoId = resumeVideo?.id || null;
 
+  // Publicar um vídeo já renderizado não gasta uma única chamada ao Gemini —
+  // então o circuit breaker de cota NÃO pode barrar esse caso.
+  const isPendingUploadOnly = isResume
+    && resumeVideo.status === 'SCHEDULED'
+    && String(resumeVideo.lastError || '').startsWith(PENDING_UPLOAD_MARK);
+
+  // Cross-run circuit breaker (see recentQuotaExhaustion) — a persisted
+  // 429/quota event from moments ago (even from a *previous*, already-
+  // finished process) means this key almost certainly still has no
+  // headroom; skip this project now rather than pay for rediscovering that.
+  if (!isPendingUploadOnly && !forceRun) {
+    const recentExhaustion = await recentQuotaExhaustion(CURRENT_USER_EMAIL);
+    if (recentExhaustion) {
+      const secondsAgo = Math.round((Date.now() - new Date(recentExhaustion.created_at).getTime()) / 1000);
+      const waitMin = Math.ceil(recentExhaustion.remainingMs / 60_000);
+      log('🧊', `Pulando "${data.channelTheme}" — cota Gemini reportada esgotada há ${secondsAgo}s (${recentExhaustion.reason}). Evitando bater na mesma chave de novo; próxima janela em ~${waitMin} min.`);
+      await safeInsertAutopilotLog({
+        project_id: projectId,
+        status: 'retrying',
+        message: `Pulado nesta execução: cota Gemini esgotada recentemente (${recentExhaustion.reason}) — evitando nova tentativa imediata`,
+        step: 'idea',
+        runner: 'github-actions',
+      });
+      stopLockRenewal();
+      await releaseLock(projectId);
+      return false;
+    }
+  }
+
+  // Idempotência: se o vídeo retomado já tem URL do YouTube, o upload anterior
+  // deu certo e só a gravação do status falhou. Re-renderizar publicaria uma
+  // duplicata no canal — apenas finalizamos o registro.
+  if (isResume && resumeVideo.youtubeUrl) {
+    log('✅', `"${resumeVideo.title}" já está publicado (${resumeVideo.youtubeUrl}) — apenas concluindo o registro.`);
+    await updateRunnerVideo(projectId, data, videoId, {
+      status: 'PUBLISHED',
+      retryCount: 0,
+      nextRetryAt: undefined,
+      standbyInfo: undefined,
+      lastError: undefined,
+    }, 'Published video reconciled', 3);
+    await safeInsertAutopilotLog({
+      project_id: projectId,
+      status: 'success',
+      message: `Já publicado: ${resumeVideo.youtubeUrl} — registro reconciliado sem novo upload`,
+      step: 'upload',
+      video_title: resumeVideo.title,
+      runner: 'github-actions',
+    });
+    stopLockRenewal();
+    await releaseLock(projectId);
+    return true;
+  }
+
   log('🚀', isResume
     ? `Retomando "${resumeVideo.title}" (tentativa ${(resumeVideo.retryCount || 0) + 1}/${MAX_AUTO_RETRIES})`
     : `Processing project: "${data.channelTheme}" (${projectId})`);
@@ -1513,6 +1596,8 @@ async function processProject(projectRow) {
     video_title: isResume ? resumeVideo.title : undefined,
     runner: 'github-actions',
   });
+
+
 
 
   let currentStep = 'idea';
