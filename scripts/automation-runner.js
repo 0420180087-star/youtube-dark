@@ -1274,25 +1274,31 @@ function calculateNextRunIso(settings = {}) {
   return nextRun.toISOString();
 }
 
-async function persistProjectData(projectId, data, message = 'Project data persisted') {
-  const { error } = await supabase
-    .from('projects')
-    .update({ data, updated_at: new Date().toISOString() })
-    .eq('id', projectId);
-  if (error) log('⚠️', `${message} failed: ${error.message}`);
+async function persistProjectData(projectId, data, message = 'Project data persisted', attempts = 1) {
+  for (let i = 0; i < Math.max(1, attempts); i++) {
+    const { error } = await supabase
+      .from('projects')
+      .update({ data, updated_at: new Date().toISOString() })
+      .eq('id', projectId);
+    if (!error) return true;
+    log('⚠️', `${message} failed (tentativa ${i + 1}/${attempts}): ${error.message}`);
+    if (i < attempts - 1) await delay(2000 * (i + 1));
+  }
+  return false;
 }
 
-async function updateRunnerVideo(projectId, data, videoId, updates, logMessage) {
+async function updateRunnerVideo(projectId, data, videoId, updates, logMessage, attempts = 1) {
   if (!data.videos) data.videos = [];
   const idx = data.videos.findIndex((v) => v.id === videoId);
-  if (idx === -1) return;
+  if (idx === -1) return false;
   data.videos[idx] = lightVideoRecord({
     ...data.videos[idx],
     ...updates,
     updatedAt: new Date().toISOString(),
   });
-  await persistProjectData(projectId, data, logMessage || `Video ${videoId} updated`);
+  return persistProjectData(projectId, data, logMessage || `Video ${videoId} updated`, attempts);
 }
+
 
 // --- RETRY POLICY ---
 // Transient failures (Gemini "OTHER", network timeouts, Pexels 429) must not
