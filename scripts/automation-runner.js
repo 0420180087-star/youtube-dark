@@ -1458,10 +1458,14 @@ async function processProject(projectRow) {
   const data = projectRow.data || {};
   const startTime = Date.now();
   let videoTitle = data.channelTheme || projectId;
+  // Pedido explícito do usuário ("Executar Agora" no app) — ignora janela de
+  // horário e cooldown de cota, porque alguém está esperando o resultado.
+  const forceRun = !!data.scheduleSettings?.forceRun || !!PROJECT_ID;
+  let stopLockRenewal = () => {};
 
   // Acquire distributed lock — prevents browser scheduler from running
   // the same project at the same time as this GitHub Actions runner.
-  const { acquired: lockAcquired } = await acquireLock(projectId, 90);
+  const { acquired: lockAcquired } = await acquireLock(projectId, LOCK_MINUTES);
 
   if (!lockAcquired) {
     log('⏭️', `Lock não adquirido para "${data.channelTheme}" — já rodando em outro lugar`);
@@ -1474,6 +1478,10 @@ async function processProject(projectRow) {
     });
     return false;
   }
+
+  // Renova o lock enquanto o projeto processa — sem isso, um render longo
+  // deixaria o lock expirar e a execução seguinte publicaria o mesmo vídeo.
+  stopLockRenewal = startLockRenewal(projectId);
 
   // Load per-user API keys (Gemini/Pexels) — owner of this project
   CURRENT_USER_EMAIL = normalizeEmail(projectRow.user_email);
@@ -1493,30 +1501,10 @@ async function processProject(projectRow) {
       step: 'idea',
       runner: 'github-actions',
     });
+    stopLockRenewal();
     await releaseLock(projectId);
     return false;
   }
-
-  // Cross-run circuit breaker (see recentQuotaExhaustion) — a persisted
-  // 429/quota event from moments ago (even from a *previous*, already-
-  // finished process) means this key almost certainly still has no
-  // headroom; skip this project now rather than pay for rediscovering that.
-  const recentExhaustion = await recentQuotaExhaustion(CURRENT_USER_EMAIL);
-  if (recentExhaustion) {
-    const secondsAgo = Math.round((Date.now() - new Date(recentExhaustion.created_at).getTime()) / 1000);
-    const waitMin = Math.ceil(recentExhaustion.remainingMs / 60_000);
-    log('🧊', `Pulando "${data.channelTheme}" — cota Gemini reportada esgotada há ${secondsAgo}s (${recentExhaustion.reason}). Evitando bater na mesma chave de novo; próxima janela em ~${waitMin} min.`);
-    await safeInsertAutopilotLog({
-      project_id: projectId,
-      status: 'retrying',
-      message: `Pulado nesta execução: cota Gemini esgotada recentemente (${recentExhaustion.reason}) — evitando nova tentativa imediata`,
-      step: 'idea',
-      runner: 'github-actions',
-    });
-    await releaseLock(projectId);
-    return false;
-  }
-
 
   data.id = projectId;
 
@@ -1540,6 +1528,60 @@ async function processProject(projectRow) {
   const isResume = !!resumeVideo;
   let videoId = resumeVideo?.id || null;
 
+  // Publicar um vídeo já renderizado não gasta uma única chamada ao Gemini —
+  // então o circuit breaker de cota NÃO pode barrar esse caso.
+  const isPendingUploadOnly = isResume
+    && resumeVideo.status === 'SCHEDULED'
+    && String(resumeVideo.lastError || '').startsWith(PENDING_UPLOAD_MARK);
+
+  // Cross-run circuit breaker (see recentQuotaExhaustion) — a persisted
+  // 429/quota event from moments ago (even from a *previous*, already-
+  // finished process) means this key almost certainly still has no
+  // headroom; skip this project now rather than pay for rediscovering that.
+  if (!isPendingUploadOnly && !forceRun) {
+    const recentExhaustion = await recentQuotaExhaustion(CURRENT_USER_EMAIL);
+    if (recentExhaustion) {
+      const secondsAgo = Math.round((Date.now() - new Date(recentExhaustion.created_at).getTime()) / 1000);
+      const waitMin = Math.ceil(recentExhaustion.remainingMs / 60_000);
+      log('🧊', `Pulando "${data.channelTheme}" — cota Gemini reportada esgotada há ${secondsAgo}s (${recentExhaustion.reason}). Evitando bater na mesma chave de novo; próxima janela em ~${waitMin} min.`);
+      await safeInsertAutopilotLog({
+        project_id: projectId,
+        status: 'retrying',
+        message: `Pulado nesta execução: cota Gemini esgotada recentemente (${recentExhaustion.reason}) — evitando nova tentativa imediata`,
+        step: 'idea',
+        runner: 'github-actions',
+      });
+      stopLockRenewal();
+      await releaseLock(projectId);
+      return false;
+    }
+  }
+
+  // Idempotência: se o vídeo retomado já tem URL do YouTube, o upload anterior
+  // deu certo e só a gravação do status falhou. Re-renderizar publicaria uma
+  // duplicata no canal — apenas finalizamos o registro.
+  if (isResume && resumeVideo.youtubeUrl) {
+    log('✅', `"${resumeVideo.title}" já está publicado (${resumeVideo.youtubeUrl}) — apenas concluindo o registro.`);
+    await updateRunnerVideo(projectId, data, videoId, {
+      status: 'PUBLISHED',
+      retryCount: 0,
+      nextRetryAt: undefined,
+      standbyInfo: undefined,
+      lastError: undefined,
+    }, 'Published video reconciled', 3);
+    await safeInsertAutopilotLog({
+      project_id: projectId,
+      status: 'success',
+      message: `Já publicado: ${resumeVideo.youtubeUrl} — registro reconciliado sem novo upload`,
+      step: 'upload',
+      video_title: resumeVideo.title,
+      runner: 'github-actions',
+    });
+    stopLockRenewal();
+    await releaseLock(projectId);
+    return true;
+  }
+
   log('🚀', isResume
     ? `Retomando "${resumeVideo.title}" (tentativa ${(resumeVideo.retryCount || 0) + 1}/${MAX_AUTO_RETRIES})`
     : `Processing project: "${data.channelTheme}" (${projectId})`);
@@ -1554,6 +1596,8 @@ async function processProject(projectRow) {
     video_title: isResume ? resumeVideo.title : undefined,
     runner: 'github-actions',
   });
+
+
 
 
   let currentStep = 'idea';
