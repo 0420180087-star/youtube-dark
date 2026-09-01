@@ -175,11 +175,39 @@ async function releaseLock(projectId) {
     await supabase
       .from('projects')
       .update({ autopilot_locked_until: null, autopilot_locked_by: null })
-      .eq('id', String(projectId));
+      .eq('id', String(projectId))
+      .then(() => {});
   } catch (e) {
     log('⚠️', `Failed to release autopilot lock for ${projectId}: ${e.message}`);
   }
 }
+
+// O lock tem validade fixa (LOCK_MINUTES). Um projeto longo (render + upload)
+// pode passar dessa janela: o lock cai, a execução seguinte pega o MESMO
+// projeto e publica de novo. Renovar o prazo periodicamente enquanto o
+// projeto processa elimina essa duplicata.
+const LOCK_MINUTES = 45;
+const LOCK_RENEW_MS = 5 * 60 * 1000;
+
+async function renewLock(projectId) {
+  try {
+    await supabase
+      .from('projects')
+      .update({
+        autopilot_locked_until: new Date(Date.now() + LOCK_MINUTES * 60 * 1000).toISOString(),
+        autopilot_locked_by: 'github-actions',
+      })
+      .eq('id', String(projectId))
+      .eq('autopilot_locked_by', 'github-actions');
+  } catch { /* non-fatal — na pior hipótese o lock expira como antes */ }
+}
+
+function startLockRenewal(projectId) {
+  const timer = setInterval(() => { renewLock(projectId); }, LOCK_RENEW_MS);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
 
 // --- HEARTBEAT ---
 // Lets the app prove the headless runner is alive. Without this, "enqueued for
