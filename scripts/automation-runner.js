@@ -1282,7 +1282,7 @@ async function persistProjectData(projectId, data, message = 'Project data persi
       .eq('id', projectId);
     if (!error) return true;
     log('⚠️', `${message} failed (tentativa ${i + 1}/${attempts}): ${error.message}`);
-    if (i < attempts - 1) await delay(2000 * (i + 1));
+    if (i < attempts - 1) await new Promise((r) => setTimeout(r, 2000 * (i + 1)));
   }
   return false;
 }
