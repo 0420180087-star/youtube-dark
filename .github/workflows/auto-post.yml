@@ -45,11 +45,10 @@ jobs:
         run: ffmpeg -version
 
       - name: Instalar dependências
-        # npm ci exige o lockfile já sincronizado com package.json. Como o
-        # tsx é uma dependência nova (necessária para o runner importar os
-        # módulos TS compartilhados com o app), uso npm install aqui — ele
-        # atualiza o lockfile na hora em vez de falhar por divergência.
-        run: npm install
+        # npm ci garante exatamente as versões testadas. Se o lockfile estiver
+        # divergente do package.json, cai para npm install em vez de falhar.
+        run: npm ci || npm install
+
 
       - name: Executar pipeline de automação
         env:
