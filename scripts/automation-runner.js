@@ -1995,11 +1995,26 @@ async function main() {
 
   let successCount = 0;
   let errorCount = 0;
+  let skippedBudget = 0;
+
+  // Orçamento de tempo do job (timeout do workflow = 90 min). Paramos de
+  // começar projetos novos quando não cabe mais um ciclo completo — os
+  // restantes continuam elegíveis para o próximo cron.
+  const JOB_STARTED_AT = Date.now();
+  const JOB_BUDGET_MS = Number(process.env.JOB_BUDGET_MINUTES || 80) * 60 * 1000;
+  const MIN_SLOT_MS = 20 * 60 * 1000;
 
   for (const project of eligible) {
+    const remaining = JOB_BUDGET_MS - (Date.now() - JOB_STARTED_AT);
+    if (remaining < MIN_SLOT_MS) {
+      skippedBudget++;
+      log('⏳', `Sem tempo de job para "${project.data?.channelTheme || project.id}" (restam ${Math.round(remaining / 60000)} min) — fica para o próximo ciclo.`);
+      continue;
+    }
     const ok = await processProject(project);
     if (ok) successCount++;
     else errorCount++;
+
   }
 
   await writeHeartbeat(`ciclo concluído: ${successCount} ok, ${errorCount} falha(s), ${eligible.length} elegível(is)`);
