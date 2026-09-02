@@ -1875,14 +1875,22 @@ async function processProject(projectRow) {
 
     return false;
   } finally {
+    // Pedido explícito já foi atendido nesta execução — a marca não deve
+    // sobreviver e forçar uma nova rodada imediata no próximo cron.
+    if (data.scheduleSettings?.forceRun) {
+      delete data.scheduleSettings.forceRun;
+      await persistProjectData(projectId, data, 'forceRun consumido');
+    }
     if (data.scheduleSettings?.autoGenerate && !data.scheduleSettings.nextScheduledRun) {
       data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
       await persistProjectData(projectId, data, 'Next run saved');
     }
     // Always release the lock — even on crash — so the project isn't
     // permanently blocked from future runs.
+    stopLockRenewal();
     await releaseLock(projectId);
   }
+
 }
 
 
