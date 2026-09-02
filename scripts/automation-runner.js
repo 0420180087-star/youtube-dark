@@ -2017,7 +2017,7 @@ async function main() {
 
   }
 
-  await writeHeartbeat(`ciclo concluído: ${successCount} ok, ${errorCount} falha(s), ${eligible.length} elegível(is)`);
+  await writeHeartbeat(`ciclo concluído: ${successCount} ok, ${errorCount} falha(s), ${eligible.length} elegível(is)${skippedBudget ? `, ${skippedBudget} adiado(s) por tempo` : ''}`);
   log('📊', `Chamadas ao Gemini nesta execução: ${geminiRequestCount}`);
   log('🏁', `=== Done! ✅ ${successCount} success, ❌ ${errorCount} errors ===`);
 }
