@@ -1748,6 +1748,9 @@ async function processProject(projectRow) {
     await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Enviando vídeo para o YouTube', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
     const uploadResult = await stepUploadYouTube(data, metadata, renderResult, thumbnailBase64, projectRow.user_email);
 
+    // Grava a URL ANTES de qualquer outra coisa e com retentativas: se essa
+    // gravação falhar, o vídeo continua retomável e seria re-enviado ao canal
+    // (duplicata). Com o youtubeUrl salvo, a retomada apenas reconcilia.
     await updateRunnerVideo(projectId, data, videoId, {
       status: 'PUBLISHED',
       youtubeUrl: uploadResult?.videoUrl || null,
@@ -1755,7 +1758,8 @@ async function processProject(projectRow) {
       nextRetryAt: undefined,
       standbyInfo: undefined,
       lastError: undefined,
-    }, 'Published video saved');
+    }, 'Published video saved', 5);
+
 
     // Log success
     const duration = Math.round((Date.now() - startTime) / 1000);
@@ -1875,14 +1879,22 @@ async function processProject(projectRow) {
 
     return false;
   } finally {
+    // Pedido explícito já foi atendido nesta execução — a marca não deve
+    // sobreviver e forçar uma nova rodada imediata no próximo cron.
+    if (data.scheduleSettings?.forceRun) {
+      delete data.scheduleSettings.forceRun;
+      await persistProjectData(projectId, data, 'forceRun consumido');
+    }
     if (data.scheduleSettings?.autoGenerate && !data.scheduleSettings.nextScheduledRun) {
       data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
       await persistProjectData(projectId, data, 'Next run saved');
     }
     // Always release the lock — even on crash — so the project isn't
     // permanently blocked from future runs.
+    stopLockRenewal();
     await releaseLock(projectId);
   }
+
 }
 
 
@@ -1941,6 +1953,9 @@ async function main() {
   const eligible = projects.filter((p) => {
     const d = p.data;
     if (PROJECT_ID) return true;
+    // "Executar Agora" no app: pedido explícito do usuário roda já, mesmo com
+    // Auto-Pilot desligado ou fora da janela de horário.
+    if (d?.scheduleSettings?.forceRun) return true;
     if (!d?.scheduleSettings?.autoGenerate) {
       skippedOff.push(d?.channelTheme || p.id);
       return false;
@@ -1955,6 +1970,19 @@ async function main() {
     return nextRun <= now;
   });
 
+  // Ordem justa: pedidos explícitos primeiro, depois o agendamento mais antigo.
+  // Sem isso, o primeiro projeto da query pode consumir o job inteiro e os
+  // outros nunca rodam.
+  eligible.sort((a, b) => {
+    const forcedA = a.data?.scheduleSettings?.forceRun ? 0 : 1;
+    const forcedB = b.data?.scheduleSettings?.forceRun ? 0 : 1;
+    if (forcedA !== forcedB) return forcedA - forcedB;
+    const runA = new Date(a.data?.scheduleSettings?.nextScheduledRun || 0).getTime();
+    const runB = new Date(b.data?.scheduleSettings?.nextScheduledRun || 0).getTime();
+    return runA - runB;
+  });
+
+
   if (skippedOff.length) {
     log('⏭️', `${skippedOff.length} projeto(s) com Auto-Pilot desligado: ${skippedOff.join(', ')}`);
   }
@@ -1967,14 +1995,29 @@ async function main() {
 
   let successCount = 0;
   let errorCount = 0;
+  let skippedBudget = 0;
+
+  // Orçamento de tempo do job (timeout do workflow = 90 min). Paramos de
+  // começar projetos novos quando não cabe mais um ciclo completo — os
+  // restantes continuam elegíveis para o próximo cron.
+  const JOB_STARTED_AT = Date.now();
+  const JOB_BUDGET_MS = Number(process.env.JOB_BUDGET_MINUTES || 80) * 60 * 1000;
+  const MIN_SLOT_MS = 20 * 60 * 1000;
 
   for (const project of eligible) {
+    const remaining = JOB_BUDGET_MS - (Date.now() - JOB_STARTED_AT);
+    if (remaining < MIN_SLOT_MS) {
+      skippedBudget++;
+      log('⏳', `Sem tempo de job para "${project.data?.channelTheme || project.id}" (restam ${Math.round(remaining / 60000)} min) — fica para o próximo ciclo.`);
+      continue;
+    }
     const ok = await processProject(project);
     if (ok) successCount++;
     else errorCount++;
+
   }
 
-  await writeHeartbeat(`ciclo concluído: ${successCount} ok, ${errorCount} falha(s), ${eligible.length} elegível(is)`);
+  await writeHeartbeat(`ciclo concluído: ${successCount} ok, ${errorCount} falha(s), ${eligible.length} elegível(is)${skippedBudget ? `, ${skippedBudget} adiado(s) por tempo` : ''}`);
   log('📊', `Chamadas ao Gemini nesta execução: ${geminiRequestCount}`);
   log('🏁', `=== Done! ✅ ${successCount} success, ❌ ${errorCount} errors ===`);
 }

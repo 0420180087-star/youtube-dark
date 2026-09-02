@@ -340,11 +340,15 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     });
   };
 
-  // Best-effort headless enqueue: writes queue intent to Supabase so the GitHub
-  // Actions runner (if configured) picks it up when the tab is closed. Never
-  // blocks or replaces the local run — the browser pipeline always starts too.
-  const enqueueHeadlessRun = (project: Project) => {
-    if (!supabase || !userEmailRef.current) return;
+  // Enfileira a execução na nuvem. O runner headless (GitHub Actions) é o
+  // ÚNICO produtor do vídeo final — ele renderiza em MP4 pelo FFmpeg, com
+  // crossfade cumulativo, loop de clipes curtos e mix de música a 15%. O
+  // render do navegador (Canvas + MediaRecorder/WebM) não tem esses passos,
+  // então o "Executar Agora" delega para cá e o resultado sai idêntico ao
+  // do automático. `forceRun` diz ao runner para ignorar janela de horário
+  // e cooldown de cota, porque é um pedido explícito do usuário.
+  const enqueueHeadlessRun = async (project: Project): Promise<boolean> => {
+    if (!supabase || !userEmailRef.current) return false;
     const queuedAt = new Date(Date.now() - 1000).toISOString();
     const queuedProject: Project = {
       ...project,
@@ -352,29 +356,34 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
         frequencyDays: project.scheduleSettings?.frequencyDays || 1,
         timeWindowStart: project.scheduleSettings?.timeWindowStart || '12:00',
         timeWindowEnd: project.scheduleSettings?.timeWindowEnd || '18:00',
-        autoGenerate: true,
+        autoGenerate: project.scheduleSettings?.autoGenerate ?? true,
         nextScheduledRun: queuedAt,
+        forceRun: true,
       },
     };
-    (async () => {
-      try {
-        await supabase.from('projects').upsert({
-          id: queuedProject.id,
-          user_email: userEmailRef.current,
-          data: buildCloudProject(queuedProject),
-          updated_at: new Date().toISOString(),
-        }, { onConflict: 'id' });
-        await supabase.from('autopilot_logs').insert({
-          project_id: queuedProject.id,
-          status: 'running',
-          message: 'Execução enfileirada em paralelo para o runner headless (GitHub Actions).',
-          step: 'idea',
-        });
-      } catch (e) {
-        console.warn('[AutoPilot] Enqueue headless falhou (execução local segue):', e);
-      }
-    })();
+    try {
+      await supabase.from('projects').upsert({
+        id: queuedProject.id,
+        user_email: userEmailRef.current,
+        data: buildCloudProject(queuedProject),
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'id' });
+      await supabase.from('autopilot_logs').insert({
+        project_id: queuedProject.id,
+        status: 'running',
+        message: 'Execução enfileirada para o runner headless (GitHub Actions) — o vídeo final será o MP4 do FFmpeg.',
+        step: 'idea',
+        runner: 'github-actions',
+      });
+      // Mantém o estado local coerente com o que foi gravado na nuvem.
+      updateProject(queuedProject.id, { scheduleSettings: queuedProject.scheduleSettings });
+      return true;
+    } catch (e) {
+      console.warn('[AutoPilot] Enqueue headless falhou:', e);
+      return false;
+    }
   };
+
 
   // Clear a stuck distributed lock. Exposed to the UI so the user can unblock
   // themselves without waiting for the 90-min TTL.
@@ -419,14 +428,27 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
     }
 
-    // Fire-and-forget enqueue for the headless runner so the pipeline continues
-    // if the user closes the tab (assuming GitHub Actions is configured).
-    enqueueHeadlessRun(project);
+    // Nuvem disponível: o vídeo é produzido pelo runner headless (MP4/FFmpeg),
+    // exatamente como no modo automático. Nada é renderizado nesta aba.
+    const queued = await enqueueHeadlessRun(project);
+    if (queued) {
+      setAutoPilotStatus(`Na fila da nuvem: ${project.title}`);
+      addLogEntry({
+        projectId: project.id,
+        projectTitle: project.title,
+        status: 'running',
+        message: 'Execução enviada para a nuvem. O runner varre a fila a cada 15 min e publica o MP4 final — pode fechar esta aba.',
+        step: 'idea',
+      });
+      returnStatusToIdle();
+      return;
+    }
 
-    // Always run locally in this tab so the user sees immediate progress.
+    // Sem Supabase configurado: fallback para o pipeline local nesta aba.
     const latestProject = projectsRef.current.find(p => p.id === projectId) || project;
     runFullPipeline(latestProject);
   };
+
 
 
   // --- AUTO-PILOT ENGINE ---
