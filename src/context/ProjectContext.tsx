@@ -428,14 +428,27 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
     }
 
-    // Fire-and-forget enqueue for the headless runner so the pipeline continues
-    // if the user closes the tab (assuming GitHub Actions is configured).
-    enqueueHeadlessRun(project);
+    // Nuvem disponível: o vídeo é produzido pelo runner headless (MP4/FFmpeg),
+    // exatamente como no modo automático. Nada é renderizado nesta aba.
+    const queued = await enqueueHeadlessRun(project);
+    if (queued) {
+      setAutoPilotStatus(`Na fila da nuvem: ${project.title}`);
+      addLogEntry({
+        projectId: project.id,
+        projectTitle: project.title,
+        status: 'running',
+        message: 'Execução enviada para a nuvem. O runner varre a fila a cada 15 min e publica o MP4 final — pode fechar esta aba.',
+        step: 'idea',
+      });
+      returnStatusToIdle();
+      return;
+    }
 
-    // Always run locally in this tab so the user sees immediate progress.
+    // Sem Supabase configurado: fallback para o pipeline local nesta aba.
     const latestProject = projectsRef.current.find(p => p.id === projectId) || project;
     runFullPipeline(latestProject);
   };
+
 
 
   // --- AUTO-PILOT ENGINE ---
