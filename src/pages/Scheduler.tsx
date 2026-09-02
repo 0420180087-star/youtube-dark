@@ -316,10 +316,11 @@ const AutoPilotProjects: React.FC = () => {
           <AlertTriangle className="w-3.5 h-3.5 text-yellow-400 flex-shrink-0 mt-0.5" />
           <span>
             Runner headless (GitHub Actions) não deu sinal nos últimos 60 min.
-            "Executar Agora" continuará rodando localmente enquanto esta aba estiver aberta.
-            Para rodar com a página fechada, configure os secrets do workflow no repositório.
+            "Executar na Nuvem" enfileira o projeto, mas ele só será produzido quando o
+            workflow voltar a rodar — configure os secrets do repositório (SETUP.md).
           </span>
         </div>
+
       )}
 
 
