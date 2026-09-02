@@ -17,7 +17,7 @@ on:
 jobs:
   auto-post:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 90   # alinhado ao orçamento do runner (JOB_BUDGET_MINUTES=80)
 
     steps:
       - name: Checkout
