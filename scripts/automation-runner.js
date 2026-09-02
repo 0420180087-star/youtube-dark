@@ -1748,6 +1748,9 @@ async function processProject(projectRow) {
     await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Enviando vídeo para o YouTube', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
     const uploadResult = await stepUploadYouTube(data, metadata, renderResult, thumbnailBase64, projectRow.user_email);
 
+    // Grava a URL ANTES de qualquer outra coisa e com retentativas: se essa
+    // gravação falhar, o vídeo continua retomável e seria re-enviado ao canal
+    // (duplicata). Com o youtubeUrl salvo, a retomada apenas reconcilia.
     await updateRunnerVideo(projectId, data, videoId, {
       status: 'PUBLISHED',
       youtubeUrl: uploadResult?.videoUrl || null,
@@ -1755,7 +1758,8 @@ async function processProject(projectRow) {
       nextRetryAt: undefined,
       standbyInfo: undefined,
       lastError: undefined,
-    }, 'Published video saved');
+    }, 'Published video saved', 5);
+
 
     // Log success
     const duration = Math.round((Date.now() - startTime) / 1000);
