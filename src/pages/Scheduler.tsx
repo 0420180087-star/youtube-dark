@@ -297,7 +297,7 @@ const AutoPilotProjects: React.FC = () => {
                   className="flex-1 flex items-center justify-center gap-1.5 bg-orange-600 hover:bg-orange-500 disabled:bg-slate-700 disabled:text-slate-500 text-white text-xs font-bold py-2 rounded-lg transition-colors"
                 >
                   <Zap className="w-3.5 h-3.5" />
-                  {isRunning ? 'Executando local...' : 'Executar Agora'}
+                  {isRunning ? 'Executando...' : 'Executar na Nuvem'}
                 </button>
                 <Link
                   to={`/project/${p.id}`}
