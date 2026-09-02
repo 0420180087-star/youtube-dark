@@ -1953,6 +1953,9 @@ async function main() {
   const eligible = projects.filter((p) => {
     const d = p.data;
     if (PROJECT_ID) return true;
+    // "Executar Agora" no app: pedido explícito do usuário roda já, mesmo com
+    // Auto-Pilot desligado ou fora da janela de horário.
+    if (d?.scheduleSettings?.forceRun) return true;
     if (!d?.scheduleSettings?.autoGenerate) {
       skippedOff.push(d?.channelTheme || p.id);
       return false;
@@ -1966,6 +1969,19 @@ async function main() {
       : new Date(0);
     return nextRun <= now;
   });
+
+  // Ordem justa: pedidos explícitos primeiro, depois o agendamento mais antigo.
+  // Sem isso, o primeiro projeto da query pode consumir o job inteiro e os
+  // outros nunca rodam.
+  eligible.sort((a, b) => {
+    const forcedA = a.data?.scheduleSettings?.forceRun ? 0 : 1;
+    const forcedB = b.data?.scheduleSettings?.forceRun ? 0 : 1;
+    if (forcedA !== forcedB) return forcedA - forcedB;
+    const runA = new Date(a.data?.scheduleSettings?.nextScheduledRun || 0).getTime();
+    const runB = new Date(b.data?.scheduleSettings?.nextScheduledRun || 0).getTime();
+    return runA - runB;
+  });
+
 
   if (skippedOff.length) {
     log('⏭️', `${skippedOff.length} projeto(s) com Auto-Pilot desligado: ${skippedOff.join(', ')}`);
