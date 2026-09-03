@@ -36,7 +36,42 @@ export async function refreshAccessToken(clientId, clientSecret, refreshToken) {
 }
 
 
-// Faz upload do vídeo para o YouTube (resumable upload)
+// Reconciliação anti-duplicata: procura nos uploads recentes do canal um vídeo
+// com o mesmo título. Usado quando um upload pode ter dado certo mas a gravação
+// do youtubeUrl falhou — sem isso a retomada publicaria o vídeo duas vezes.
+export async function findRecentUploadByTitle(accessToken, title) {
+  const norm = (s) => String(s || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  const target = norm(title);
+  if (!target) return null;
+
+  const api = async (url) => {
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: withTimeout(TIMEOUT.INIT),
+    });
+    if (!res.ok) throw new Error(`YouTube API ${res.status}: ${await res.text()}`);
+    return res.json();
+  };
+
+  // uploads playlist do canal autenticado → últimos 25 vídeos (inclui privados)
+  const channels = await api('https://www.googleapis.com/youtube/v3/channels?part=contentDetails&mine=true');
+  const uploadsId = channels?.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
+  if (!uploadsId) return null;
+
+  const list = await api(
+    `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&maxResults=25&playlistId=${uploadsId}`
+  );
+  const match = (list?.items || []).find((it) => norm(it?.snippet?.title) === target);
+  if (!match) return null;
+
+  const videoId = match.snippet?.resourceId?.videoId;
+  if (!videoId) return null;
+  return { videoId, videoUrl: `https://youtube.com/watch?v=${videoId}` };
+}
+
+
 export async function uploadVideoFile(accessToken, videoPath, metadata) {
   const fileSize = fs.statSync(videoPath).size;
   console.log(`  📤 Iniciando upload — ${(fileSize / 1024 / 1024).toFixed(1)}MB`);
