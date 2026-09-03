@@ -1946,7 +1946,15 @@ async function processProject(projectRow) {
     const renderResult = await stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, data, audioMimeType);
 
     if (!data.scheduleSettings) data.scheduleSettings = {};
-    data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
+    // Nunca retrocede o agendamento já reservado no início do ciclo.
+    {
+      const candidate = calculateNextRunIso(data.scheduleSettings);
+      const current = data.scheduleSettings.nextScheduledRun
+        ? new Date(data.scheduleSettings.nextScheduledRun).getTime()
+        : 0;
+      if (new Date(candidate).getTime() > current) data.scheduleSettings.nextScheduledRun = candidate;
+    }
+
 
     // Step 8: Upload — skipped (not failed!) when the channel is disconnected.
     // The video stays SCHEDULED and publishes automatically after reconnection.
