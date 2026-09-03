@@ -1570,12 +1570,9 @@ async function recentQuotaExhaustion(userEmail) {
 
 async function processProject(projectRow) {
   const projectId = projectRow.id;
-  const data = projectRow.data || {};
+  let data = projectRow.data || {};
   const startTime = Date.now();
   let videoTitle = data.channelTheme || projectId;
-  // Pedido explícito do usuário ("Executar Agora" no app) — ignora janela de
-  // horário e cooldown de cota, porque alguém está esperando o resultado.
-  const forceRun = !!data.scheduleSettings?.forceRun || !!PROJECT_ID;
   let stopLockRenewal = () => {};
 
   // Acquire distributed lock — prevents browser scheduler from running
@@ -1594,9 +1591,31 @@ async function processProject(projectRow) {
     return false;
   }
 
+  // Releitura pós-lock: o snapshot da query pode ter minutos de idade. Gravar o
+  // blob antigo desfaria um agendamento já avançado por outra execução (lost
+  // update) e o projeto voltaria a parecer "vencido" — postando de novo.
+  try {
+    const { data: fresh, error: freshErr } = await supabase
+      .from('projects')
+      .select('data')
+      .eq('id', projectId)
+      .maybeSingle();
+    if (!freshErr && fresh?.data) {
+      data = fresh.data;
+      videoTitle = data.channelTheme || projectId;
+    }
+  } catch (e) {
+    log('⚠️', `Não foi possível reler o projeto após o lock: ${e.message} — seguindo com o snapshot.`);
+  }
+
+  // Pedido explícito do usuário ("Executar Agora" no app) — ignora janela de
+  // horário e cooldown de cota, porque alguém está esperando o resultado.
+  const forceRun = !!data.scheduleSettings?.forceRun || !!PROJECT_ID;
+
   // Renova o lock enquanto o projeto processa — sem isso, um render longo
   // deixaria o lock expirar e a execução seguinte publicaria o mesmo vídeo.
   stopLockRenewal = startLockRenewal(projectId);
+
 
   // Load per-user API keys (Gemini/Pexels) — owner of this project
   CURRENT_USER_EMAIL = normalizeEmail(projectRow.user_email);
