@@ -1971,7 +1971,11 @@ async function processProject(projectRow) {
 
     currentStep = 'upload';
     await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Enviando vídeo para o YouTube', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
+    // Marca a tentativa ANTES do upload: se o processo cair no meio, a retomada
+    // sabe que precisa conferir o canal em vez de simplesmente reenviar.
+    await updateRunnerVideo(projectId, data, videoId, { uploadStartedAt: new Date().toISOString() }, 'Upload iniciado', 3);
     const uploadResult = await stepUploadYouTube(data, metadata, renderResult, thumbnailBase64, projectRow.user_email);
+
 
     // Grava a URL ANTES de qualquer outra coisa e com retentativas: se essa
     // gravação falhar, o vídeo continua retomável e seria re-enviado ao canal
