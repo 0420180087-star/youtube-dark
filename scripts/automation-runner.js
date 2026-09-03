@@ -764,7 +764,14 @@ async function stepIdea(projectData) {
   log('💡', 'Step 1: Finding idea...');
 
   const ideas = projectData.ideas || [];
-  const unused = ideas.find((i) => i.status === 'new');
+  const used = usedTitleIndex(projectData);
+  // Ideia "new" só serve se o título ainda não foi usado por nenhum vídeo.
+  const unused = ideas.find((i) => {
+    if (i?.status !== 'new') return false;
+    const key = normalizeTitle(i.topic);
+    const timesUsed = (projectData.videos || []).filter((v) => normalizeTitle(v.title) === key).length;
+    return key && timesUsed === 0;
+  });
 
   if (unused) {
     unused.status = 'used';
@@ -777,39 +784,82 @@ async function stepIdea(projectData) {
     ...(projectData.ideas || []).map((i) => i.topic),
     ...(projectData.videos || []).map((v) => v.title),
   ].filter(Boolean).slice(-50);
-  const prompt = `You are a YouTube content strategist. Generate 5 unique video ideas for a channel about "${projectData.channelTheme}".
+
+  const buildPrompt = (extraBan = []) => `You are a YouTube content strategist. Generate 5 unique video ideas for a channel about "${projectData.channelTheme}".
 Tone: ${projectData.defaultTone || 'Engaging'}.
 Language: ${projectData.language || 'en'}.
-Avoid these already-used topics: ${usedTopics.join(' | ') || 'none'}.
+Avoid these already-used topics (never reuse or lightly rephrase them): ${[...usedTopics, ...extraBan].join(' | ') || 'none'}.
+Each topic must be clearly distinct in subject, not just in wording.
 
 Return JSON: { "ideas": [{ "topic": "video title", "context": "brief description", "specificContext": "detailed angle" }] }`;
 
+  const freshFrom = (batch) => batch.filter((i) => {
+    const key = normalizeTitle(i.topic);
+    return key && !used.has(key);
+  });
+
   let generatedIdeas = [];
+  let freshIdeas = [];
   try {
-    generatedIdeas = normalizeIdeaBatch(await geminiGenerateJSON(prompt));
+    generatedIdeas = normalizeIdeaBatch(await geminiGenerateJSON(buildPrompt()));
     if (!generatedIdeas.length) throw new Error('AI returned no ideas');
+    freshIdeas = freshFrom(generatedIdeas);
+    // Segunda rodada: todas repetidas → pedir outras em vez de aceitar duplicata.
+    if (!freshIdeas.length) {
+      log('♻️', 'Lote do brainstorm veio todo repetido — pedindo uma segunda rodada.');
+      const second = normalizeIdeaBatch(await geminiGenerateJSON(buildPrompt(generatedIdeas.map((i) => i.topic))));
+      generatedIdeas = second.length ? second : generatedIdeas;
+      freshIdeas = freshFrom(generatedIdeas);
+    }
   } catch (e) {
-    // Fallback: never block autopilot just because brainstorm failed
     log('⚠️', `Brainstorm fallback (IA falhou: ${e.message}). Gerando ideia automática.`);
-    const seeds = ['The Untold Story of', 'The Hidden Truth Behind', 'What Nobody Tells You About', 'Why Everyone is Wrong About'];
-    generatedIdeas = seeds.slice(0, 3).map((seed) => makeProjectIdea({
-      topic: `${seed} ${projectData.channelTheme}`,
-      context: `An engaging deep-dive about ${projectData.channelTheme}.`,
-      specificContext: `Explore ${projectData.channelTheme} from a fresh, click-worthy angle. ${projectData.description || ''}`.trim(),
-    }, 'new'));
+    generatedIdeas = [];
   }
 
-  const existingTopics = new Set(ideas.map((i) => i.topic));
-  const freshIdeas = generatedIdeas.filter((i) => !existingTopics.has(i.topic));
-  const chosen = freshIdeas[0] || generatedIdeas[0];
+  // Fallback determinístico era sempre o MESMO título ("The Untold Story of X")
+  // toda vez que a IA falhava. Agora combina semente + ângulo + discriminador e
+  // ainda passa pelo filtro de duplicatas.
+  if (!freshIdeas.length) {
+    const seeds = ['The Untold Story of', 'The Hidden Truth Behind', 'What Nobody Tells You About', 'Why Everyone is Wrong About', 'The Real Reason Behind', 'Inside the Mystery of'];
+    const angles = ['— Part', '— Case', '— File', '— Chapter'];
+    const serial = (projectData.videos || []).length + 1;
+    const stamp = new Date().toISOString().slice(0, 10);
+    const candidates = [];
+    for (const seed of seeds) {
+      for (const angle of angles) {
+        candidates.push(makeProjectIdea({
+          topic: `${seed} ${projectData.channelTheme} ${angle} ${serial}`,
+          context: `An engaging deep-dive about ${projectData.channelTheme}.`,
+          specificContext: `Explore ${projectData.channelTheme} from a fresh, click-worthy angle (${stamp}). ${projectData.description || ''}`.trim(),
+        }, 'new'));
+      }
+    }
+    generatedIdeas = candidates;
+    freshIdeas = freshFrom(candidates).slice(0, 3);
+    // Último recurso: título com timestamp — único por construção.
+    if (!freshIdeas.length) {
+      freshIdeas = [makeProjectIdea({
+        topic: `${projectData.channelTheme} — Episode ${serial} (${stamp})`,
+        context: `An engaging deep-dive about ${projectData.channelTheme}.`,
+        specificContext: `Fresh angle on ${projectData.channelTheme}. ${projectData.description || ''}`.trim(),
+      }, 'new')];
+    }
+  }
+
+  const chosen = freshIdeas[0];
+  const chosenKey = normalizeTitle(chosen.topic);
   const updatedIdeas = [
     ...ideas,
-    ...freshIdeas.map((i, idx) => ({ ...i, status: i.topic === chosen.topic && idx === 0 ? 'used' : 'new' })),
+    ...freshIdeas.map((i) => ({
+      ...i,
+      status: normalizeTitle(i.topic) === chosenKey ? 'used' : 'new',
+    })),
   ];
 
   log('✅', `Generated brainstorm batch (${freshIdeas.length}) and selected: "${chosen.topic}"`);
   return { topic: chosen.topic, context: chosen.context, specificContext: chosen.specificContext, updatedIdeas };
 }
+
 
 async function stepScript(topic, projectData) {
   log('📝', 'Step 2: Generating script...');
