@@ -2030,7 +2030,11 @@ async function processProject(projectRow) {
     };
     data.standbyInfo = standbyInfo;
     if (data.scheduleSettings?.autoGenerate) {
-      data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
+      const candidate = calculateNextRunIso(data.scheduleSettings);
+      const current = data.scheduleSettings.nextScheduledRun
+        ? new Date(data.scheduleSettings.nextScheduledRun).getTime()
+        : 0;
+      if (new Date(candidate).getTime() > current) data.scheduleSettings.nextScheduledRun = candidate;
     }
 
     if (videoId) {
