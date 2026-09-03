@@ -1894,14 +1894,44 @@ async function processProject(projectRow) {
       await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Gerando título, descrição e tags', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
       metadata = await stepMetadata(idea.topic, script, data);
     }
-    videoTitle = metadata.youtubeTitle || metadata.title || idea.topic;
+    // Título final não pode colidir com nada já publicado no projeto. O título
+    // vinha direto da IA e podia repetir um vídeo antigo.
+    let finalTitle = metadata.youtubeTitle || metadata.title || idea.topic;
+    const publishedTitles = new Set(
+      (data.videos || [])
+        .filter((v) => v.id !== videoId)
+        .flatMap((v) => [normalizeTitle(v.title), normalizeTitle(v.videoMetadata?.youtubeTitle)])
+        .filter(Boolean)
+    );
+    if (publishedTitles.has(normalizeTitle(finalTitle))) {
+      log('♻️', `Título "${finalTitle}" já usado neste projeto — pedindo alternativa.`);
+      let alternative = '';
+      try {
+        const alt = await geminiGenerateJSON(
+          `Rewrite this YouTube title so it is clearly distinct from the ones already used on the channel, same topic and language, max 90 chars.\nTitle: "${finalTitle}"\nAlready used: ${[...publishedTitles].join(' | ')}\nReturn JSON: { "title": "..." }`
+        );
+        alternative = String(alt?.title || '').trim();
+      } catch (e) {
+        log('⚠️', `Falha ao gerar título alternativo: ${e.message}`);
+      }
+      if (alternative && !publishedTitles.has(normalizeTitle(alternative))) {
+        finalTitle = alternative;
+      } else {
+        // Diferenciador determinístico — melhor que publicar título idêntico.
+        finalTitle = `${finalTitle} — Part ${(data.videos || []).length}`;
+      }
+      log('✅', `Novo título: "${finalTitle}"`);
+    }
+    videoTitle = finalTitle;
     await updateRunnerVideo(projectId, data, videoId, { title: videoTitle, videoMetadata: {
-      youtubeTitle: metadata.youtubeTitle || metadata.title || idea.topic,
+      youtubeTitle: finalTitle,
       youtubeDescription: metadata.youtubeDescription || metadata.description || '',
       tags: metadata.tags || [],
       categoryId: metadata.categoryId || '22',
       visibility: metadata.visibility || 'public',
     } }, 'Metadata saved');
+    metadata = { ...metadata, youtubeTitle: finalTitle, title: finalTitle };
+
 
     // Step 7: Render Video (now receives audio!)
     currentStep = 'render';
