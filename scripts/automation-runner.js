@@ -1839,7 +1839,14 @@ async function processProject(projectRow) {
         updatedAt: new Date().toISOString(),
       });
       await persistProjectData(projectId, data, 'Draft video saved');
+
+      // Reserva o slot do ciclo agora, antes de gastar IA/tempo: se o job cair
+      // no meio, o cron de 15 min não cria OUTRO vídeo — o interrompido é
+      // retomado pelo caminho de retry.
+      const reserved = await reserveNextRun(projectId, data);
+      log('🔒', `Slot reservado — próxima execução programada para ${reserved}`);
     }
+
 
     // Step 2: Script — reused on resume (already persisted, no need to pay again)
     currentStep = 'script';
