@@ -1278,6 +1278,65 @@ function calculateNextRunIso(settings = {}) {
   return nextRun.toISOString();
 }
 
+// --- TÍTULOS ÚNICOS ---
+// Comparação normalizada: minúsculas, sem acentos, sem pontuação. Sem isso,
+// "A Verdade Sobre X" e "a verdade sobre x!" passavam como títulos diferentes.
+function normalizeTitle(s) {
+  return String(s || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// Índice de tudo que já foi usado no projeto: ideias, títulos de vídeo e
+// títulos publicados no YouTube.
+function usedTitleIndex(data = {}) {
+  const set = new Set();
+  for (const i of data.ideas || []) if (i?.topic) set.add(normalizeTitle(i.topic));
+  for (const v of data.videos || []) {
+    if (v?.title) set.add(normalizeTitle(v.title));
+    if (v?.videoMetadata?.youtubeTitle) set.add(normalizeTitle(v.videoMetadata.youtubeTitle));
+  }
+  set.delete('');
+  return set;
+}
+
+// --- TETO DE PUBLICAÇÕES POR PERÍODO ---
+// "1 vídeo por dia" precisa ser um limite, não só uma sugestão de horário.
+// Conta vídeos já publicados (ou prontos aguardando upload) dentro do período
+// corrente de `frequencyDays`.
+function publishedInCurrentPeriod(data = {}, now = Date.now()) {
+  const freqDays = Math.max(1, Number(data.scheduleSettings?.frequencyDays) || 1);
+  const windowMs = freqDays * 24 * 60 * 60 * 1000;
+  const videos = Array.isArray(data.videos) ? data.videos : [];
+  return videos.filter((v) => {
+    const counts = v?.status === 'PUBLISHED'
+      || (v?.status === 'SCHEDULED' && (v.youtubeUrl || String(v.lastError || '').startsWith(PENDING_UPLOAD_MARK)));
+    if (!counts) return false;
+    const ts = new Date(v.updatedAt || v.createdAt || 0).getTime();
+    return Number.isFinite(ts) && now - ts < windowMs;
+  }).length;
+}
+
+// Reserva o slot ANTES de gastar tempo/IA: se o processo morrer no meio, o
+// projeto não volta a ser elegível hoje (o vídeo interrompido é retomado pelo
+// caminho de retry, que não cria vídeo novo).
+async function reserveNextRun(projectId, data) {
+  if (!data.scheduleSettings) data.scheduleSettings = {};
+  const candidate = calculateNextRunIso(data.scheduleSettings);
+  const current = data.scheduleSettings.nextScheduledRun
+    ? new Date(data.scheduleSettings.nextScheduledRun).getTime()
+    : 0;
+  // Nunca retroceder o agendamento.
+  if (new Date(candidate).getTime() > current) {
+    data.scheduleSettings.nextScheduledRun = candidate;
+  }
+  data.scheduleSettings.lastPublishAttemptAt = new Date().toISOString();
+  await persistProjectData(projectId, data, 'Slot do ciclo reservado', 3);
+  return data.scheduleSettings.nextScheduledRun;
+}
+
+
+
 async function persistProjectData(projectId, data, message = 'Project data persisted', attempts = 1) {
   for (let i = 0; i < Math.max(1, attempts); i++) {
     const { error } = await supabase
