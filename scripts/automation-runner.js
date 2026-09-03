@@ -1716,6 +1716,67 @@ async function processProject(projectRow) {
     return true;
   }
 
+  // Reconciliação anti-duplicata: o upload chegou a começar mas o youtubeUrl
+  // não foi gravado. Pode ter dado certo — re-enviar publicaria o mesmo vídeo
+  // duas vezes. Conferimos os uploads recentes do canal antes de repetir.
+  if (isResume && resumeVideo.uploadStartedAt && !resumeVideo.youtubeUrl && tokenHealth.ok) {
+    try {
+      const accessToken = await resolveProjectAccessToken({ ...data, id: projectId }, projectRow.user_email);
+      const existing = await findRecentUploadByTitle(
+        accessToken,
+        resumeVideo.videoMetadata?.youtubeTitle || resumeVideo.title
+      );
+      if (existing) {
+        log('✅', `"${resumeVideo.title}" já existe no canal (${existing.videoUrl}) — reconciliando sem novo upload.`);
+        await updateRunnerVideo(projectId, data, videoId, {
+          status: 'PUBLISHED',
+          youtubeUrl: existing.videoUrl,
+          retryCount: 0,
+          nextRetryAt: undefined,
+          standbyInfo: undefined,
+          lastError: undefined,
+        }, 'Published video reconciled via YouTube', 5);
+        await safeInsertAutopilotLog({
+          project_id: projectId,
+          status: 'success',
+          message: `Duplicata evitada: vídeo já estava no canal (${existing.videoUrl}) — registro reconciliado`,
+          step: 'upload',
+          video_title: resumeVideo.title,
+          runner: 'github-actions',
+        });
+        stopLockRenewal();
+        await releaseLock(projectId);
+        return true;
+      }
+    } catch (e) {
+      log('⚠️', `Não foi possível conferir uploads recentes do canal: ${e.message} — seguindo com cuidado.`);
+    }
+  }
+
+  // Teto real de publicações por período: "1 vídeo por dia" precisa limitar,
+  // não só sugerir horário. Retomadas não contam (não criam vídeo novo).
+  if (!isResume && !forceRun) {
+    const alreadyDone = publishedInCurrentPeriod(data);
+    if (alreadyDone >= 1) {
+      const freqDays = Math.max(1, Number(data.scheduleSettings?.frequencyDays) || 1);
+      log('🛑', `"${data.channelTheme}" já tem ${alreadyDone} vídeo(s) neste período de ${freqDays} dia(s) — cota do período cumprida, nada a fazer.`);
+      // Garante que o horário está à frente para não reentrar a cada 15 min.
+      await reserveNextRun(projectId, data);
+      await safeInsertAutopilotLog({
+        project_id: projectId,
+        status: 'success',
+        message: `Cota do período já cumprida (${alreadyDone} vídeo(s) em ${freqDays} dia(s)). Próxima execução: ${data.scheduleSettings?.nextScheduledRun}`,
+        step: 'idea',
+        runner: 'github-actions',
+      });
+      stopLockRenewal();
+      await releaseLock(projectId);
+      return true;
+    }
+  }
+
+
+
   log('🚀', isResume
     ? `Retomando "${resumeVideo.title}" (tentativa ${(resumeVideo.retryCount || 0) + 1}/${MAX_AUTO_RETRIES})`
     : `Processing project: "${data.channelTheme}" (${projectId})`);
