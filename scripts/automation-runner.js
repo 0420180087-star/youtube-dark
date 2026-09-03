@@ -17,7 +17,7 @@ import os from 'os';
 import fs from 'fs';
 import { spawn } from 'child_process';
 import { renderVideo, cleanupTmp } from './videoRenderer.js';
-import { refreshAccessToken, uploadVideoFile, uploadThumbnail } from './youtubeUploader.js';
+import { refreshAccessToken, uploadVideoFile, uploadThumbnail, findRecentUploadByTitle } from './youtubeUploader.js';
 
 // Shared visuals-resolution engine (Fase 2: unificação com o app). Same
 // Pexels→Gemini logic, reuse-on-resume, and no-placeholder guarantee as the
@@ -764,7 +764,14 @@ async function stepIdea(projectData) {
   log('💡', 'Step 1: Finding idea...');
 
   const ideas = projectData.ideas || [];
-  const unused = ideas.find((i) => i.status === 'new');
+  const used = usedTitleIndex(projectData);
+  // Ideia "new" só serve se o título ainda não foi usado por nenhum vídeo.
+  const unused = ideas.find((i) => {
+    if (i?.status !== 'new') return false;
+    const key = normalizeTitle(i.topic);
+    const timesUsed = (projectData.videos || []).filter((v) => normalizeTitle(v.title) === key).length;
+    return key && timesUsed === 0;
+  });
 
   if (unused) {
     unused.status = 'used';
@@ -777,39 +784,82 @@ async function stepIdea(projectData) {
     ...(projectData.ideas || []).map((i) => i.topic),
     ...(projectData.videos || []).map((v) => v.title),
   ].filter(Boolean).slice(-50);
-  const prompt = `You are a YouTube content strategist. Generate 5 unique video ideas for a channel about "${projectData.channelTheme}".
+
+  const buildPrompt = (extraBan = []) => `You are a YouTube content strategist. Generate 5 unique video ideas for a channel about "${projectData.channelTheme}".
 Tone: ${projectData.defaultTone || 'Engaging'}.
 Language: ${projectData.language || 'en'}.
-Avoid these already-used topics: ${usedTopics.join(' | ') || 'none'}.
+Avoid these already-used topics (never reuse or lightly rephrase them): ${[...usedTopics, ...extraBan].join(' | ') || 'none'}.
+Each topic must be clearly distinct in subject, not just in wording.
 
 Return JSON: { "ideas": [{ "topic": "video title", "context": "brief description", "specificContext": "detailed angle" }] }`;
 
+  const freshFrom = (batch) => batch.filter((i) => {
+    const key = normalizeTitle(i.topic);
+    return key && !used.has(key);
+  });
+
   let generatedIdeas = [];
+  let freshIdeas = [];
   try {
-    generatedIdeas = normalizeIdeaBatch(await geminiGenerateJSON(prompt));
+    generatedIdeas = normalizeIdeaBatch(await geminiGenerateJSON(buildPrompt()));
     if (!generatedIdeas.length) throw new Error('AI returned no ideas');
+    freshIdeas = freshFrom(generatedIdeas);
+    // Segunda rodada: todas repetidas → pedir outras em vez de aceitar duplicata.
+    if (!freshIdeas.length) {
+      log('♻️', 'Lote do brainstorm veio todo repetido — pedindo uma segunda rodada.');
+      const second = normalizeIdeaBatch(await geminiGenerateJSON(buildPrompt(generatedIdeas.map((i) => i.topic))));
+      generatedIdeas = second.length ? second : generatedIdeas;
+      freshIdeas = freshFrom(generatedIdeas);
+    }
   } catch (e) {
-    // Fallback: never block autopilot just because brainstorm failed
     log('⚠️', `Brainstorm fallback (IA falhou: ${e.message}). Gerando ideia automática.`);
-    const seeds = ['The Untold Story of', 'The Hidden Truth Behind', 'What Nobody Tells You About', 'Why Everyone is Wrong About'];
-    generatedIdeas = seeds.slice(0, 3).map((seed) => makeProjectIdea({
-      topic: `${seed} ${projectData.channelTheme}`,
-      context: `An engaging deep-dive about ${projectData.channelTheme}.`,
-      specificContext: `Explore ${projectData.channelTheme} from a fresh, click-worthy angle. ${projectData.description || ''}`.trim(),
-    }, 'new'));
+    generatedIdeas = [];
   }
 
-  const existingTopics = new Set(ideas.map((i) => i.topic));
-  const freshIdeas = generatedIdeas.filter((i) => !existingTopics.has(i.topic));
-  const chosen = freshIdeas[0] || generatedIdeas[0];
+  // Fallback determinístico era sempre o MESMO título ("The Untold Story of X")
+  // toda vez que a IA falhava. Agora combina semente + ângulo + discriminador e
+  // ainda passa pelo filtro de duplicatas.
+  if (!freshIdeas.length) {
+    const seeds = ['The Untold Story of', 'The Hidden Truth Behind', 'What Nobody Tells You About', 'Why Everyone is Wrong About', 'The Real Reason Behind', 'Inside the Mystery of'];
+    const angles = ['— Part', '— Case', '— File', '— Chapter'];
+    const serial = (projectData.videos || []).length + 1;
+    const stamp = new Date().toISOString().slice(0, 10);
+    const candidates = [];
+    for (const seed of seeds) {
+      for (const angle of angles) {
+        candidates.push(makeProjectIdea({
+          topic: `${seed} ${projectData.channelTheme} ${angle} ${serial}`,
+          context: `An engaging deep-dive about ${projectData.channelTheme}.`,
+          specificContext: `Explore ${projectData.channelTheme} from a fresh, click-worthy angle (${stamp}). ${projectData.description || ''}`.trim(),
+        }, 'new'));
+      }
+    }
+    generatedIdeas = candidates;
+    freshIdeas = freshFrom(candidates).slice(0, 3);
+    // Último recurso: título com timestamp — único por construção.
+    if (!freshIdeas.length) {
+      freshIdeas = [makeProjectIdea({
+        topic: `${projectData.channelTheme} — Episode ${serial} (${stamp})`,
+        context: `An engaging deep-dive about ${projectData.channelTheme}.`,
+        specificContext: `Fresh angle on ${projectData.channelTheme}. ${projectData.description || ''}`.trim(),
+      }, 'new')];
+    }
+  }
+
+  const chosen = freshIdeas[0];
+  const chosenKey = normalizeTitle(chosen.topic);
   const updatedIdeas = [
     ...ideas,
-    ...freshIdeas.map((i, idx) => ({ ...i, status: i.topic === chosen.topic && idx === 0 ? 'used' : 'new' })),
+    ...freshIdeas.map((i) => ({
+      ...i,
+      status: normalizeTitle(i.topic) === chosenKey ? 'used' : 'new',
+    })),
   ];
 
   log('✅', `Generated brainstorm batch (${freshIdeas.length}) and selected: "${chosen.topic}"`);
   return { topic: chosen.topic, context: chosen.context, specificContext: chosen.specificContext, updatedIdeas };
 }
+
 
 async function stepScript(topic, projectData) {
   log('📝', 'Step 2: Generating script...');
@@ -1117,9 +1167,10 @@ async function stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, pro
   return { videoPath, tmpDir };
 }
 
-async function stepUploadYouTube(projectData, metadata, renderResult, thumbnailBase64, userEmail) {
-  log('📤', 'Step 8: Uploading to YouTube...');
-
+// Resolve um access_token válido do canal deste projeto (reusa o cache do
+// project_auth, senão troca o refresh_token). Usado tanto pelo upload quanto
+// pela reconciliação anti-duplicata.
+async function resolveProjectAccessToken(projectData, userEmail) {
   if (!YOUTUBE_CLIENT_ID || !YOUTUBE_CLIENT_SECRET) {
     throw new Error('YouTube credentials not configured');
   }
@@ -1139,7 +1190,6 @@ async function stepUploadYouTube(projectData, metadata, renderResult, thumbnailB
       .limit(1);
     if (error) throw new Error(`Falha ao buscar auth do projeto: ${error.message}`);
     authRow = data?.[0] || null;
-
   }
 
   const refreshToken = authRow?.youtube_refresh_token;
@@ -1148,57 +1198,61 @@ async function stepUploadYouTube(projectData, metadata, renderResult, thumbnailB
   }
 
   // Reuse cached access_token if it still has >5min of life
-  let accessToken = null;
   if (authRow?.youtube_access_token && authRow?.token_expires_at) {
     const msLeft = new Date(authRow.token_expires_at).getTime() - Date.now();
     if (msLeft > 5 * 60 * 1000) {
-      accessToken = authRow.youtube_access_token;
       log('🔑', `Reusing cached access token (expires in ${Math.round(msLeft / 60000)}min)`);
+      return authRow.youtube_access_token;
     }
   }
 
+  // Auto-login: exchange refresh_token → fresh access_token
+  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    signal: AbortSignal.timeout(30_000),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      client_id: YOUTUBE_CLIENT_ID,
+      client_secret: YOUTUBE_CLIENT_SECRET,
+      refresh_token: refreshToken,
+      grant_type: 'refresh_token',
+    }),
+  });
+  const tokens = await tokenRes.json();
+  if (!tokens.access_token) {
+    const needsReconnect = tokens.error === 'invalid_grant';
+    throw new Error(
+      needsReconnect
+        ? 'YouTube refresh_token foi revogado pelo Google. Reconecte o canal no app.'
+        : `Falha ao renovar token: ${JSON.stringify(tokens)}`
+    );
+  }
+  const accessToken = tokens.access_token;
+  const expiresAt = new Date(Date.now() + (tokens.expires_in || 3600) * 1000).toISOString();
+  log('🔑', 'Access token renovado via refresh_token (auto-login)');
+
+  // Persist fresh access_token + expiry back to project_auth so o app
+  // e próximas execuções reusem sem precisar revalidar
+  if (authRow?.project_id && authRow?.user_email) {
+    await supabase
+      .from('project_auth')
+      .update({
+        youtube_access_token: accessToken,
+        token_expires_at: expiresAt,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('project_id', authRow.project_id)
+      .eq('user_email', authRow.user_email);
+  }
+
+  return accessToken;
+}
+
+async function stepUploadYouTube(projectData, metadata, renderResult, thumbnailBase64, userEmail) {
+  log('📤', 'Step 8: Uploading to YouTube...');
+
   try {
-    if (!accessToken) {
-      // Auto-login: exchange refresh_token → fresh access_token
-      const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-        method: 'POST',
-        signal: AbortSignal.timeout(30_000),
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          client_id: YOUTUBE_CLIENT_ID,
-          client_secret: YOUTUBE_CLIENT_SECRET,
-          refresh_token: refreshToken,
-          grant_type: 'refresh_token',
-        }),
-      });
-      const tokens = await tokenRes.json();
-      if (!tokens.access_token) {
-        const needsReconnect = tokens.error === 'invalid_grant';
-        throw new Error(
-          needsReconnect
-            ? 'YouTube refresh_token foi revogado pelo Google. Reconecte o canal no app.'
-            : `Falha ao renovar token: ${JSON.stringify(tokens)}`
-        );
-      }
-      accessToken = tokens.access_token;
-      const expiresAt = new Date(Date.now() + (tokens.expires_in || 3600) * 1000).toISOString();
-      log('🔑', 'Access token renovado via refresh_token (auto-login)');
-
-      // Persist fresh access_token + expiry back to project_auth so o app
-      // e próximas execuções reusem sem precisar revalidar
-      if (authRow?.project_id && authRow?.user_email) {
-        await supabase
-          .from('project_auth')
-          .update({
-            youtube_access_token: accessToken,
-            token_expires_at: expiresAt,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('project_id', authRow.project_id)
-          .eq('user_email', authRow.user_email);
-      }
-    }
-
+    const accessToken = await resolveProjectAccessToken(projectData, userEmail);
     const { videoUrl, videoId } = await uploadVideoFile(accessToken, renderResult.videoPath, metadata);
 
     if (thumbnailBase64) {
@@ -1274,6 +1328,65 @@ function calculateNextRunIso(settings = {}) {
   return nextRun.toISOString();
 }
 
+// --- TÍTULOS ÚNICOS ---
+// Comparação normalizada: minúsculas, sem acentos, sem pontuação. Sem isso,
+// "A Verdade Sobre X" e "a verdade sobre x!" passavam como títulos diferentes.
+function normalizeTitle(s) {
+  return String(s || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// Índice de tudo que já foi usado no projeto: ideias, títulos de vídeo e
+// títulos publicados no YouTube.
+function usedTitleIndex(data = {}) {
+  const set = new Set();
+  for (const i of data.ideas || []) if (i?.topic) set.add(normalizeTitle(i.topic));
+  for (const v of data.videos || []) {
+    if (v?.title) set.add(normalizeTitle(v.title));
+    if (v?.videoMetadata?.youtubeTitle) set.add(normalizeTitle(v.videoMetadata.youtubeTitle));
+  }
+  set.delete('');
+  return set;
+}
+
+// --- TETO DE PUBLICAÇÕES POR PERÍODO ---
+// "1 vídeo por dia" precisa ser um limite, não só uma sugestão de horário.
+// Conta vídeos já publicados (ou prontos aguardando upload) dentro do período
+// corrente de `frequencyDays`.
+function publishedInCurrentPeriod(data = {}, now = Date.now()) {
+  const freqDays = Math.max(1, Number(data.scheduleSettings?.frequencyDays) || 1);
+  const windowMs = freqDays * 24 * 60 * 60 * 1000;
+  const videos = Array.isArray(data.videos) ? data.videos : [];
+  return videos.filter((v) => {
+    const counts = v?.status === 'PUBLISHED'
+      || (v?.status === 'SCHEDULED' && (v.youtubeUrl || String(v.lastError || '').startsWith(PENDING_UPLOAD_MARK)));
+    if (!counts) return false;
+    const ts = new Date(v.updatedAt || v.createdAt || 0).getTime();
+    return Number.isFinite(ts) && now - ts < windowMs;
+  }).length;
+}
+
+// Reserva o slot ANTES de gastar tempo/IA: se o processo morrer no meio, o
+// projeto não volta a ser elegível hoje (o vídeo interrompido é retomado pelo
+// caminho de retry, que não cria vídeo novo).
+async function reserveNextRun(projectId, data) {
+  if (!data.scheduleSettings) data.scheduleSettings = {};
+  const candidate = calculateNextRunIso(data.scheduleSettings);
+  const current = data.scheduleSettings.nextScheduledRun
+    ? new Date(data.scheduleSettings.nextScheduledRun).getTime()
+    : 0;
+  // Nunca retroceder o agendamento.
+  if (new Date(candidate).getTime() > current) {
+    data.scheduleSettings.nextScheduledRun = candidate;
+  }
+  data.scheduleSettings.lastPublishAttemptAt = new Date().toISOString();
+  await persistProjectData(projectId, data, 'Slot do ciclo reservado', 3);
+  return data.scheduleSettings.nextScheduledRun;
+}
+
+
+
 async function persistProjectData(projectId, data, message = 'Project data persisted', attempts = 1) {
   for (let i = 0; i < Math.max(1, attempts); i++) {
     const { error } = await supabase
@@ -1304,7 +1417,9 @@ async function updateRunnerVideo(projectId, data, videoId, updates, logMessage, 
 // Transient failures (Gemini "OTHER", network timeouts, Pexels 429) must not
 // require a human click. Backoff: 5 min → 20 min → 1 h → 4 h, then give up.
 const MAX_AUTO_RETRIES = 4;
-const RETRY_BACKOFF_MS = [5 * 60 * 1000, 20 * 60 * 1000, 60 * 60 * 1000, 4 * 60 * 60 * 1000];
+// Primeira retomada a 20 min (era 5 min): tentativas de 5 em 5 minutos
+// empilhavam várias execuções — e publicações — no mesmo dia.
+const RETRY_BACKOFF_MS = [20 * 60 * 1000, 60 * 60 * 1000, 3 * 60 * 60 * 1000, 6 * 60 * 60 * 1000];
 
 // Teto para reagendamentos por cota (que não gastam tentativa): evita mascarar
 // cota permanentemente insuficiente como retry infinito silencioso.
@@ -1455,12 +1570,9 @@ async function recentQuotaExhaustion(userEmail) {
 
 async function processProject(projectRow) {
   const projectId = projectRow.id;
-  const data = projectRow.data || {};
+  let data = projectRow.data || {};
   const startTime = Date.now();
   let videoTitle = data.channelTheme || projectId;
-  // Pedido explícito do usuário ("Executar Agora" no app) — ignora janela de
-  // horário e cooldown de cota, porque alguém está esperando o resultado.
-  const forceRun = !!data.scheduleSettings?.forceRun || !!PROJECT_ID;
   let stopLockRenewal = () => {};
 
   // Acquire distributed lock — prevents browser scheduler from running
@@ -1479,9 +1591,31 @@ async function processProject(projectRow) {
     return false;
   }
 
+  // Releitura pós-lock: o snapshot da query pode ter minutos de idade. Gravar o
+  // blob antigo desfaria um agendamento já avançado por outra execução (lost
+  // update) e o projeto voltaria a parecer "vencido" — postando de novo.
+  try {
+    const { data: fresh, error: freshErr } = await supabase
+      .from('projects')
+      .select('data')
+      .eq('id', projectId)
+      .maybeSingle();
+    if (!freshErr && fresh?.data) {
+      data = fresh.data;
+      videoTitle = data.channelTheme || projectId;
+    }
+  } catch (e) {
+    log('⚠️', `Não foi possível reler o projeto após o lock: ${e.message} — seguindo com o snapshot.`);
+  }
+
+  // Pedido explícito do usuário ("Executar Agora" no app) — ignora janela de
+  // horário e cooldown de cota, porque alguém está esperando o resultado.
+  const forceRun = !!data.scheduleSettings?.forceRun || !!PROJECT_ID;
+
   // Renova o lock enquanto o projeto processa — sem isso, um render longo
   // deixaria o lock expirar e a execução seguinte publicaria o mesmo vídeo.
   stopLockRenewal = startLockRenewal(projectId);
+
 
   // Load per-user API keys (Gemini/Pexels) — owner of this project
   CURRENT_USER_EMAIL = normalizeEmail(projectRow.user_email);
@@ -1582,6 +1716,67 @@ async function processProject(projectRow) {
     return true;
   }
 
+  // Reconciliação anti-duplicata: o upload chegou a começar mas o youtubeUrl
+  // não foi gravado. Pode ter dado certo — re-enviar publicaria o mesmo vídeo
+  // duas vezes. Conferimos os uploads recentes do canal antes de repetir.
+  if (isResume && resumeVideo.uploadStartedAt && !resumeVideo.youtubeUrl && tokenHealth.ok) {
+    try {
+      const accessToken = await resolveProjectAccessToken({ ...data, id: projectId }, projectRow.user_email);
+      const existing = await findRecentUploadByTitle(
+        accessToken,
+        resumeVideo.videoMetadata?.youtubeTitle || resumeVideo.title
+      );
+      if (existing) {
+        log('✅', `"${resumeVideo.title}" já existe no canal (${existing.videoUrl}) — reconciliando sem novo upload.`);
+        await updateRunnerVideo(projectId, data, videoId, {
+          status: 'PUBLISHED',
+          youtubeUrl: existing.videoUrl,
+          retryCount: 0,
+          nextRetryAt: undefined,
+          standbyInfo: undefined,
+          lastError: undefined,
+        }, 'Published video reconciled via YouTube', 5);
+        await safeInsertAutopilotLog({
+          project_id: projectId,
+          status: 'success',
+          message: `Duplicata evitada: vídeo já estava no canal (${existing.videoUrl}) — registro reconciliado`,
+          step: 'upload',
+          video_title: resumeVideo.title,
+          runner: 'github-actions',
+        });
+        stopLockRenewal();
+        await releaseLock(projectId);
+        return true;
+      }
+    } catch (e) {
+      log('⚠️', `Não foi possível conferir uploads recentes do canal: ${e.message} — seguindo com cuidado.`);
+    }
+  }
+
+  // Teto real de publicações por período: "1 vídeo por dia" precisa limitar,
+  // não só sugerir horário. Retomadas não contam (não criam vídeo novo).
+  if (!isResume && !forceRun) {
+    const alreadyDone = publishedInCurrentPeriod(data);
+    if (alreadyDone >= 1) {
+      const freqDays = Math.max(1, Number(data.scheduleSettings?.frequencyDays) || 1);
+      log('🛑', `"${data.channelTheme}" já tem ${alreadyDone} vídeo(s) neste período de ${freqDays} dia(s) — cota do período cumprida, nada a fazer.`);
+      // Garante que o horário está à frente para não reentrar a cada 15 min.
+      await reserveNextRun(projectId, data);
+      await safeInsertAutopilotLog({
+        project_id: projectId,
+        status: 'success',
+        message: `Cota do período já cumprida (${alreadyDone} vídeo(s) em ${freqDays} dia(s)). Próxima execução: ${data.scheduleSettings?.nextScheduledRun}`,
+        step: 'idea',
+        runner: 'github-actions',
+      });
+      stopLockRenewal();
+      await releaseLock(projectId);
+      return true;
+    }
+  }
+
+
+
   log('🚀', isResume
     ? `Retomando "${resumeVideo.title}" (tentativa ${(resumeVideo.retryCount || 0) + 1}/${MAX_AUTO_RETRIES})`
     : `Processing project: "${data.channelTheme}" (${projectId})`);
@@ -1644,7 +1839,14 @@ async function processProject(projectRow) {
         updatedAt: new Date().toISOString(),
       });
       await persistProjectData(projectId, data, 'Draft video saved');
+
+      // Reserva o slot do ciclo agora, antes de gastar IA/tempo: se o job cair
+      // no meio, o cron de 15 min não cria OUTRO vídeo — o interrompido é
+      // retomado pelo caminho de retry.
+      const reserved = await reserveNextRun(projectId, data);
+      log('🔒', `Slot reservado — próxima execução programada para ${reserved}`);
     }
+
 
     // Step 2: Script — reused on resume (already persisted, no need to pay again)
     currentStep = 'script';
@@ -1699,14 +1901,44 @@ async function processProject(projectRow) {
       await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Gerando título, descrição e tags', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
       metadata = await stepMetadata(idea.topic, script, data);
     }
-    videoTitle = metadata.youtubeTitle || metadata.title || idea.topic;
+    // Título final não pode colidir com nada já publicado no projeto. O título
+    // vinha direto da IA e podia repetir um vídeo antigo.
+    let finalTitle = metadata.youtubeTitle || metadata.title || idea.topic;
+    const publishedTitles = new Set(
+      (data.videos || [])
+        .filter((v) => v.id !== videoId)
+        .flatMap((v) => [normalizeTitle(v.title), normalizeTitle(v.videoMetadata?.youtubeTitle)])
+        .filter(Boolean)
+    );
+    if (publishedTitles.has(normalizeTitle(finalTitle))) {
+      log('♻️', `Título "${finalTitle}" já usado neste projeto — pedindo alternativa.`);
+      let alternative = '';
+      try {
+        const alt = await geminiGenerateJSON(
+          `Rewrite this YouTube title so it is clearly distinct from the ones already used on the channel, same topic and language, max 90 chars.\nTitle: "${finalTitle}"\nAlready used: ${[...publishedTitles].join(' | ')}\nReturn JSON: { "title": "..." }`
+        );
+        alternative = String(alt?.title || '').trim();
+      } catch (e) {
+        log('⚠️', `Falha ao gerar título alternativo: ${e.message}`);
+      }
+      if (alternative && !publishedTitles.has(normalizeTitle(alternative))) {
+        finalTitle = alternative;
+      } else {
+        // Diferenciador determinístico — melhor que publicar título idêntico.
+        finalTitle = `${finalTitle} — Part ${(data.videos || []).length}`;
+      }
+      log('✅', `Novo título: "${finalTitle}"`);
+    }
+    videoTitle = finalTitle;
     await updateRunnerVideo(projectId, data, videoId, { title: videoTitle, videoMetadata: {
-      youtubeTitle: metadata.youtubeTitle || metadata.title || idea.topic,
+      youtubeTitle: finalTitle,
       youtubeDescription: metadata.youtubeDescription || metadata.description || '',
       tags: metadata.tags || [],
       categoryId: metadata.categoryId || '22',
       visibility: metadata.visibility || 'public',
     } }, 'Metadata saved');
+    metadata = { ...metadata, youtubeTitle: finalTitle, title: finalTitle };
+
 
     // Step 7: Render Video (now receives audio!)
     currentStep = 'render';
@@ -1714,7 +1946,15 @@ async function processProject(projectRow) {
     const renderResult = await stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, data, audioMimeType);
 
     if (!data.scheduleSettings) data.scheduleSettings = {};
-    data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
+    // Nunca retrocede o agendamento já reservado no início do ciclo.
+    {
+      const candidate = calculateNextRunIso(data.scheduleSettings);
+      const current = data.scheduleSettings.nextScheduledRun
+        ? new Date(data.scheduleSettings.nextScheduledRun).getTime()
+        : 0;
+      if (new Date(candidate).getTime() > current) data.scheduleSettings.nextScheduledRun = candidate;
+    }
+
 
     // Step 8: Upload — skipped (not failed!) when the channel is disconnected.
     // The video stays SCHEDULED and publishes automatically after reconnection.
@@ -1746,7 +1986,11 @@ async function processProject(projectRow) {
 
     currentStep = 'upload';
     await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Enviando vídeo para o YouTube', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
+    // Marca a tentativa ANTES do upload: se o processo cair no meio, a retomada
+    // sabe que precisa conferir o canal em vez de simplesmente reenviar.
+    await updateRunnerVideo(projectId, data, videoId, { uploadStartedAt: new Date().toISOString() }, 'Upload iniciado', 3);
     const uploadResult = await stepUploadYouTube(data, metadata, renderResult, thumbnailBase64, projectRow.user_email);
+
 
     // Grava a URL ANTES de qualquer outra coisa e com retentativas: se essa
     // gravação falhar, o vídeo continua retomável e seria re-enviado ao canal
@@ -1786,7 +2030,11 @@ async function processProject(projectRow) {
     };
     data.standbyInfo = standbyInfo;
     if (data.scheduleSettings?.autoGenerate) {
-      data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
+      const candidate = calculateNextRunIso(data.scheduleSettings);
+      const current = data.scheduleSettings.nextScheduledRun
+        ? new Date(data.scheduleSettings.nextScheduledRun).getTime()
+        : 0;
+      if (new Date(candidate).getTime() > current) data.scheduleSettings.nextScheduledRun = candidate;
     }
 
     if (videoId) {
