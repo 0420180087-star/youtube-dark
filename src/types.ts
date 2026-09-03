@@ -133,6 +133,9 @@ export interface Video {
   retryCount?: number;
   nextRetryAt?: string;
   lastError?: string;
+  /** Marcado antes de chamar o upload: numa retomada, indica que é preciso
+   *  conferir o canal antes de reenviar (evita vídeo duplicado). */
+  uploadStartedAt?: string;
 }
 
 
