@@ -1417,7 +1417,9 @@ async function updateRunnerVideo(projectId, data, videoId, updates, logMessage, 
 // Transient failures (Gemini "OTHER", network timeouts, Pexels 429) must not
 // require a human click. Backoff: 5 min → 20 min → 1 h → 4 h, then give up.
 const MAX_AUTO_RETRIES = 4;
-const RETRY_BACKOFF_MS = [5 * 60 * 1000, 20 * 60 * 1000, 60 * 60 * 1000, 4 * 60 * 60 * 1000];
+// Primeira retomada a 20 min (era 5 min): tentativas de 5 em 5 minutos
+// empilhavam várias execuções — e publicações — no mesmo dia.
+const RETRY_BACKOFF_MS = [20 * 60 * 1000, 60 * 60 * 1000, 3 * 60 * 60 * 1000, 6 * 60 * 60 * 1000];
 
 // Teto para reagendamentos por cota (que não gastam tentativa): evita mascarar
 // cota permanentemente insuficiente como retry infinito silencioso.
