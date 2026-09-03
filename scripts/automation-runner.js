@@ -17,7 +17,7 @@ import os from 'os';
 import fs from 'fs';
 import { spawn } from 'child_process';
 import { renderVideo, cleanupTmp } from './videoRenderer.js';
-import { refreshAccessToken, uploadVideoFile, uploadThumbnail } from './youtubeUploader.js';
+import { refreshAccessToken, uploadVideoFile, uploadThumbnail, findRecentUploadByTitle } from './youtubeUploader.js';
 
 // Shared visuals-resolution engine (Fase 2: unificação com o app). Same
 // Pexels→Gemini logic, reuse-on-resume, and no-placeholder guarantee as the
