@@ -297,7 +297,7 @@ const AutoPilotProjects: React.FC = () => {
                   className="flex-1 flex items-center justify-center gap-1.5 bg-orange-600 hover:bg-orange-500 disabled:bg-slate-700 disabled:text-slate-500 text-white text-xs font-bold py-2 rounded-lg transition-colors"
                 >
                   <Zap className="w-3.5 h-3.5" />
-                  {isRunning ? 'Executando...' : 'Executar na Nuvem'}
+                  {isRunning ? 'Executando local...' : 'Executar Agora'}
                 </button>
                 <Link
                   to={`/project/${p.id}`}
@@ -316,11 +316,10 @@ const AutoPilotProjects: React.FC = () => {
           <AlertTriangle className="w-3.5 h-3.5 text-yellow-400 flex-shrink-0 mt-0.5" />
           <span>
             Runner headless (GitHub Actions) não deu sinal nos últimos 60 min.
-            "Executar na Nuvem" enfileira o projeto, mas ele só será produzido quando o
-            workflow voltar a rodar — configure os secrets do repositório (SETUP.md).
+            "Executar Agora" continuará rodando localmente enquanto esta aba estiver aberta.
+            Para rodar com a página fechada, configure os secrets do workflow no repositório.
           </span>
         </div>
-
       )}
 
 

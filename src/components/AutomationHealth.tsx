@@ -183,16 +183,13 @@ export const AutomationHealth: React.FC = () => {
       });
     } else {
       const ageMin = Math.round((Date.now() - new Date(hb.last_seen_at).getTime()) / 60000);
-      // O runner escreve heartbeat a cada passo, então o detail traz o projeto e
-      // o passo em execução — um sinal recente com passo é prova de vida real.
       result.push({
         label: 'Runner headless',
         state: ageMin <= 60 ? 'ok' : 'warn',
         detail: ageMin <= 60
-          ? `Vivo — último sinal há ${ageMin} min.${hb.detail ? ` Agora: ${hb.detail}` : ''}`
-          : `Sem sinal há ${ageMin} min (cron roda a cada 15 min).${hb.detail ? ` Último estado: ${hb.detail}.` : ''} Verifique a aba Actions do repositório.`,
+          ? `Vivo — último sinal há ${ageMin} min. ${hb.detail || ''}`
+          : `Sem sinal há ${ageMin} min (cron roda a cada 15 min). Verifique a aba Actions do repositório.`,
       });
-
     }
 
     setChecks(result);

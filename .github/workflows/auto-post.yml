@@ -17,7 +17,7 @@ on:
 jobs:
   auto-post:
     runs-on: ubuntu-latest
-    timeout-minutes: 90   # alinhado ao orçamento do runner (JOB_BUDGET_MINUTES=80)
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
@@ -45,10 +45,11 @@ jobs:
         run: ffmpeg -version
 
       - name: Instalar dependências
-        # npm ci garante exatamente as versões testadas. Se o lockfile estiver
-        # divergente do package.json, cai para npm install em vez de falhar.
-        run: npm ci || npm install
-
+        # npm ci exige o lockfile já sincronizado com package.json. Como o
+        # tsx é uma dependência nova (necessária para o runner importar os
+        # módulos TS compartilhados com o app), uso npm install aqui — ele
+        # atualiza o lockfile na hora em vez de falhar por divergência.
+        run: npm install
 
       - name: Executar pipeline de automação
         env:

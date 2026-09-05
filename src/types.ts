@@ -133,9 +133,6 @@ export interface Video {
   retryCount?: number;
   nextRetryAt?: string;
   lastError?: string;
-  /** Marcado antes de chamar o upload: numa retomada, indica que é preciso
-   *  conferir o canal antes de reenviar (evita vídeo duplicado). */
-  uploadStartedAt?: string;
 }
 
 
@@ -145,12 +142,6 @@ export interface ScheduleSettings {
   timeWindowEnd: string;
   autoGenerate?: boolean;
   nextScheduledRun?: string; // ISO date persisted for reload survival
-  /** Momento em que o runner reservou o slot do ciclo (antes de gastar IA). */
-  lastPublishAttemptAt?: string;
-  /** Pedido explícito ("Executar Agora"): o runner headless ignora janela de
-   *  horário e cooldown de cota, e limpa a marca ao concluir. */
-  forceRun?: boolean;
-
 }
 
 export type VisualPacingStyle = 'static' | 'dynamic' | 'fast-cuts' | 'cinematic' | 'minimalist' | 'surreal' | 'vintage' | 'cyberpunk';
