@@ -50,6 +50,40 @@ export const mergeAudioBuffers = (buffers: AudioBuffer[], ctx: AudioContext): Au
     return outputBuffer;
 };
 
+/**
+ * Acelera (ou desacelera) a narração PRESERVANDO o tom da voz.
+ * Overlap-add com janela de Hann: hop de análise = hop de síntese * fator.
+ * Fator 1.0 (ou inválido) devolve o buffer original sem tocar em nada.
+ */
+export const changeAudioSpeed = (buffer: AudioBuffer, ctx: BaseAudioContext, factor: number): AudioBuffer => {
+    const f = Number(factor);
+    if (!isFinite(f) || f <= 1.005 && f >= 0.995) return buffer;
+    const speed = Math.max(0.5, Math.min(2.0, f));
+
+    const input = buffer.getChannelData(0);
+    const N = 1024;                       // ~43ms a 24kHz
+    const Hs = N / 2;                     // hop de síntese (Hann soma constante)
+    const Ha = Math.max(1, Math.round(Hs * speed));
+    const outLength = Math.max(1, Math.ceil(input.length / speed));
+
+    const out = new Float32Array(outLength + N);
+    const win = new Float32Array(N);
+    for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1));
+
+    let frame = 0;
+    while (true) {
+        const inStart = frame * Ha;
+        const outStart = frame * Hs;
+        if (inStart + N > input.length || outStart + N > out.length) break;
+        for (let i = 0; i < N; i++) out[outStart + i] += input[inStart + i] * win[i];
+        frame++;
+    }
+
+    const result = ctx.createBuffer(1, outLength, buffer.sampleRate);
+    result.getChannelData(0).set(out.subarray(0, outLength));
+    return result;
+};
+
 export const audioBufferToBase64 = (buffer: AudioBuffer): string => { 
     const channelData = buffer.getChannelData(0); 
     const int16Array = new Int16Array(channelData.length); 
@@ -71,4 +105,16 @@ export const base64ToWavBlob = (base64Data: string, sampleRate: number = 24000):
     view.setUint32(40, len, true); const bytes = new Uint8Array(buffer, 44); 
     for (let i = 0; i < len; i++) { bytes[i] = binaryString.charCodeAt(i); } 
     return new Blob([buffer], { type: 'audio/wav' }); 
+};
+
+/**
+ * Marcadores como "__has_music__" / "__runner_music__" são gravados na nuvem
+ * no lugar do áudio real (que é grande demais para sincronizar). Eles NÃO são
+ * áudio: tratar um marcador como música gera erro de decode silencioso e o
+ * vídeo sai sem trilha. Use isto antes de decodificar qualquer trilha.
+ */
+export const isValidMusicPayload = (value?: string | null): boolean => {
+    if (!value || typeof value !== 'string') return false;
+    if (value.startsWith('__')) return false;
+    return value.length > 5000;
 };

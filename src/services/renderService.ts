@@ -1,5 +1,5 @@
 import { Video, VisualEffect } from "../types";
-import { decodeAudioData } from "./geminiService";
+import { decodeAudioData, isValidMusicPayload, generateDarkAmbience } from "./geminiService";
 
 const easeInOutCubic = (x: number): number =>
   x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
@@ -351,11 +351,25 @@ export const renderVideoHeadless = async (
   const vSrc = offlineCtx.createBufferSource();
   vSrc.buffer = voiceBuffer;
 
-  // Background music mix
-  if (video.backgroundMusicUrl) {
+  // Background music mix. Marcadores de nuvem ("__has_music__") não são áudio:
+  // nesse caso regeneramos a ambiência para o vídeo nunca sair sem trilha.
+  let musicPayload: string | undefined = isValidMusicPayload(video.backgroundMusicUrl)
+    ? video.backgroundMusicUrl
+    : undefined;
+  if (!musicPayload) {
+    try {
+      onProgress(4, "Gerando música de fundo...");
+      const regenerated = await generateDarkAmbience("Dark");
+      if (isValidMusicPayload(regenerated)) musicPayload = regenerated;
+    } catch {
+      console.warn("⚠️ Não foi possível gerar música de fundo");
+    }
+  }
+
+  if (musicPayload) {
     try {
       const musicBytes = new Uint8Array(
-        atob(video.backgroundMusicUrl).split("").map((c) => c.charCodeAt(0))
+        atob(musicPayload).split("").map((c) => c.charCodeAt(0))
       ).buffer;
       const mTmpCtx = new AudioContext({ sampleRate });
       const musicBuffer = await decodeAudioData(musicBytes, mTmpCtx);
@@ -366,7 +380,7 @@ export const renderVideoHeadless = async (
       mSrc.loop = true;
 
       const mGain = offlineCtx.createGain();
-      mGain.gain.value = 0.14;
+      mGain.gain.value = 0.15;
 
       const comp = offlineCtx.createDynamicsCompressor();
       comp.threshold.value = -24; comp.ratio.value = 12;

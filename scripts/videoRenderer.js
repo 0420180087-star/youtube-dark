@@ -264,22 +264,27 @@ export function makePlaceholderClip(outputPath, duration, seed = 0) {
 }
 
 // ─── Mix narration + background music ────────────────────────────────────────
-function mixAudio(videoPath, voicePath, musicPath, outputPath) {
+function mixAudio(videoPath, voicePath, musicPath, outputPath, narrationSpeed = 1) {
   return new Promise((resolve, reject) => {
     const cmd = ffmpeg(videoPath).input(voicePath);
+
+    // atempo preserva o tom da voz (não é "chipmunk"); acima de 2x seria
+    // preciso encadear filtros, mas o limite do app é 1.4x.
+    const speed = Math.max(1, Math.min(1.4, Number(narrationSpeed) || 1));
+    const tempo = speed > 1.005 ? `atempo=${speed.toFixed(3)},` : '';
 
     if (musicPath && fs.existsSync(musicPath)) {
       cmd
         .input(musicPath)
         .complexFilter([
-          '[1:a]volume=1.0[voice]',
-          '[2:a]volume=0.12,aloop=loop=-1:size=2e+09[music]',
+          `[1:a]${tempo}volume=1.0[voice]`,
+          '[2:a]volume=0.15,aloop=loop=-1:size=2e+09[music]',
           '[voice][music]amix=inputs=2:duration=first:dropout_transition=2[audio]',
         ])
         .outputOptions(['-map', '0:v', '-map', '[audio]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest']);
     } else {
       cmd
-        .complexFilter(['[1:a]volume=1.0[audio]'])
+        .complexFilter([`[1:a]${tempo}volume=1.0[audio]`])
         .outputOptions(['-map', '0:v', '-map', '[audio]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest']);
     }
 

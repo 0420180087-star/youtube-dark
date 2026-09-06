@@ -166,6 +166,8 @@ export interface Project {
   
   defaultTone?: string;
   defaultVoice?: string;
+  /** Fator de velocidade da narração (1.0 = normal, padrão 1.15). */
+  narrationSpeed?: number;
   language?: string;
   defaultDuration?: VideoDuration;
   defaultFormat?: VideoFormat;
