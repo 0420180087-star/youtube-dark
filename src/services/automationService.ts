@@ -211,12 +211,30 @@ export async function stepGenerateVoice(
     }
 
 
-    const finalAudio = mergeAudioBuffers(audioBuffers, ctx);
+    const merged = mergeAudioBuffers(audioBuffers, ctx);
+
+    // Narração um pouco mais rápida (padrão 1.15x), preservando o tom.
+    // Os timestamps encolhem pelo mesmo fator para manter as imagens em sincronia.
+    const speed = clampNarrationSpeed(project.narrationSpeed);
+    let finalAudio = merged;
+    let finalTimestamps = timestamps;
+    let finalTotal = totalDur;
+    if (speed > 1.005) {
+      try {
+        finalAudio = changeAudioSpeed(merged, ctx, speed);
+        finalTimestamps = timestamps.map(t => t / speed);
+        finalTotal = totalDur / speed;
+        callbacks.onProgress('voice', `Narração acelerada em ${speed.toFixed(2)}x`);
+      } catch (err: any) {
+        console.warn('[Voice] Falha ao acelerar narração, usando velocidade original:', err?.message);
+      }
+    }
+
     const audioUrl = audioBufferToBase64(finalAudio);
 
-    callbacks.updateVideo(project.id, video.id, { audioUrl, segmentTimestamps: timestamps, status: ProjectStatus.AUDIO_GENERATED });
+    callbacks.updateVideo(project.id, video.id, { audioUrl, segmentTimestamps: finalTimestamps, status: ProjectStatus.AUDIO_GENERATED });
     callbacks.onStepComplete('voice');
-    return { audioUrl, timestamps, totalDuration: totalDur };
+    return { audioUrl, timestamps: finalTimestamps, totalDuration: finalTotal };
   } finally {
     // Always release AudioContext — prevents accumulation of Web Audio nodes
     // across pipeline runs, including on error paths.
