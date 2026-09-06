@@ -15,6 +15,7 @@ import {
   mergeAudioBuffers,
   audioBufferToBase64,
   changeAudioSpeed,
+  isValidMusicPayload,
   VideoIdea as GeminiVideoIdea
 } from './geminiService';
 import { renderVideoHeadless } from './renderService';
