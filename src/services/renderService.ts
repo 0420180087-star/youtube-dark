@@ -1,5 +1,5 @@
 import { Video, VisualEffect } from "../types";
-import { decodeAudioData } from "./geminiService";
+import { decodeAudioData, isValidMusicPayload, generateDarkAmbience } from "./geminiService";
 
 const easeInOutCubic = (x: number): number =>
   x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
@@ -380,7 +380,7 @@ export const renderVideoHeadless = async (
       mSrc.loop = true;
 
       const mGain = offlineCtx.createGain();
-      mGain.gain.value = 0.14;
+      mGain.gain.value = 0.15;
 
       const comp = offlineCtx.createDynamicsCompressor();
       comp.threshold.value = -24; comp.ratio.value = 12;
