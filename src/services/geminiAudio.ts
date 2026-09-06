@@ -106,3 +106,15 @@ export const base64ToWavBlob = (base64Data: string, sampleRate: number = 24000):
     for (let i = 0; i < len; i++) { bytes[i] = binaryString.charCodeAt(i); } 
     return new Blob([buffer], { type: 'audio/wav' }); 
 };
+
+/**
+ * Marcadores como "__has_music__" / "__runner_music__" são gravados na nuvem
+ * no lugar do áudio real (que é grande demais para sincronizar). Eles NÃO são
+ * áudio: tratar um marcador como música gera erro de decode silencioso e o
+ * vídeo sai sem trilha. Use isto antes de decodificar qualquer trilha.
+ */
+export const isValidMusicPayload = (value?: string | null): boolean => {
+    if (!value || typeof value !== 'string') return false;
+    if (value.startsWith('__')) return false;
+    return value.length > 5000;
+};
