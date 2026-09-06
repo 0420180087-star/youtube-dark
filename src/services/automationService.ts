@@ -143,6 +143,13 @@ function createSilence(ctx: AudioContext, durationSeconds: number): AudioBuffer 
   return buf;
 }
 
+/** Velocidade de narração válida: 1.0x a 1.4x, padrão 1.15x. */
+export function clampNarrationSpeed(value?: number): number {
+  const n = Number(value);
+  if (!isFinite(n) || n <= 0) return 1.15;
+  return Math.max(1, Math.min(1.4, n));
+}
+
 export async function stepGenerateVoice(
   project: Project,
   video: Video,
