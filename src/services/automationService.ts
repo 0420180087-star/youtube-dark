@@ -345,8 +345,21 @@ export async function stepGenerateStudio(
   callbacks: PipelineCallbacks
 ) {
   callbacks.onStepStart('studio', 'Gerando música de fundo...');
-  const musicUrl = await generateDarkAmbience(project.defaultTone || 'Dark');
-  callbacks.updateVideo(project.id, video.id, { backgroundMusicUrl: musicUrl });
+  let musicUrl: string | undefined;
+  for (let attempt = 1; attempt <= 2 && !isValidMusicPayload(musicUrl); attempt++) {
+    try {
+      musicUrl = await generateDarkAmbience(project.defaultTone || 'Dark');
+    } catch (err: any) {
+      console.warn(`[Studio] Música tentativa ${attempt} falhou:`, err?.message);
+      musicUrl = undefined;
+    }
+  }
+  if (isValidMusicPayload(musicUrl)) {
+    console.log('[Studio] 🎵 Música de fundo pronta');
+    callbacks.updateVideo(project.id, video.id, { backgroundMusicUrl: musicUrl });
+  } else {
+    console.warn('[Studio] ⚠️ Vídeo seguirá sem música de fundo');
+  }
   callbacks.onStepComplete('studio');
   return musicUrl;
 }
