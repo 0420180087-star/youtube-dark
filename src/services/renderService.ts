@@ -351,11 +351,25 @@ export const renderVideoHeadless = async (
   const vSrc = offlineCtx.createBufferSource();
   vSrc.buffer = voiceBuffer;
 
-  // Background music mix
-  if (video.backgroundMusicUrl) {
+  // Background music mix. Marcadores de nuvem ("__has_music__") não são áudio:
+  // nesse caso regeneramos a ambiência para o vídeo nunca sair sem trilha.
+  let musicPayload: string | undefined = isValidMusicPayload(video.backgroundMusicUrl)
+    ? video.backgroundMusicUrl
+    : undefined;
+  if (!musicPayload) {
+    try {
+      onProgress(4, "Gerando música de fundo...");
+      const regenerated = await generateDarkAmbience("Dark");
+      if (isValidMusicPayload(regenerated)) musicPayload = regenerated;
+    } catch {
+      console.warn("⚠️ Não foi possível gerar música de fundo");
+    }
+  }
+
+  if (musicPayload) {
     try {
       const musicBytes = new Uint8Array(
-        atob(video.backgroundMusicUrl).split("").map((c) => c.charCodeAt(0))
+        atob(musicPayload).split("").map((c) => c.charCodeAt(0))
       ).buffer;
       const mTmpCtx = new AudioContext({ sampleRate });
       const musicBuffer = await decodeAudioData(musicBytes, mTmpCtx);
