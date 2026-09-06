@@ -1060,11 +1060,15 @@ async function stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, pro
   const tmpDir = path.join(os.tmpdir(), `autopost_${Date.now()}`);
   fs.mkdirSync(tmpDir, { recursive: true });
 
+  // Narração acelerada (padrão 1.15x) encurta o áudio: as cenas encolhem no
+  // mesmo fator para o vídeo continuar sincronizado com a voz.
+  const narrationSpeed = clampNarrationSpeed(projectData.narrationSpeed);
+
   // Build per-scene visuals with duration from scene data
   const visuals = scenes.map((s, i) => ({
     url: s.videoUrl || s.imageUrl,
     effect: s.effect || 'zoom-in',
-    duration: s.duration || (script.segments[s.segmentIndex || i]?.estimatedDuration) || 5,
+    duration: Math.max(0.5, (s.duration || (script.segments[s.segmentIndex || i]?.estimatedDuration) || 5) / narrationSpeed),
     isVideo: !!s.videoUrl,
   }));
 
@@ -1096,7 +1100,7 @@ async function stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, pro
     audioMimeType: audioMimeType,
     musicUrl: musicPath,
     thumbnailBase64: thumbnailBase64 || null,
-    narrationSpeed: clampNarrationSpeed(projectData.narrationSpeed),
+    narrationSpeed,
     tmpDir,
   });
 
