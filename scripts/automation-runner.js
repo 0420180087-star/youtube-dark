@@ -658,6 +658,13 @@ async function geminiGenerateImage(prompt) {
 
 
 // ─── Generate a Node-side ambient music track via FFmpeg (no API needed) ─────
+/** Velocidade de narração válida: 1.0x a 1.4x, padrão 1.15x. */
+function clampNarrationSpeed(value) {
+  const n = Number(value);
+  if (!isFinite(n) || n <= 0) return 1.15;
+  return Math.max(1, Math.min(1.4, n));
+}
+
 function generateAmbienceTrack(outputPath, durationSec, tone = '') {
   return new Promise((resolve, reject) => {
     const t = (tone || '').toLowerCase();
@@ -1066,14 +1073,21 @@ async function stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, pro
   // 🎵 Step 6.5: Generate procedural ambience to match total video duration
   const totalDuration = visuals.reduce((sum, v) => sum + (v.duration || 0), 0);
   let musicPath = null;
-  try {
-    musicPath = path.join(tmpDir, 'ambience.m4a');
-    await generateAmbienceTrack(musicPath, totalDuration, projectData.defaultTone);
-    log('🎵', `Ambience gerada (${totalDuration.toFixed(1)}s, tom: ${projectData.defaultTone || 'default'})`);
-  } catch (e) {
-    log('⚠️', `Falha ao gerar ambience: ${e.message} — continuando sem música`);
-    musicPath = null;
+  for (let attempt = 1; attempt <= 2 && !musicPath; attempt++) {
+    const candidate = path.join(tmpDir, `ambience_${attempt}.m4a`);
+    try {
+      await generateAmbienceTrack(candidate, totalDuration, projectData.defaultTone);
+      if (fs.existsSync(candidate) && fs.statSync(candidate).size > 1024) {
+        musicPath = candidate;
+        log('🎵', `Música de fundo pronta (${totalDuration.toFixed(1)}s, tom: ${projectData.defaultTone || 'default'})`);
+      } else {
+        log('⚠️', `Ambience tentativa ${attempt} gerou arquivo vazio`);
+      }
+    } catch (e) {
+      log('⚠️', `Ambience tentativa ${attempt} falhou: ${e.message}`);
+    }
   }
+  if (!musicPath) log('⚠️', 'Vídeo seguirá SEM música de fundo');
 
   const { videoPath } = await renderVideo({
     visuals,
@@ -1082,6 +1096,7 @@ async function stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, pro
     audioMimeType: audioMimeType,
     musicUrl: musicPath,
     thumbnailBase64: thumbnailBase64 || null,
+    narrationSpeed: clampNarrationSpeed(projectData.narrationSpeed),
     tmpDir,
   });
 
