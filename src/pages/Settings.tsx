@@ -2,9 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { encryptData, decryptData } from '../services/securityService';
 import { supabase } from '../lib/supabaseClient';
-import { Settings as SettingsIcon, User, Key, Shield, LogOut, Save, CheckCircle, RefreshCw, AlertTriangle, Trash2, Youtube, LogIn, Copy, ExternalLink, Plus, X, Link2, Activity } from 'lucide-react';
+import { Settings as SettingsIcon, User, Key, Shield, LogOut, Save, CheckCircle, RefreshCw, AlertTriangle, Trash2, Youtube, LogIn, Copy, ExternalLink, Plus, X, Link2, Activity, Cloud, CloudOff } from 'lucide-react';
 import { getKeyStatus, clearExhaustedKeys } from '../services/geminiService';
-import { getUserSettings, saveUserSettings } from '../services/userDataService';
+import { getUserSettings, saveUserSettings, renewGoogleToken } from '../services/userDataService';
+
+type CloudSyncState = 'unknown' | 'checking' | 'synced' | 'local_only' | 'error';
 
 export const Settings: React.FC = () => {
     const { user, login, logout, googleClientId, setGoogleClientId, isLoading: isAuthLoading, youtubeChannel, disconnectYoutube } = useAuth();
