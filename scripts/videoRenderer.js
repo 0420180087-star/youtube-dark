@@ -297,7 +297,7 @@ function mixAudio(videoPath, voicePath, musicPath, outputPath, narrationSpeed = 
 }
 
 // ─── Main render function ─────────────────────────────────────────────────────
-export async function renderVideo({ visuals, segments, audioBase64, audioMimeType = 'audio/pcm', musicUrl, thumbnailBase64, tmpDir }) {
+export async function renderVideo({ visuals, segments, audioBase64, audioMimeType = 'audio/pcm', musicUrl, thumbnailBase64, narrationSpeed = 1, tmpDir }) {
   fs.mkdirSync(tmpDir, { recursive: true });
 
   // { index, path } for every scene that ended up with SOME real content
@@ -451,7 +451,7 @@ export async function renderVideo({ visuals, segments, audioBase64, audioMimeTyp
 
   // Background music: accept either a remote URL or a local file path already on disk
   let musicPath = null;
-  if (musicUrl) {
+  if (musicUrl && !String(musicUrl).startsWith('__')) {
     try {
       if (/^https?:\/\//i.test(musicUrl)) {
         musicPath = path.join(tmpDir, 'music.mp3');
@@ -471,7 +471,7 @@ export async function renderVideo({ visuals, segments, audioBase64, audioMimeTyp
 
   // Mix audio over video
   const mixedPath = path.join(tmpDir, 'mixed.mp4');
-  await mixAudio(concatPath, voiceConvPath, musicPath, mixedPath);
+  await mixAudio(concatPath, voiceConvPath, musicPath, mixedPath, narrationSpeed);
 
   console.log('  ✅ Renderização concluída!');
   return { videoPath: mixedPath, tmpDir };

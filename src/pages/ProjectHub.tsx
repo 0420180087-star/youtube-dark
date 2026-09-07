@@ -96,6 +96,7 @@ export const ProjectHub: React.FC = () => {
   const [editMaxImages, setEditMaxImages] = useState(project?.visualPacing?.maxImagesPer5Sec ?? 2);
   const [editStyle, setEditStyle] = useState<VisualPacingStyle>(project?.visualPacing?.style ?? 'dynamic');
   const [editMaxMediaDur, setEditMaxMediaDur] = useState<number>(project?.maxMediaDurationSeconds ?? 6);
+  const [editNarrationSpeed, setEditNarrationSpeed] = useState<number>(project?.narrationSpeed ?? 1.15);
   
   // Schedule Edit State
   const [editFreq, setEditFreq] = useState(project?.scheduleSettings?.frequencyDays || 1);
@@ -127,6 +128,7 @@ export const ProjectHub: React.FC = () => {
     setEditMaxImages(project.visualPacing?.maxImagesPer5Sec ?? 2);
     setEditStyle(project.visualPacing?.style ?? 'dynamic');
     setEditMaxMediaDur(project.maxMediaDurationSeconds ?? 6);
+    setEditNarrationSpeed(project.narrationSpeed ?? 1.15);
     setEditFreq(project.scheduleSettings?.frequencyDays || 1);
     setEditTimeStart(project.scheduleSettings?.timeWindowStart || '13:00');
     setEditTimeEnd(project.scheduleSettings?.timeWindowEnd || '15:00');
@@ -151,6 +153,7 @@ export const ProjectHub: React.FC = () => {
       editMaxImages !== (project.visualPacing?.maxImagesPer5Sec ?? 2) ||
       editStyle !== (project.visualPacing?.style ?? 'dynamic') ||
       editMaxMediaDur !== (project.maxMediaDurationSeconds ?? 6) ||
+      editNarrationSpeed !== (project.narrationSpeed ?? 1.15) ||
       editFreq !== (project.scheduleSettings?.frequencyDays || 1) ||
       editTimeStart !== (project.scheduleSettings?.timeWindowStart || '13:00') ||
       editTimeEnd !== (project.scheduleSettings?.timeWindowEnd || '15:00') ||
@@ -335,6 +338,7 @@ export const ProjectHub: React.FC = () => {
                 style: editStyle
             },
             maxMediaDurationSeconds: Number(editMaxMediaDur),
+            narrationSpeed: Number(editNarrationSpeed),
             scheduleSettings: nextScheduleSettings
         };
         updateProject(project.id, updates);
@@ -1349,6 +1353,28 @@ export const ProjectHub: React.FC = () => {
                                 />
                                 <p className="text-[10px] text-slate-500 italic mt-2">
                                     Each image or Pexels clip is replaced after this many seconds. Lower values create more dynamic videos but require more media.
+                                </p>
+                            </div>
+
+                            {/* Narration speed — aplica-se a novos vídeos (automáticos e manuais) */}
+                            <div className="col-span-1 md:col-span-2 pt-4 border-t border-slate-800/50">
+                                <div className="flex justify-between items-center mb-3">
+                                    <label className="flex items-center gap-2 text-sm font-medium text-slate-400">
+                                        <Zap className="w-3.5 h-3.5 text-orange-400" /> Velocidade da narração
+                                    </label>
+                                    <div className="flex items-center gap-2 bg-slate-950 px-2 py-1 rounded border border-slate-800">
+                                        <span className="w-12 text-center text-white text-xs">{editNarrationSpeed.toFixed(2)}</span>
+                                        <span className="text-[10px] text-slate-500">x</span>
+                                    </div>
+                                </div>
+                                <input
+                                    type="range" min={1} max={1.4} step={0.05}
+                                    value={editNarrationSpeed}
+                                    onChange={(e) => setEditNarrationSpeed(Number(e.target.value))}
+                                    className="w-full accent-orange-500"
+                                />
+                                <p className="text-[10px] text-slate-500 italic mt-2">
+                                    1.00x = ritmo original. O padrão 1.15x deixa a voz mais dinâmica sem alterar o tom. As imagens acompanham automaticamente.
                                 </p>
                             </div>
 
