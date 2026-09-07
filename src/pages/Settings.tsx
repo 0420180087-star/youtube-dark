@@ -2,9 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { encryptData, decryptData } from '../services/securityService';
 import { supabase } from '../lib/supabaseClient';
-import { Settings as SettingsIcon, User, Key, Shield, LogOut, Save, CheckCircle, RefreshCw, AlertTriangle, Trash2, Youtube, LogIn, Copy, ExternalLink, Plus, X, Link2, Activity } from 'lucide-react';
+import { Settings as SettingsIcon, User, Key, Shield, LogOut, Save, CheckCircle, RefreshCw, AlertTriangle, Trash2, Youtube, LogIn, Copy, ExternalLink, Plus, X, Link2, Activity, Cloud, CloudOff } from 'lucide-react';
 import { getKeyStatus, clearExhaustedKeys } from '../services/geminiService';
-import { getUserSettings, saveUserSettings } from '../services/userDataService';
+import { getUserSettings, saveUserSettings, renewGoogleToken } from '../services/userDataService';
+
+type CloudSyncState = 'unknown' | 'checking' | 'synced' | 'local_only' | 'error';
 
 export const Settings: React.FC = () => {
     const { user, login, logout, googleClientId, setGoogleClientId, isLoading: isAuthLoading, youtubeChannel, disconnectYoutube } = useAuth();
@@ -21,8 +23,48 @@ export const Settings: React.FC = () => {
     const [isSaving, setIsSaving] = useState(false);
     const [saveSuccess, setSaveSuccess] = useState(false);
     const [hasEnvKey, setHasEnvKey] = useState(false);
-    
+    const [cloudSync, setCloudSync] = useState<CloudSyncState>('unknown');
+    const [cloudMessage, setCloudMessage] = useState('');
+    const [isSyncing, setIsSyncing] = useState(false);
+
     const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+
+    /**
+     * Envia as chaves para a nuvem (tabela user_settings via edge function
+     * user-data) e LÊ DE VOLTA para confirmar. Só marca "synced" quando a
+     * leitura confirma que a automação vai encontrar a chave.
+     */
+    const syncToCloud = async (keys: string[], pexels: string | null, interactive = false): Promise<boolean> => {
+        if (!supabase || !user?.email) {
+            setCloudSync('local_only');
+            setCloudMessage('Sem conexão com a nuvem — a automação não verá estas chaves.');
+            return false;
+        }
+        setIsSyncing(true);
+        setCloudSync('checking');
+        setCloudMessage('');
+        try {
+            if (interactive) await renewGoogleToken(true);
+            await saveUserSettings(keys, pexels && pexels.trim() ? pexels.trim() : null);
+            const check = await getUserSettings();
+            const savedKeys = Array.isArray(check.gemini_api_keys) ? check.gemini_api_keys : [];
+            if (keys.length > 0 && savedKeys.length === 0) {
+                setCloudSync('error');
+                setCloudMessage('O banco respondeu, mas voltou sem chaves. Rode supabase/bootstrap.sql e tente de novo.');
+                return false;
+            }
+            setCloudSync('synced');
+            setCloudMessage('');
+            return true;
+        } catch (e: any) {
+            const msg = String(e?.message || e);
+            setCloudSync(/sessão do google|HTTP 401/i.test(msg) ? 'local_only' : 'error');
+            setCloudMessage(msg);
+            return false;
+        } finally {
+            setIsSyncing(false);
+        }
+    };
     
     useEffect(() => {
         // Check for environment keys
@@ -72,17 +114,30 @@ export const Settings: React.FC = () => {
         loadPexels();
 
         // Pull cloud copy (overrides local if found) so chaves seguem o usuário entre dispositivos
-        // e ficam disponíveis para o runner do GitHub Actions.
+        // e ficam disponíveis para o runner do GitHub Actions. O resultado desta
+        // leitura é a ÚNICA fonte de verdade do selo "salva na nuvem".
         const loadFromCloud = async () => {
-            if (!supabase || !user?.email) return;
+            if (!supabase || !user?.email) {
+                setCloudSync('local_only');
+                return;
+            }
+            setCloudSync('checking');
             try {
                 const data = await getUserSettings();
-                if (Array.isArray(data.gemini_api_keys) && data.gemini_api_keys.length) {
-                    setApiKeys(data.gemini_api_keys);
-                }
+                const cloudKeys = Array.isArray(data.gemini_api_keys) ? data.gemini_api_keys : [];
+                if (cloudKeys.length) setApiKeys(cloudKeys);
                 if (data.pexels_api_key) setPexelsKey(data.pexels_api_key);
-            } catch (e) {
+                if (cloudKeys.length) {
+                    setCloudSync('synced');
+                    setCloudMessage('');
+                } else {
+                    setCloudSync('local_only');
+                    setCloudMessage('Nenhuma chave salva na nuvem — a automação não encontrará chave. Clique em Salvar/Sincronizar.');
+                }
+            } catch (e: any) {
                 console.warn('[Settings] cloud load failed:', e);
+                setCloudSync('error');
+                setCloudMessage(String(e?.message || e));
             }
         };
         loadFromCloud();
@@ -90,7 +145,7 @@ export const Settings: React.FC = () => {
         setClientIdInput(googleClientId);
     }, [googleClientId, user, singleKeyStorageKey, multiKeyStorageKey]);
 
-    const handleAddKey = () => {
+    const handleAddKey = async () => {
         const cleanKey = newKeyInput.trim();
         if (!cleanKey) return;
         
@@ -99,14 +154,28 @@ export const Settings: React.FC = () => {
             return;
         }
         
-        setApiKeys([...apiKeys, cleanKey]);
+        const next = [...apiKeys, cleanKey];
+        setApiKeys(next);
         setNewKeyInput('');
+        try {
+            const encList = await encryptData(JSON.stringify(next));
+            localStorage.setItem(multiKeyStorageKey, encList);
+        } catch { /* falha local não impede sync */ }
+        await syncToCloud(next, pexelsKey);
     };
 
-    const handleRemoveKey = (index: number) => {
+    const handleRemoveKey = async (index: number) => {
         const newList = [...apiKeys];
         newList.splice(index, 1);
         setApiKeys(newList);
+        try {
+            if (newList.length) {
+                localStorage.setItem(multiKeyStorageKey, await encryptData(JSON.stringify(newList)));
+            } else {
+                localStorage.removeItem(multiKeyStorageKey);
+            }
+        } catch { /* idem */ }
+        await syncToCloud(newList, pexelsKey);
     };
 
     const handleSave = async () => {
@@ -156,16 +225,9 @@ export const Settings: React.FC = () => {
             setGoogleClientId(cleanClientId);
 
             // 4. Sync to Supabase (via Edge Function user-data) so the GitHub
-            //    Actions runner can read these keys per user.
-            if (supabase && user?.email) {
-                try {
-                    await saveUserSettings(keysToSave, pexelsKey.trim() || null);
-                } catch (e: any) {
-                    console.warn('[Settings] cloud sync failed:', e);
-                    alert(`Configurações salvas localmente, mas NÃO sincronizaram com o banco: ${e?.message || e}\n\nA automação do GitHub Actions não verá essas chaves. Rode supabase/bootstrap.sql no SQL Editor e salve novamente.`);
-                }
-
-            }
+            //    Actions runner can read these keys per user. O selo na tela
+            //    reflete a leitura de volta, não o que foi digitado.
+            await syncToCloud(keysToSave, pexelsKey);
 
             setTimeout(() => {
                 setIsSaving(false);

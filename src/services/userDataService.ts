@@ -29,11 +29,48 @@ const getGoogleToken = async (): Promise<string | null> => {
   }
 };
 
-async function callUserData<T>(action: string, payload: Record<string, unknown> = {}): Promise<T> {
-  if (!FUNCTIONS_URL) throw new Error('VITE_SUPABASE_URL não configurado');
-  const token = await getGoogleToken();
-  if (!token) throw new Error('Sessão do Google ausente — faça login novamente');
+/**
+ * Renova o access token do Google (GIS token client, silencioso quando o
+ * usuário já consentiu). Retorna null se não for possível — nesse caso a UI
+ * oferece o botão "Entrar novamente e sincronizar".
+ */
+export const renewGoogleToken = async (interactive = false): Promise<string | null> => {
+  const g = (globalThis as any).google;
+  if (!g?.accounts?.oauth2) return null;
+  let clientId = '';
+  try {
+    clientId = (await loadEncryptedString('ds_google_client_id')) || '';
+  } catch { /* sem client id */ }
+  if (!clientId) return null;
 
+  return new Promise<string | null>((resolve) => {
+    let settled = false;
+    const done = (v: string | null) => { if (!settled) { settled = true; resolve(v); } };
+    try {
+      const client = g.accounts.oauth2.initTokenClient({
+        client_id: clientId,
+        scope: 'https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email',
+        callback: async (resp: any) => {
+          const token = resp?.access_token || null;
+          if (token) {
+            try {
+              const { saveEncryptedString } = await import('./securityService');
+              await saveEncryptedString(ACCESS_TOKEN_STORAGE_KEY, token);
+            } catch { /* segue com o token em memória */ }
+          }
+          done(token);
+        },
+        error_callback: () => done(null),
+      });
+      client.requestAccessToken(interactive ? { prompt: 'consent' } : { prompt: '' });
+      setTimeout(() => done(null), 30_000);
+    } catch {
+      done(null);
+    }
+  });
+};
+
+async function postUserData(action: string, payload: Record<string, unknown>, token: string) {
   const res = await fetch(FUNCTIONS_URL, {
     method: 'POST',
     headers: {
@@ -44,9 +81,25 @@ async function callUserData<T>(action: string, payload: Record<string, unknown> 
     body: JSON.stringify({ action, ...payload }),
     signal: AbortSignal.timeout(20_000),
   });
-
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body?.error || `user-data falhou (HTTP ${res.status})`);
+  return { res, body };
+}
+
+async function callUserData<T>(action: string, payload: Record<string, unknown> = {}): Promise<T> {
+  if (!FUNCTIONS_URL) throw new Error('VITE_SUPABASE_URL não configurado');
+  let token = await getGoogleToken();
+  if (!token) token = await renewGoogleToken(false);
+  if (!token) throw new Error('Sessão do Google ausente — faça login novamente');
+
+  let { res, body } = await postUserData(action, payload, token);
+
+  // 401 = token expirado/revogado. Renova uma vez e repete.
+  if (res.status === 401) {
+    const fresh = await renewGoogleToken(false);
+    if (fresh) ({ res, body } = await postUserData(action, payload, fresh));
+  }
+
+  if (!res.ok) throw new Error(`${body?.error || 'user-data falhou'} (HTTP ${res.status})`);
   return body as T;
 }
 
