@@ -23,8 +23,48 @@ export const Settings: React.FC = () => {
     const [isSaving, setIsSaving] = useState(false);
     const [saveSuccess, setSaveSuccess] = useState(false);
     const [hasEnvKey, setHasEnvKey] = useState(false);
-    
+    const [cloudSync, setCloudSync] = useState<CloudSyncState>('unknown');
+    const [cloudMessage, setCloudMessage] = useState('');
+    const [isSyncing, setIsSyncing] = useState(false);
+
     const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+
+    /**
+     * Envia as chaves para a nuvem (tabela user_settings via edge function
+     * user-data) e LÊ DE VOLTA para confirmar. Só marca "synced" quando a
+     * leitura confirma que a automação vai encontrar a chave.
+     */
+    const syncToCloud = async (keys: string[], pexels: string | null, interactive = false): Promise<boolean> => {
+        if (!supabase || !user?.email) {
+            setCloudSync('local_only');
+            setCloudMessage('Sem conexão com a nuvem — a automação não verá estas chaves.');
+            return false;
+        }
+        setIsSyncing(true);
+        setCloudSync('checking');
+        setCloudMessage('');
+        try {
+            if (interactive) await renewGoogleToken(true);
+            await saveUserSettings(keys, pexels && pexels.trim() ? pexels.trim() : null);
+            const check = await getUserSettings();
+            const savedKeys = Array.isArray(check.gemini_api_keys) ? check.gemini_api_keys : [];
+            if (keys.length > 0 && savedKeys.length === 0) {
+                setCloudSync('error');
+                setCloudMessage('O banco respondeu, mas voltou sem chaves. Rode supabase/bootstrap.sql e tente de novo.');
+                return false;
+            }
+            setCloudSync('synced');
+            setCloudMessage('');
+            return true;
+        } catch (e: any) {
+            const msg = String(e?.message || e);
+            setCloudSync(/sessão do google|HTTP 401/i.test(msg) ? 'local_only' : 'error');
+            setCloudMessage(msg);
+            return false;
+        } finally {
+            setIsSyncing(false);
+        }
+    };
     
     useEffect(() => {
         // Check for environment keys
