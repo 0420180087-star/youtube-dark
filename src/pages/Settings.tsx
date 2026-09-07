@@ -114,17 +114,30 @@ export const Settings: React.FC = () => {
         loadPexels();
 
         // Pull cloud copy (overrides local if found) so chaves seguem o usuário entre dispositivos
-        // e ficam disponíveis para o runner do GitHub Actions.
+        // e ficam disponíveis para o runner do GitHub Actions. O resultado desta
+        // leitura é a ÚNICA fonte de verdade do selo "salva na nuvem".
         const loadFromCloud = async () => {
-            if (!supabase || !user?.email) return;
+            if (!supabase || !user?.email) {
+                setCloudSync('local_only');
+                return;
+            }
+            setCloudSync('checking');
             try {
                 const data = await getUserSettings();
-                if (Array.isArray(data.gemini_api_keys) && data.gemini_api_keys.length) {
-                    setApiKeys(data.gemini_api_keys);
-                }
+                const cloudKeys = Array.isArray(data.gemini_api_keys) ? data.gemini_api_keys : [];
+                if (cloudKeys.length) setApiKeys(cloudKeys);
                 if (data.pexels_api_key) setPexelsKey(data.pexels_api_key);
-            } catch (e) {
+                if (cloudKeys.length) {
+                    setCloudSync('synced');
+                    setCloudMessage('');
+                } else {
+                    setCloudSync('local_only');
+                    setCloudMessage('Nenhuma chave salva na nuvem — a automação não encontrará chave. Clique em Salvar/Sincronizar.');
+                }
+            } catch (e: any) {
                 console.warn('[Settings] cloud load failed:', e);
+                setCloudSync('error');
+                setCloudMessage(String(e?.message || e));
             }
         };
         loadFromCloud();
@@ -132,7 +145,7 @@ export const Settings: React.FC = () => {
         setClientIdInput(googleClientId);
     }, [googleClientId, user, singleKeyStorageKey, multiKeyStorageKey]);
 
-    const handleAddKey = () => {
+    const handleAddKey = async () => {
         const cleanKey = newKeyInput.trim();
         if (!cleanKey) return;
         
@@ -141,14 +154,28 @@ export const Settings: React.FC = () => {
             return;
         }
         
-        setApiKeys([...apiKeys, cleanKey]);
+        const next = [...apiKeys, cleanKey];
+        setApiKeys(next);
         setNewKeyInput('');
+        try {
+            const encList = await encryptData(JSON.stringify(next));
+            localStorage.setItem(multiKeyStorageKey, encList);
+        } catch { /* falha local não impede sync */ }
+        await syncToCloud(next, pexelsKey);
     };
 
-    const handleRemoveKey = (index: number) => {
+    const handleRemoveKey = async (index: number) => {
         const newList = [...apiKeys];
         newList.splice(index, 1);
         setApiKeys(newList);
+        try {
+            if (newList.length) {
+                localStorage.setItem(multiKeyStorageKey, await encryptData(JSON.stringify(newList)));
+            } else {
+                localStorage.removeItem(multiKeyStorageKey);
+            }
+        } catch { /* idem */ }
+        await syncToCloud(newList, pexelsKey);
     };
 
     const handleSave = async () => {
