@@ -451,7 +451,7 @@ export async function renderVideo({ visuals, segments, audioBase64, audioMimeTyp
 
   // Background music: accept either a remote URL or a local file path already on disk
   let musicPath = null;
-  if (musicUrl) {
+  if (musicUrl && !String(musicUrl).startsWith('__')) {
     try {
       if (/^https?:\/\//i.test(musicUrl)) {
         musicPath = path.join(tmpDir, 'music.mp3');
