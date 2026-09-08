@@ -332,6 +332,302 @@ export const generateThumbnail = async (
 };
 
 
+export interface ComposedThumbnailOptions {
+    title: string;
+    tone: string;
+    scriptSummary: string;
+    script?: ScriptData;
+    channelTheme?: string;
+    language?: string;
+    /** Existing video scene image URLs — a real frame from the video is
+     *  preferred over a freshly generated one: more topic-specific, and
+     *  saves an extra image-generation call. */
+    sceneImageUrls?: (string | undefined)[];
+}
+
+/**
+ * The full clickbait thumbnail: a well-art-directed background (a real scene
+ * from the video when available, otherwise a freshly generated one) with a
+ * Gemini-written hook composited on top via canvas — bold boxes or cinematic
+ * glow text, a curiosity-circle-and-arrow, a corner badge, and the FOMO
+ * progress bar. This is the same composition the manual editor already used
+ * (ProjectEditor.tsx's "Generate Thumbnail" button); pulled out here so the
+ * automatic pipeline gets it too instead of a text-less photo.
+ *
+ * Only throws if BOTH the scene-reuse and fresh-AI-image paths fail — the
+ * caller should fall back to generateThumbnail() (which has its own
+ * self-sufficient synthetic-canvas fallback) in that case.
+ */
+export const generateComposedThumbnail = async (opts: ComposedThumbnailOptions): Promise<string> => {
+    const { title, tone, scriptSummary, script, channelTheme, language, sceneImageUrls } = opts;
+
+    const loadImage = (src: string) => new Promise<HTMLImageElement>((resolve, reject) => {
+        const im = new Image();
+        im.crossOrigin = "anonymous";
+        im.onload = () => resolve(im);
+        im.onerror = reject;
+        im.src = src;
+    });
+
+    // ── 1. BACKGROUND: prefer a real scene from the video ──────────────────
+    const sceneCandidates = (sceneImageUrls || []).filter((u): u is string => !!u);
+    const preferred = sceneCandidates.length
+        ? sceneCandidates[Math.floor(sceneCandidates.length / 2)]
+        : null;
+
+    let img: HTMLImageElement | null = null;
+    if (preferred) {
+        try { img = await loadImage(preferred); } catch { /* fall through to fresh AI image */ }
+    }
+    if (!img) {
+        // Deliberately calls the low-level prompt+render steps directly
+        // (not generateThumbnail()) — that function's own fallback already
+        // bakes in text via generateCanvasThumbnail, which would double up
+        // with the hook text this function composites below.
+        let imagePrompt = '';
+        try {
+            imagePrompt = await withTimeout(buildImagePrompt(title, tone, script, scriptSummary, channelTheme), PROMPT_TIMEOUT_MS, 'thumb_prompt');
+        } catch { /* fall through to local prompt */ }
+        if (!imagePrompt) imagePrompt = buildLocalImagePrompt(title, tone, channelTheme);
+        const baseImageUrl = await withTimeout(renderImageFromPrompt(imagePrompt), RENDER_TOTAL_TIMEOUT_MS, 'thumb_render');
+        img = await loadImage(baseImageUrl);
+    }
+
+    // ── 2. Clickbait hook (style 1 = bold boxes, 2 = cinematic glow) ────────
+    const hookData = await withTimeout(
+        generateThumbnailHook(title, tone, language || 'Portuguese', scriptSummary, script, channelTheme),
+        PROMPT_TIMEOUT_MS,
+        'thumb_hook',
+    );
+
+    // ── 3. Composite ─────────────────────────────────────────────────────
+    const canvas = document.createElement('canvas');
+    canvas.width = 1280;
+    canvas.height = 720;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error("Canvas context failed");
+
+    // Background: cover-fit, slight zoom, biased left so right-side text reads cleanly
+    const zoom = 1.08;
+    const scale = Math.max(canvas.width / img.width, canvas.height / img.height) * zoom;
+    const dw = img.width * scale;
+    const dh = img.height * scale;
+    const x = (canvas.width - dw) / 2 - dw * 0.08;
+    const y = (canvas.height - dh) / 2;
+    ctx.drawImage(img, x, y, dw, dh);
+
+    ctx.fillStyle = 'rgba(255, 80, 0, 0.06)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const vignette = ctx.createRadialGradient(canvas.width * 0.4, canvas.height * 0.5, 80, canvas.width * 0.5, canvas.height * 0.5, canvas.width * 0.7);
+    vignette.addColorStop(0, 'rgba(0,0,0,0)');
+    vignette.addColorStop(1, 'rgba(0,0,0,0.85)');
+    ctx.fillStyle = vignette;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const sideGrad = ctx.createLinearGradient(canvas.width * 0.35, 0, canvas.width, 0);
+    sideGrad.addColorStop(0, 'rgba(0,0,0,0)');
+    sideGrad.addColorStop(1, 'rgba(0,0,0,0.55)');
+    ctx.fillStyle = sideGrad;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Curiosity circle + arrow on the subject
+    const focusX = canvas.width * 0.28;
+    const focusY = canvas.height * 0.55;
+    ctx.save();
+    ctx.strokeStyle = '#FFEB3B';
+    ctx.lineWidth = 8;
+    ctx.shadowColor = 'rgba(255, 235, 59, 0.9)';
+    ctx.shadowBlur = 25;
+    ctx.beginPath();
+    ctx.arc(focusX, focusY, 110, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.lineWidth = 3;
+    ctx.shadowBlur = 0;
+    ctx.beginPath();
+    ctx.arc(focusX, focusY, 100, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.save();
+    ctx.strokeStyle = '#FFEB3B';
+    ctx.fillStyle = '#FFEB3B';
+    ctx.lineWidth = 10;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.shadowColor = 'rgba(0,0,0,0.6)';
+    ctx.shadowBlur = 10;
+    ctx.beginPath();
+    ctx.moveTo(focusX - 230, focusY - 180);
+    ctx.quadraticCurveTo(focusX - 280, focusY - 50, focusX - 130, focusY - 30);
+    ctx.stroke();
+    const ax = focusX - 130, ay = focusY - 30;
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(ax - 35, ay - 25);
+    ctx.lineTo(ax - 25, ay - 5);
+    ctx.lineTo(ax - 5, ay - 35);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    // Text (right side)
+    const wrap = (text: string, maxWidth: number, fontSize: number) => {
+        ctx.font = `900 ${fontSize}px "Impact", "Arial Black", sans-serif`;
+        const words = text.split(/\s+/);
+        const lines: string[] = [];
+        let current = '';
+        for (const w of words) {
+            const tentative = current ? `${current} ${w}` : w;
+            if (ctx.measureText(tentative).width > maxWidth && current) {
+                lines.push(current);
+                current = w;
+            } else current = tentative;
+        }
+        if (current) lines.push(current);
+        return lines;
+    };
+
+    if (hookData.style === 1) {
+        const boxColors = ['#ef4444', '#fbbf24', '#22c55e'];
+        const textColors = ['#FFFFFF', '#000000', '#FFFFFF'];
+        const rightX = canvas.width - 60;
+        const lines = wrap(hookData.mainText, 620, 110);
+        const fontSize = lines.length > 2 ? 92 : 110;
+        let cy = 200;
+        const rotation = -2 + Math.random() * 1;
+
+        lines.forEach((line, i) => {
+            ctx.save();
+            ctx.translate(rightX, cy);
+            ctx.rotate(rotation * Math.PI / 180);
+            ctx.font = `900 ${fontSize}px "Impact", "Arial Black", sans-serif`;
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'alphabetic';
+            const metrics = ctx.measureText(line);
+            const padX = fontSize * 0.3;
+            const padY = fontSize * 0.18;
+            const w = metrics.width + padX * 2;
+            const h = fontSize * 1.2;
+
+            ctx.shadowColor = 'rgba(0,0,0,0.95)';
+            ctx.shadowBlur = 30;
+            ctx.shadowOffsetY = 8;
+            ctx.fillStyle = boxColors[i % boxColors.length];
+            const boxX = -w + padX;
+            const boxY = -fontSize * 0.85;
+            const boxH = h + padY * 2;
+            if (typeof ctx.roundRect === 'function') {
+                ctx.beginPath();
+                ctx.roundRect(boxX, boxY, w, boxH, 10);
+                ctx.fill();
+            } else {
+                ctx.fillRect(boxX, boxY, w, boxH);
+            }
+            ctx.shadowColor = 'transparent';
+            ctx.shadowBlur = 0;
+            ctx.shadowOffsetY = 0;
+
+            ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+            ctx.lineWidth = fontSize * 0.06;
+            ctx.lineJoin = 'round';
+            ctx.strokeText(line, 0, 0);
+            ctx.fillStyle = textColors[i % textColors.length];
+            ctx.fillText(line, 0, 0);
+            ctx.restore();
+            cy += fontSize * 1.05;
+        });
+
+        if (hookData.accentText) {
+            ctx.save();
+            ctx.translate(rightX, cy + 24);
+            ctx.rotate(rotation * Math.PI / 180);
+            ctx.font = `900 70px "Impact", "Arial Black", sans-serif`;
+            ctx.textAlign = 'right';
+            ctx.fillStyle = '#fbbf24';
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 8;
+            ctx.lineJoin = 'round';
+            ctx.strokeText(hookData.accentText, 0, 0);
+            ctx.fillText(hookData.accentText, 0, 0);
+            ctx.restore();
+        }
+    } else {
+        const drawGlow = (text: string, gx: number, gy: number, fontSize: number, color: string, glow: string, align: CanvasTextAlign = 'right') => {
+            ctx.save();
+            ctx.font = `900 ${fontSize}px "Impact", "Arial Black", sans-serif`;
+            ctx.textAlign = align;
+            ctx.shadowColor = glow;
+            ctx.shadowBlur = 60;
+            ctx.fillStyle = glow + '55';
+            ctx.fillText(text, gx, gy);
+            ctx.fillText(text, gx, gy);
+            ctx.shadowBlur = 12;
+            ctx.shadowColor = '#000';
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = fontSize * 0.05;
+            ctx.lineJoin = 'round';
+            ctx.strokeText(text, gx, gy);
+            ctx.fillStyle = color;
+            ctx.fillText(text, gx, gy);
+            ctx.restore();
+        };
+
+        const rightX = canvas.width - 60;
+        const lines = wrap(hookData.mainText, 640, 110);
+        const fs = lines.length > 2 ? 88 : 110;
+        let cy = 260;
+        lines.forEach(line => {
+            drawGlow(line, rightX, cy, fs, '#FFFFFF', '#00aaff');
+            cy += fs * 1.05;
+        });
+        if (hookData.accentText) {
+            drawGlow(hookData.accentText, rightX, cy + 30, 78, '#ffcc00', '#ff4400');
+        }
+    }
+
+    // Corner badge
+    ctx.save();
+    ctx.translate(110, 110);
+    ctx.rotate(-12 * Math.PI / 180);
+    ctx.beginPath();
+    const spikes = 14;
+    const outerR = 78;
+    const innerR = 60;
+    for (let i = 0; i < spikes * 2; i++) {
+        const r = i % 2 === 0 ? outerR : innerR;
+        const a = (Math.PI / spikes) * i - Math.PI / 2;
+        const px = Math.cos(a) * r;
+        const py = Math.sin(a) * r;
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fillStyle = '#ef4444';
+    ctx.shadowColor = 'rgba(0,0,0,0.7)';
+    ctx.shadowBlur = 18;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = '900 56px "Impact", "Arial Black", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(hookData.mainText.includes('?') ? '?!' : '!', 0, 4);
+    ctx.restore();
+
+    // FOMO progress bar
+    const barY = canvas.height - 6;
+    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    ctx.fillRect(0, barY - 4, canvas.width, 8);
+    ctx.fillStyle = '#ff0000';
+    ctx.fillRect(0, barY - 4, canvas.width * 0.7, 8);
+    ctx.beginPath();
+    ctx.arc(canvas.width * 0.7, barY, 9, 0, Math.PI * 2);
+    ctx.fillStyle = '#ff0000';
+    ctx.fill();
+
+    return canvas.toDataURL('image/jpeg', 0.92);
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CANVAS FALLBACK — no API calls, still looks professional
 // ─────────────────────────────────────────────────────────────────────────────
