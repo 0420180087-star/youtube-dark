@@ -287,6 +287,43 @@ export const Settings: React.FC = () => {
                                 ) : null}
                             </div>
 
+                            {/* Selo de sincronização — reflete o que está no banco */}
+                            <div className="mb-4 flex flex-wrap items-center gap-3">
+                                {cloudSync === 'synced' ? (
+                                    <span className="text-[11px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-1 rounded flex items-center gap-1.5">
+                                        <Cloud className="w-3.5 h-3.5" /> Salva na nuvem (a automação enxerga)
+                                    </span>
+                                ) : cloudSync === 'checking' || isSyncing ? (
+                                    <span className="text-[11px] bg-slate-800 text-slate-300 border border-slate-700 px-2 py-1 rounded flex items-center gap-1.5">
+                                        <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Verificando na nuvem...
+                                    </span>
+                                ) : cloudSync === 'error' ? (
+                                    <span className="text-[11px] bg-red-500/10 text-red-400 border border-red-500/20 px-2 py-1 rounded flex items-center gap-1.5">
+                                        <AlertTriangle className="w-3.5 h-3.5" /> Falha ao salvar na nuvem
+                                    </span>
+                                ) : (
+                                    <span className="text-[11px] bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-1 rounded flex items-center gap-1.5">
+                                        <CloudOff className="w-3.5 h-3.5" /> Somente neste navegador — a automação não vê
+                                    </span>
+                                )}
+
+                                {cloudSync !== 'synced' && (
+                                    <button
+                                        onClick={() => syncToCloud(apiKeys, pexelsKey, true)}
+                                        disabled={isSyncing}
+                                        className="text-[11px] px-2.5 py-1 rounded border border-orange-500/40 bg-orange-500/10 text-orange-300 hover:bg-orange-500/20 disabled:opacity-50 flex items-center gap-1.5"
+                                    >
+                                        <LogIn className="w-3.5 h-3.5" /> Entrar novamente e sincronizar
+                                    </button>
+                                )}
+                            </div>
+
+                            {cloudMessage && (
+                                <p className="mb-4 text-xs text-amber-300/90 bg-amber-500/5 border border-amber-500/20 rounded-lg p-3">
+                                    {cloudMessage}
+                                </p>
+                            )}
+
 
                             {hasEnvKey && apiKeys.length === 0 && (
                                <div className="mb-4 p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg flex items-center gap-3">
