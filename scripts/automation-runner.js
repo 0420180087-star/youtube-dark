@@ -386,7 +386,7 @@ async function loadUserKeys(userEmail) {
     if (error) {
       // NUNCA tratar erro de query como "usuário sem chave" — isso mascarou o
       // bug de colunas ausentes (gemini_api_keys) por várias execuções.
-      log('⚠️', `Falha ao ler user_settings de ${email}: ${error.message}. Rode supabase/bootstrap.sql para criar/atualizar as colunas.`);
+      log('⚠️', `QUERY FALHOU ao ler user_settings de ${email}: ${error.message}. Rode supabase/bootstrap.sql para criar/atualizar as colunas.`);
     } else if (data?.gemini_api_keys?.length) {
       GEMINI_API_KEYS = data.gemini_api_keys.filter(Boolean);
       GEMINI_KEY_INDEX = 0;
@@ -394,8 +394,10 @@ async function loadUserKeys(userEmail) {
       keyCooldowns.clear();
       log('🔑', `Loaded ${GEMINI_API_KEYS.length} Gemini key(s) for ${email}`);
 
+    } else if (data) {
+      log('ℹ️', `user_settings TEM linha para ${email}, mas gemini_api_keys está vazio. Abra Configurações no app, confira o selo "Salva na nuvem" e clique em Salvar/Sincronizar.${envGemini ? ' Usando a chave do ambiente por enquanto.' : ''}`);
     } else {
-      log('ℹ️', `Nenhuma chave Gemini salva em user_settings para ${email}${envGemini ? ' — usando a chave do ambiente.' : '.'}`);
+      log('ℹ️', `Nenhuma LINHA em user_settings para ${email} (consulta OK). As chaves ficaram só no navegador: abra Configurações, veja o selo de sincronização e clique em "Entrar novamente e sincronizar".${envGemini ? ' Usando a chave do ambiente por enquanto.' : ''}`);
     }
 
     if (!GEMINI_API_KEYS.length && envGemini) {
