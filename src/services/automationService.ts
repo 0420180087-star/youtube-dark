@@ -11,11 +11,10 @@ import {
   generateVoiceover,
   generateDarkAmbience,
   generateThumbnail,
+  generateComposedThumbnail,
   decodeAudioData,
   mergeAudioBuffers,
   audioBufferToBase64,
-  changeAudioSpeed,
-  isValidMusicPayload,
   VideoIdea as GeminiVideoIdea
 } from './geminiService';
 import { renderVideoHeadless } from './renderService';
@@ -144,13 +143,6 @@ function createSilence(ctx: AudioContext, durationSeconds: number): AudioBuffer 
   return buf;
 }
 
-/** Velocidade de narração válida: 1.0x a 1.4x, padrão 1.15x. */
-export function clampNarrationSpeed(value?: number): number {
-  const n = Number(value);
-  if (!isFinite(n) || n <= 0) return 1.15;
-  return Math.max(1, Math.min(1.4, n));
-}
-
 export async function stepGenerateVoice(
   project: Project,
   video: Video,
@@ -219,30 +211,12 @@ export async function stepGenerateVoice(
     }
 
 
-    const merged = mergeAudioBuffers(audioBuffers, ctx);
-
-    // Narração um pouco mais rápida (padrão 1.15x), preservando o tom.
-    // Os timestamps encolhem pelo mesmo fator para manter as imagens em sincronia.
-    const speed = clampNarrationSpeed(project.narrationSpeed);
-    let finalAudio = merged;
-    let finalTimestamps = timestamps;
-    let finalTotal = totalDur;
-    if (speed > 1.005) {
-      try {
-        finalAudio = changeAudioSpeed(merged, ctx, speed);
-        finalTimestamps = timestamps.map(t => t / speed);
-        finalTotal = totalDur / speed;
-        callbacks.onProgress('voice', `Narração acelerada em ${speed.toFixed(2)}x`);
-      } catch (err: any) {
-        console.warn('[Voice] Falha ao acelerar narração, usando velocidade original:', err?.message);
-      }
-    }
-
+    const finalAudio = mergeAudioBuffers(audioBuffers, ctx);
     const audioUrl = audioBufferToBase64(finalAudio);
 
-    callbacks.updateVideo(project.id, video.id, { audioUrl, segmentTimestamps: finalTimestamps, status: ProjectStatus.AUDIO_GENERATED });
+    callbacks.updateVideo(project.id, video.id, { audioUrl, segmentTimestamps: timestamps, status: ProjectStatus.AUDIO_GENERATED });
     callbacks.onStepComplete('voice');
-    return { audioUrl, timestamps: finalTimestamps, totalDuration: finalTotal };
+    return { audioUrl, timestamps, totalDuration: totalDur };
   } finally {
     // Always release AudioContext — prevents accumulation of Web Audio nodes
     // across pipeline runs, including on error paths.
@@ -346,21 +320,8 @@ export async function stepGenerateStudio(
   callbacks: PipelineCallbacks
 ) {
   callbacks.onStepStart('studio', 'Gerando música de fundo...');
-  let musicUrl: string | undefined;
-  for (let attempt = 1; attempt <= 2 && !isValidMusicPayload(musicUrl); attempt++) {
-    try {
-      musicUrl = await generateDarkAmbience(project.defaultTone || 'Dark');
-    } catch (err: any) {
-      console.warn(`[Studio] Música tentativa ${attempt} falhou:`, err?.message);
-      musicUrl = undefined;
-    }
-  }
-  if (isValidMusicPayload(musicUrl)) {
-    console.log('[Studio] 🎵 Música de fundo pronta');
-    callbacks.updateVideo(project.id, video.id, { backgroundMusicUrl: musicUrl });
-  } else {
-    console.warn('[Studio] ⚠️ Vídeo seguirá sem música de fundo');
-  }
+  const musicUrl = await generateDarkAmbience(project.defaultTone || 'Dark');
+  callbacks.updateVideo(project.id, video.id, { backgroundMusicUrl: musicUrl });
   callbacks.onStepComplete('studio');
   return musicUrl;
 }
@@ -375,16 +336,36 @@ export async function stepGenerateThumbnail(
   const scriptSummary = script.segments.slice(0, 3).map((s: any) => s.narratorText).join(' ').slice(0, 500);
 
   // A thumbnail NUNCA deve travar ou derrubar o pipeline: teto de 2 min e
-  // fallback silencioso (generateThumbnail já devolve canvas em caso de falha).
+  // fallback silencioso. Tenta primeiro a versão composta (cena real do
+  // vídeo + gancho de clickbait sobreposto — a mesma composição que já
+  // existia só no editor manual); se isso falhar por completo, cai para o
+  // generateThumbnail() simples (foto sem texto, com seu próprio fallback
+  // sintético caso a IA falhe também).
   let thumbnailUrl: string | undefined;
   try {
     thumbnailUrl = await Promise.race([
-      generateThumbnail(video.title, project.defaultTone, scriptSummary, script, project.channelTheme, project.library),
+      generateComposedThumbnail({
+        title: video.title,
+        tone: project.defaultTone,
+        scriptSummary,
+        script,
+        channelTheme: project.channelTheme,
+        language: project.language,
+        sceneImageUrls: video.visualScenes?.map(s => s.imageUrl),
+      }),
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error('thumbnail_step_timeout')), 120_000)),
     ]);
   } catch (err: any) {
-    console.warn('[Pipeline] Thumbnail falhou, seguindo sem ela:', err?.message);
-    thumbnailUrl = undefined;
+    console.warn('[Pipeline] Thumbnail composta falhou, tentando versão simples:', err?.message);
+    try {
+      thumbnailUrl = await Promise.race([
+        generateThumbnail(video.title, project.defaultTone, scriptSummary, script, project.channelTheme, project.library),
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('thumbnail_step_timeout')), 120_000)),
+      ]);
+    } catch (err2: unknown) {
+      console.warn('[Pipeline] Thumbnail simples também falhou, seguindo sem ela:', err2 instanceof Error ? err2.message : err2);
+      thumbnailUrl = undefined;
+    }
   }
 
   if (thumbnailUrl) callbacks.updateVideo(project.id, video.id, { thumbnailUrl });
