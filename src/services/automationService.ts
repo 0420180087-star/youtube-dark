@@ -15,6 +15,8 @@ import {
   decodeAudioData,
   mergeAudioBuffers,
   audioBufferToBase64,
+  changeAudioSpeed,
+  isValidMusicPayload,
   VideoIdea as GeminiVideoIdea
 } from './geminiService';
 import { renderVideoHeadless } from './renderService';
@@ -96,8 +98,27 @@ export async function stepGenerateIdea(
 
   // Persist ALL generated ideas immediately so a parallel runner won't regenerate them
   // and so the chosen one is marked 'used' atomically (prevents duplicate videos).
+  // Nunca escolher ideia repetida/parecida com vídeos anteriores.
+  const prevTitles = [...excludeList, ...(latestForIdeas.ideas || []).map(i => i.topic)];
+  const words = (t: string) => new Set(String(t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 3));
+  const similar = (t: string) => {
+    const a = words(t);
+    return prevTitles.some(p => {
+      const b = words(p); let inter = 0;
+      a.forEach(w => { if (b.has(w)) inter++; });
+      return a.size + b.size - inter > 0 && inter / (a.size + b.size - inter) > 0.6;
+    });
+  };
+  ideas = ideas.filter(i => !similar(i.topic));
+  if (ideas.length === 0) {
+    const stamp = `${new Date().toISOString().slice(0, 10)}-${Math.floor(Math.random() * 1000)}`;
+    ideas = [{
+      topic: `${project.channelTheme}: ${FRESH_ANGLES[Math.floor(Math.random() * FRESH_ANGLES.length)]} (#${stamp})`,
+      context: `A fresh angle on ${project.channelTheme}.`,
+      specificContext: `Pick a specific, lesser-known case within ${project.channelTheme} not covered in: ${excludeList.slice(-20).join(' | ')}.`,
+    }];
+  }
   callbacks.saveGeneratedIdeas?.(project.id, ideas);
-
   const best = ideas[0];
 
   // Try to mark the freshly-saved idea as used (best-effort, by topic match).
@@ -141,6 +162,13 @@ function createSilence(ctx: AudioContext, durationSeconds: number): AudioBuffer 
   const buf = ctx.createBuffer(1, Math.max(1, frameCount), 24000);
   // Buffer is already zeroed (silence) by default
   return buf;
+}
+
+/** Velocidade de narração válida: 1.0x a 1.4x, padrão 1.15x. */
+export function clampNarrationSpeed(value?: number): number {
+  const n = Number(value);
+  if (!isFinite(n) || n <= 0) return 1.15;
+  return Math.max(1, Math.min(1.4, n));
 }
 
 export async function stepGenerateVoice(
@@ -211,12 +239,26 @@ export async function stepGenerateVoice(
     }
 
 
-    const finalAudio = mergeAudioBuffers(audioBuffers, ctx);
+    const merged = mergeAudioBuffers(audioBuffers, ctx);
+    const speed = clampNarrationSpeed(project.narrationSpeed);
+    let finalAudio = merged;
+    let finalTimestamps = timestamps;
+    let finalTotal = totalDur;
+    if (speed > 1.005) {
+      try {
+        finalAudio = changeAudioSpeed(merged, ctx, speed);
+        finalTimestamps = timestamps.map(t => t / speed);
+        finalTotal = totalDur / speed;
+        callbacks.onProgress('voice', `Narração acelerada em ${speed.toFixed(2)}x`);
+      } catch (err: any) {
+        console.warn('[Voice] Falha ao acelerar narração, usando velocidade original:', err?.message);
+      }
+    }
     const audioUrl = audioBufferToBase64(finalAudio);
 
-    callbacks.updateVideo(project.id, video.id, { audioUrl, segmentTimestamps: timestamps, status: ProjectStatus.AUDIO_GENERATED });
+    callbacks.updateVideo(project.id, video.id, { audioUrl, segmentTimestamps: finalTimestamps, status: ProjectStatus.AUDIO_GENERATED });
     callbacks.onStepComplete('voice');
-    return { audioUrl, timestamps, totalDuration: totalDur };
+    return { audioUrl, timestamps: finalTimestamps, totalDuration: finalTotal };
   } finally {
     // Always release AudioContext — prevents accumulation of Web Audio nodes
     // across pipeline runs, including on error paths.
@@ -320,8 +362,20 @@ export async function stepGenerateStudio(
   callbacks: PipelineCallbacks
 ) {
   callbacks.onStepStart('studio', 'Gerando música de fundo...');
-  const musicUrl = await generateDarkAmbience(project.defaultTone || 'Dark');
-  callbacks.updateVideo(project.id, video.id, { backgroundMusicUrl: musicUrl });
+  let musicUrl: string | undefined;
+  for (let attempt = 1; attempt <= 2 && !isValidMusicPayload(musicUrl); attempt++) {
+    try {
+      musicUrl = await generateDarkAmbience(project.defaultTone || 'Dark');
+    } catch (err: any) {
+      console.warn(`[Studio] Música tentativa ${attempt} falhou:`, err?.message);
+      musicUrl = undefined;
+    }
+  }
+  if (isValidMusicPayload(musicUrl)) {
+    callbacks.updateVideo(project.id, video.id, { backgroundMusicUrl: musicUrl });
+  } else {
+    callbacks.onProgress('studio', 'Música indisponível — o vídeo seguirá sem música de fundo');
+  }
   callbacks.onStepComplete('studio');
   return musicUrl;
 }
