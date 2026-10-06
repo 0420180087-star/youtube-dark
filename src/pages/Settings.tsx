@@ -227,7 +227,12 @@ export const Settings: React.FC = () => {
             // 4. Sync to Supabase (via Edge Function user-data) so the GitHub
             //    Actions runner can read these keys per user. O selo na tela
             //    reflete a leitura de volta, não o que foi digitado.
-            await syncToCloud(keysToSave, pexelsKey);
+            const cloudOk = await syncToCloud(keysToSave, pexelsKey);
+            if (!cloudOk && keysToSave.length > 0) {
+                setIsSaving(false);
+                alert('Salvo só neste navegador — a automação NÃO vai enxergar as chaves. Veja o aviso vermelho em Chaves e clique em "Entrar novamente e sincronizar".');
+                return;
+            }
 
             setTimeout(() => {
                 setIsSaving(false);

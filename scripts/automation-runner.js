@@ -166,6 +166,23 @@ async function acquireLock(projectId, lockMinutes = 90) {
   return { acquired: (data?.length || 0) > 0, error: null };
 }
 
+// Renova o lock a cada etapa salva: um render longo não deixa o lock
+// expirar no meio e abrir espaço para um segundo runner criar outro vídeo.
+let lastLockRenew = 0;
+async function renewLock(projectId, lockMinutes = 90) {
+  if (Date.now() - lastLockRenew < 5 * 60 * 1000) return;
+  lastLockRenew = Date.now();
+  try {
+    await supabase
+      .from('projects')
+      .update({ autopilot_locked_until: new Date(Date.now() + lockMinutes * 60 * 1000).toISOString() })
+      .eq('id', String(projectId))
+      .eq('autopilot_locked_by', 'github-actions');
+  } catch (e) {
+    log('⚠️', `Renovação do lock falhou: ${e.message}`);
+  }
+}
+
 async function releaseLock(projectId) {
   try {
     if (SCHEMA.lockRpc) {
@@ -734,10 +751,31 @@ function getToneModifier(tone) {
 
 // --- PIPELINE STEPS ---
 
+// Similaridade por palavras (Jaccard). >0.6 = mesmo assunto com outra roupa.
+function topicWords(t) {
+  return new Set(String(t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w.length > 3));
+}
+function isTooSimilar(topic, previous) {
+  const a = topicWords(topic);
+  if (!a.size) return true;
+  return previous.some((p) => {
+    const b = topicWords(p);
+    if (!b.size) return false;
+    let inter = 0;
+    for (const w of a) if (b.has(w)) inter++;
+    return inter / (a.size + b.size - inter) > 0.6;
+  });
+}
+
 async function stepIdea(projectData) {
   log('💡', 'Step 1: Finding idea...');
 
   const ideas = projectData.ideas || [];
+  const videoTitles = (projectData.videos || []).map((v) => v.title).filter(Boolean);
+  for (const i of ideas) {
+    if (i.status === 'new' && isTooSimilar(i.topic, videoTitles)) i.status = 'dismissed';
+  }
   const unused = ideas.find((i) => i.status === 'new');
 
   if (unused) {
@@ -765,17 +803,26 @@ Return JSON: { "ideas": [{ "topic": "video title", "context": "brief description
   } catch (e) {
     // Fallback: never block autopilot just because brainstorm failed
     log('⚠️', `Brainstorm fallback (IA falhou: ${e.message}). Gerando ideia automática.`);
-    const seeds = ['The Untold Story of', 'The Hidden Truth Behind', 'What Nobody Tells You About', 'Why Everyone is Wrong About'];
+    const seeds = ['The Untold Story of', 'The Hidden Truth Behind', 'What Nobody Tells You About', 'Why Everyone is Wrong About', 'The Strangest Case of', 'The Forgotten Side of'];
+    const angles = ['in the 1980s', 'that police ignored', 'no one solved', 'from a survivor\'s view', 'behind closed doors', 'that shocked a small town', 'with one tiny clue', 'decades later'];
+    const stamp = new Date().toISOString().slice(0, 10);
     generatedIdeas = seeds.slice(0, 3).map((seed) => makeProjectIdea({
-      topic: `${seed} ${projectData.channelTheme}`,
+      topic: `${seed} ${projectData.channelTheme} ${angles[Math.floor(Math.random() * angles.length)]} (#${stamp}-${Math.floor(Math.random() * 1000)})`,
       context: `An engaging deep-dive about ${projectData.channelTheme}.`,
       specificContext: `Explore ${projectData.channelTheme} from a fresh, click-worthy angle. ${projectData.description || ''}`.trim(),
     }, 'new'));
   }
 
-  const existingTopics = new Set(ideas.map((i) => i.topic));
-  const freshIdeas = generatedIdeas.filter((i) => !existingTopics.has(i.topic));
-  const chosen = freshIdeas[0] || generatedIdeas[0];
+  const previous = [
+    ...ideas.map((i) => i.topic),
+    ...(projectData.videos || []).map((v) => v.title),
+  ].filter(Boolean);
+  const freshIdeas = generatedIdeas.filter((i) => !isTooSimilar(i.topic, previous));
+  if (!freshIdeas.length) {
+    // Nunca grava duplicata: falha explícita → STANDBY curto e nova tentativa.
+    throw new Error('Brainstorm só devolveu ideias repetidas/parecidas com vídeos anteriores — nova tentativa em breve');
+  }
+  const chosen = freshIdeas[0];
   const updatedIdeas = [
     ...ideas,
     ...freshIdeas.map((i, idx) => ({ ...i, status: i.topic === chosen.topic && idx === 0 ? 'used' : 'new' })),
@@ -1251,6 +1298,7 @@ async function persistProjectData(projectId, data, message = 'Project data persi
 
 async function updateRunnerVideo(projectId, data, videoId, updates, logMessage) {
   if (!data.videos) data.videos = [];
+  await renewLock(projectId);
   const idx = data.videos.findIndex((v) => v.id === videoId);
   if (idx === -1) return;
   data.videos[idx] = lightVideoRecord({
@@ -1282,6 +1330,8 @@ function retryBackoffMs(retryCount) {
 //   • está em SCHEDULED por falta de canal do YouTube (upload pendente) —
 //     nesse caso é retomado sem gastar tentativa, assim que o token voltar.
 const PENDING_UPLOAD_MARK = 'Upload pendente';
+// > TTL do lock (90 min): ninguém mais está trabalhando nesse vídeo.
+const ORPHAN_AFTER_MS = 100 * 60 * 1000;
 
 function findRetryableVideo(data, now = Date.now(), youtubeReady = false) {
   const videos = Array.isArray(data?.videos) ? data.videos : [];
@@ -1292,6 +1342,17 @@ function findRetryableVideo(data, now = Date.now(), youtubeReady = false) {
     );
     if (pendingUpload) return pendingUpload;
   }
+
+  // Órfãos: o job anterior morreu (timeout/OOM) sem passar pelo catch e o
+  // vídeo ficou num estado intermediário. Retoma em vez de criar outro.
+  const ORPHAN_STATES = ['DRAFT', 'SCRIPTING', 'AUDIO_GENERATED', 'VIDEO_GENERATED'];
+  const orphan = videos.find((v) => {
+    if (!ORPHAN_STATES.includes(v?.status)) return false;
+    if (!String(v.id || '').startsWith('auto_')) return false;
+    const t = new Date(v.updatedAt || v.createdAt || 0).getTime();
+    return now - t > ORPHAN_AFTER_MS;
+  });
+  if (orphan) return orphan;
 
   return videos.find((v) => {
     if (v?.status !== 'STANDBY') return false;
@@ -1456,6 +1517,13 @@ async function processProject(projectRow) {
     });
     await releaseLock(projectId);
     return false;
+  }
+
+  // Claim do slot: avança o agendamento ANTES de gerar. Se o job morrer no
+  // meio, o próximo tick não cria um vídeo novo — retoma o órfão.
+  if (!PROJECT_ID && data.scheduleSettings?.autoGenerate) {
+    data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
+    await persistProjectData(projectId, data, 'Slot do agendamento reservado');
   }
 
   // Cross-run circuit breaker (see recentQuotaExhaustion) — a persisted

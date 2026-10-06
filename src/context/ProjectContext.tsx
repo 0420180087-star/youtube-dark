@@ -340,42 +340,6 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     });
   };
 
-  // Best-effort headless enqueue: writes queue intent to Supabase so the GitHub
-  // Actions runner (if configured) picks it up when the tab is closed. Never
-  // blocks or replaces the local run — the browser pipeline always starts too.
-  const enqueueHeadlessRun = (project: Project) => {
-    if (!supabase || !userEmailRef.current) return;
-    const queuedAt = new Date(Date.now() - 1000).toISOString();
-    const queuedProject: Project = {
-      ...project,
-      scheduleSettings: {
-        frequencyDays: project.scheduleSettings?.frequencyDays || 1,
-        timeWindowStart: project.scheduleSettings?.timeWindowStart || '12:00',
-        timeWindowEnd: project.scheduleSettings?.timeWindowEnd || '18:00',
-        autoGenerate: true,
-        nextScheduledRun: queuedAt,
-      },
-    };
-    (async () => {
-      try {
-        await supabase.from('projects').upsert({
-          id: queuedProject.id,
-          user_email: userEmailRef.current,
-          data: buildCloudProject(queuedProject),
-          updated_at: new Date().toISOString(),
-        }, { onConflict: 'id' });
-        await supabase.from('autopilot_logs').insert({
-          project_id: queuedProject.id,
-          status: 'running',
-          message: 'Execução enfileirada em paralelo para o runner headless (GitHub Actions).',
-          step: 'idea',
-        });
-      } catch (e) {
-        console.warn('[AutoPilot] Enqueue headless falhou (execução local segue):', e);
-      }
-    })();
-  };
-
   // Clear a stuck distributed lock. Exposed to the UI so the user can unblock
   // themselves without waiting for the 90-min TTL.
   const releaseAutoPilotLock = async (projectId: string) => {
@@ -408,22 +372,18 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       return;
     }
 
-    // If a stale lock is holding the project (>15 min since last update or
-    // simply "in the future"), auto-release it so the click actually works.
-    // Without this, the user is stuck up to 90 min after any crashed run.
-    if (project.autopilotLockedUntil) {
-      const lockUntil = new Date(project.autopilotLockedUntil).getTime();
-      const stale = lockUntil < Date.now() + 75 * 60 * 1000; // acquired >15 min ago (90-min TTL)
-      if (stale || lockUntil < Date.now()) {
-        await releaseAutoPilotLock(projectId);
-      }
+    // Só libera lock realmente VENCIDO. Lock ativo = outro runner (GitHub)
+    // está gerando um vídeo — liberar à força criava um segundo vídeo.
+    if (project.autopilotLockedUntil && new Date(project.autopilotLockedUntil).getTime() < Date.now()) {
+      await releaseAutoPilotLock(projectId);
     }
 
-    // Fire-and-forget enqueue for the headless runner so the pipeline continues
-    // if the user closes the tab (assuming GitHub Actions is configured).
-    enqueueHeadlessRun(project);
+    // Reserva o próximo slot ANTES de começar, para o cron do GitHub não
+    // considerar o projeto "vencido" enquanto este vídeo é gerado.
+    scheduleNextRun(projectId);
 
-    // Always run locally in this tab so the user sees immediate progress.
+    // Modo único: roda neste navegador. (Não enfileira o headless em paralelo
+    // — era isso que gerava dois vídeos por clique.)
     const latestProject = projectsRef.current.find(p => p.id === projectId) || project;
     runFullPipeline(latestProject);
   };
@@ -525,30 +485,12 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     // project simultaneously. Only one runner wins the DB update.
     if (supabase) {
       try {
-        let { data: lockAcquired, error } = await supabase
+        const { data: lockAcquired, error } = await supabase
           .rpc('acquire_autopilot_lock', {
             p_project_id: runnableProject.id,
             p_locked_by: 'browser',
             p_lock_minutes: 90,
           });
-
-        // If the lock is held, force-release and retry ONCE. This recovers
-        // from previous browser runs that crashed without releasing.
-        if (!error && !lockAcquired) {
-          try {
-            await supabase.rpc('release_autopilot_lock', { p_project_id: runnableProject.id });
-            const retry = await supabase.rpc('acquire_autopilot_lock', {
-              p_project_id: runnableProject.id,
-              p_locked_by: 'browser',
-              p_lock_minutes: 90,
-            });
-            lockAcquired = retry.data;
-            error = retry.error;
-          } catch (retryErr) {
-            console.warn('[AutoPilot] Retry de lock falhou:', retryErr);
-          }
-        }
-
 
         if (error || !lockAcquired) {
           console.info(
