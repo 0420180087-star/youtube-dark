@@ -408,22 +408,18 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       return;
     }
 
-    // If a stale lock is holding the project (>15 min since last update or
-    // simply "in the future"), auto-release it so the click actually works.
-    // Without this, the user is stuck up to 90 min after any crashed run.
-    if (project.autopilotLockedUntil) {
-      const lockUntil = new Date(project.autopilotLockedUntil).getTime();
-      const stale = lockUntil < Date.now() + 75 * 60 * 1000; // acquired >15 min ago (90-min TTL)
-      if (stale || lockUntil < Date.now()) {
-        await releaseAutoPilotLock(projectId);
-      }
+    // Só libera lock realmente VENCIDO. Lock ativo = outro runner (GitHub)
+    // está gerando um vídeo — liberar à força criava um segundo vídeo.
+    if (project.autopilotLockedUntil && new Date(project.autopilotLockedUntil).getTime() < Date.now()) {
+      await releaseAutoPilotLock(projectId);
     }
 
-    // Fire-and-forget enqueue for the headless runner so the pipeline continues
-    // if the user closes the tab (assuming GitHub Actions is configured).
-    enqueueHeadlessRun(project);
+    // Reserva o próximo slot ANTES de começar, para o cron do GitHub não
+    // considerar o projeto "vencido" enquanto este vídeo é gerado.
+    scheduleNextRun(projectId);
 
-    // Always run locally in this tab so the user sees immediate progress.
+    // Modo único: roda neste navegador. (Não enfileira o headless em paralelo
+    // — era isso que gerava dois vídeos por clique.)
     const latestProject = projectsRef.current.find(p => p.id === projectId) || project;
     runFullPipeline(latestProject);
   };
@@ -525,30 +521,12 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     // project simultaneously. Only one runner wins the DB update.
     if (supabase) {
       try {
-        let { data: lockAcquired, error } = await supabase
+        const { data: lockAcquired, error } = await supabase
           .rpc('acquire_autopilot_lock', {
             p_project_id: runnableProject.id,
             p_locked_by: 'browser',
             p_lock_minutes: 90,
           });
-
-        // If the lock is held, force-release and retry ONCE. This recovers
-        // from previous browser runs that crashed without releasing.
-        if (!error && !lockAcquired) {
-          try {
-            await supabase.rpc('release_autopilot_lock', { p_project_id: runnableProject.id });
-            const retry = await supabase.rpc('acquire_autopilot_lock', {
-              p_project_id: runnableProject.id,
-              p_locked_by: 'browser',
-              p_lock_minutes: 90,
-            });
-            lockAcquired = retry.data;
-            error = retry.error;
-          } catch (retryErr) {
-            console.warn('[AutoPilot] Retry de lock falhou:', retryErr);
-          }
-        }
-
 
         if (error || !lockAcquired) {
           console.info(
