@@ -5,8 +5,8 @@
  * chave anon (contêm chaves de API e refresh tokens do YouTube). Todo acesso
  * do frontend passa por aqui, autenticado com o access_token do Google.
  */
-import { loadEncryptedString } from './securityService';
-import { ACCESS_TOKEN_STORAGE_KEY } from './youtubeAuthService';
+import { loadEncryptedString, loadEncryptedJSON } from './securityService';
+import { LOGIN_TOKEN_STORAGE_KEY } from './youtubeAuthService';
 
 export interface ProjectAuthStatus {
   project_id: string;
@@ -21,11 +21,21 @@ const FUNCTIONS_URL = (() => {
   return url ? `${url}/functions/v1/user-data` : '';
 })();
 
+// SEMPRE o token do login (conta do app) — nunca o do canal do YouTube.
 const getGoogleToken = async (): Promise<string | null> => {
   try {
-    return await loadEncryptedString(ACCESS_TOKEN_STORAGE_KEY);
+    return await loadEncryptedString(LOGIN_TOKEN_STORAGE_KEY);
   } catch {
     return null;
+  }
+};
+
+const getAppEmail = async (): Promise<string> => {
+  try {
+    const p = await loadEncryptedJSON<{ email?: string }>('ds_user_profile');
+    return (p?.email || '').trim().toLowerCase();
+  } catch {
+    return '';
   }
 };
 
@@ -55,7 +65,7 @@ export const renewGoogleToken = async (interactive = false, loginHint?: string):
           if (token) {
             try {
               const { saveEncryptedString } = await import('./securityService');
-              await saveEncryptedString(ACCESS_TOKEN_STORAGE_KEY, token);
+              await saveEncryptedString(LOGIN_TOKEN_STORAGE_KEY, token);
             } catch { /* segue com o token em memória */ }
           }
           done(token);
@@ -88,15 +98,18 @@ async function postUserData(action: string, payload: Record<string, unknown>, to
 
 async function callUserData<T>(action: string, payload: Record<string, unknown> = {}): Promise<T> {
   if (!FUNCTIONS_URL) throw new Error('VITE_SUPABASE_URL não configurado');
+  const appEmail = await getAppEmail();
+  // expected_email: a função recusa gravar/ler se o token for de outra conta.
+  payload = { ...payload, expected_email: appEmail || undefined };
   let token = await getGoogleToken();
-  if (!token) token = await renewGoogleToken(false);
+  if (!token) token = await renewGoogleToken(false, appEmail || undefined);
   if (!token) throw new Error('Sessão do Google ausente — faça login novamente');
 
   let { res, body } = await postUserData(action, payload, token);
 
   // 401 = token expirado/revogado. Renova uma vez e repete.
   if (res.status === 401) {
-    const fresh = await renewGoogleToken(false);
+    const fresh = await renewGoogleToken(false, appEmail || undefined);
     if (fresh) ({ res, body } = await postUserData(action, payload, fresh));
   }
 

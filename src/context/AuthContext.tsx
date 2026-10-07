@@ -10,6 +10,7 @@ import {
   callRefreshTokenFull,
   isAccessTokenValid,
   ACCESS_TOKEN_STORAGE_KEY,
+  LOGIN_TOKEN_STORAGE_KEY,
   NEEDS_RECONNECT_KEY,
 } from '../services/youtubeAuthService';
 import { supabase, setSupabaseUserEmail } from '../lib/supabaseClient';
@@ -204,6 +205,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // as chaves de API (Gemini/Pexels) ficava bloqueado até o usuário
       // conectar o YouTube pelo menos uma vez — mesmo já estando logado.
       await persistAccessToken(token);
+      // Identidade separada: este token é SEMPRE da conta de login.
+      try { await saveEncryptedString(LOGIN_TOKEN_STORAGE_KEY, token); } catch { /* ignore */ }
 
       if (supabase && profile.email) {
         try {
@@ -319,6 +322,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     disconnectYoutube();
     setUser(null);
     localStorage.removeItem('ds_user_profile');
+    localStorage.removeItem(LOGIN_TOKEN_STORAGE_KEY);
   };
 
   const setYoutubeToken = async (token: string) => {

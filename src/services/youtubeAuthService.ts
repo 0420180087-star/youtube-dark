@@ -7,6 +7,13 @@ const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 export const ACCESS_TOKEN_STORAGE_KEY = 'ds_youtube_access_token';
+/**
+ * Token do LOGIN no app (identidade do usuário). Fica separado do token do
+ * YouTube porque o canal pode ser de OUTRA conta Google — usar o token do
+ * canal para salvar as chaves gravava tudo no e-mail do canal, e a automação
+ * (que procura pelo e-mail do dono do projeto) encontrava a linha vazia.
+ */
+export const LOGIN_TOKEN_STORAGE_KEY = 'ds_login_access_token';
 export const NEEDS_RECONNECT_KEY = 'ds_yt_needs_reconnect';
 
 export interface RefreshResult {

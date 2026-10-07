@@ -60,7 +60,19 @@ serve(async (req) => {
     const email = await verifyGoogleToken(token)
     if (!email) return json({ error: 'Token do Google inválido ou expirado' }, 401, CORS)
 
-    const { action, project_id, gemini_api_keys, pexels_api_key } = await req.json()
+    const { action, project_id, gemini_api_keys, pexels_api_key, expected_email } = await req.json()
+
+    // Trava de segurança: o app informa o e-mail do login. Se o token for de
+    // outra conta Google (ex.: a do canal do YouTube), recusa — antes isso
+    // gravava as chaves no e-mail errado e a automação via a linha vazia.
+    const expected = String(expected_email || '').trim().toLowerCase()
+    if (expected && expected !== email) {
+      return json({
+        error: `Sessão Google de ${email}, mas o login do app é ${expected}. Entre novamente com ${expected}.`,
+        token_email: email,
+        expected_email: expected,
+      }, 403, CORS)
+    }
 
     const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2')
     const admin = createClient(
