@@ -385,7 +385,7 @@ async function loadUserKeys(userEmail) {
   try {
     let { data, error } = await supabase
       .from('user_settings')
-      .select('gemini_api_keys, pexels_api_key')
+      .select('gemini_api_keys, pexels_api_key, updated_at')
       .eq('user_email', email)
       .maybeSingle();
 
@@ -393,7 +393,7 @@ async function loadUserKeys(userEmail) {
     if (!error && !data) {
       const retry = await supabase
         .from('user_settings')
-        .select('gemini_api_keys, pexels_api_key')
+        .select('gemini_api_keys, pexels_api_key, updated_at')
         .ilike('user_email', email)
         .maybeSingle();
       data = retry.data;
@@ -412,7 +412,7 @@ async function loadUserKeys(userEmail) {
       log('🔑', `Loaded ${GEMINI_API_KEYS.length} Gemini key(s) for ${email}`);
 
     } else if (data) {
-      log('ℹ️', `user_settings TEM linha para ${email}, mas gemini_api_keys está vazio. Abra Configurações no app, confira o selo "Salva na nuvem" e clique em Salvar/Sincronizar.${envGemini ? ' Usando a chave do ambiente por enquanto.' : ''}`);
+      log('ℹ️', `user_settings TEM linha para ${email} (última atualização: ${data.updated_at || 'desconhecida'}), mas gemini_api_keys está vazio. Se a tela de Configurações mostrar "Salva na nuvem" com OUTRO e-mail, as chaves foram gravadas na conta errada; se a função user-data não estiver publicada, nada é gravado. Abra Configurações no app, confira o selo "Salva na nuvem" e clique em Salvar/Sincronizar.${envGemini ? ' Usando a chave do ambiente por enquanto.' : ''}`);
     } else {
       log('ℹ️', `Nenhuma LINHA em user_settings para ${email} (consulta OK). As chaves ficaram só no navegador: abra Configurações, veja o selo de sincronização e clique em "Entrar novamente e sincronizar".${envGemini ? ' Usando a chave do ambiente por enquanto.' : ''}`);
     }
