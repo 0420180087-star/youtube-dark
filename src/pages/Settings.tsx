@@ -34,6 +34,37 @@ export const Settings: React.FC = () => {
      * user-data) e LÊ DE VOLTA para confirmar. Só marca "synced" quando a
      * leitura confirma que a automação vai encontrar a chave.
      */
+    const [cloudInfo, setCloudInfo] = useState<{ email: string; count: number; updatedAt: string | null } | null>(null);
+    const [isTesting, setIsTesting] = useState(false);
+
+    /** Mesma leitura que o runner do GitHub faz: quantas chaves existem na nuvem e para qual e-mail. */
+    const testWhatAutomationSees = async () => {
+        if (!user?.email) return;
+        setIsTesting(true);
+        try {
+            const data = await getUserSettings();
+            const count = Array.isArray(data.gemini_api_keys) ? data.gemini_api_keys.length : 0;
+            const appEmail = user.email.trim().toLowerCase();
+            const cloudEmail = (data.email || appEmail).toLowerCase();
+            setCloudInfo({ email: cloudEmail, count, updatedAt: data.updated_at || null });
+            if (cloudEmail !== appEmail) {
+                setCloudSync('error');
+                setCloudMessage(`A nuvem respondeu pela conta ${cloudEmail}; a automação procura em ${appEmail}.`);
+            } else if (count === 0) {
+                setCloudSync('local_only');
+                setCloudMessage(`A automação procura em ${appEmail} e encontra 0 chaves. Clique em "Entrar novamente e sincronizar".`);
+            } else {
+                setCloudSync('synced');
+                setCloudMessage('');
+            }
+        } catch (e: any) {
+            setCloudSync('error');
+            setCloudMessage(`Não foi possível consultar a nuvem: ${e?.message || e}. Se aparecer "Failed to fetch" ou HTTP 404, a função de salvar chaves (user-data) não está publicada.`);
+        } finally {
+            setIsTesting(false);
+        }
+    };
+
     const syncToCloud = async (keys: string[], pexels: string | null, interactive = false): Promise<boolean> => {
         if (!supabase || !user?.email) {
             setCloudSync('local_only');
@@ -44,10 +75,18 @@ export const Settings: React.FC = () => {
         setCloudSync('checking');
         setCloudMessage('');
         try {
-            if (interactive) await renewGoogleToken(true);
+            const appEmail = user.email.trim().toLowerCase();
+            if (interactive) await renewGoogleToken(true, appEmail);
             await saveUserSettings(keys, pexels && pexels.trim() ? pexels.trim() : null);
             const check = await getUserSettings();
             const savedKeys = Array.isArray(check.gemini_api_keys) ? check.gemini_api_keys : [];
+            const cloudEmail = (check.email || '').toLowerCase();
+            setCloudInfo({ email: cloudEmail || appEmail, count: savedKeys.length, updatedAt: check.updated_at || null });
+            if (cloudEmail && cloudEmail !== appEmail) {
+                setCloudSync('error');
+                setCloudMessage(`As chaves foram gravadas na conta Google ${cloudEmail}, mas seus projetos pertencem a ${appEmail} — é lá que a automação procura. Clique em "Entrar novamente e sincronizar" e escolha ${appEmail}.`);
+                return false;
+            }
             if (keys.length > 0 && savedKeys.length === 0) {
                 setCloudSync('error');
                 setCloudMessage('O banco respondeu, mas voltou sem chaves. Rode supabase/bootstrap.sql e tente de novo.');
@@ -125,6 +164,14 @@ export const Settings: React.FC = () => {
             try {
                 const data = await getUserSettings();
                 const cloudKeys = Array.isArray(data.gemini_api_keys) ? data.gemini_api_keys : [];
+                const appEmail = user.email.trim().toLowerCase();
+                const cloudEmail = (data.email || '').toLowerCase();
+                setCloudInfo({ email: cloudEmail || appEmail, count: cloudKeys.length, updatedAt: data.updated_at || null });
+                if (cloudEmail && cloudEmail !== appEmail) {
+                    setCloudSync('error');
+                    setCloudMessage(`A sessão Google deste navegador é de ${cloudEmail}, mas seus projetos pertencem a ${appEmail}. A automação não verá estas chaves. Clique em "Entrar novamente e sincronizar" e escolha ${appEmail}.`);
+                    return;
+                }
                 if (cloudKeys.length) setApiKeys(cloudKeys);
                 if (data.pexels_api_key) setPexelsKey(data.pexels_api_key);
                 if (cloudKeys.length) {
@@ -312,6 +359,14 @@ export const Settings: React.FC = () => {
                                     </span>
                                 )}
 
+                                <button
+                                    onClick={testWhatAutomationSees}
+                                    disabled={isTesting || !user?.email}
+                                    className="text-[11px] px-2.5 py-1 rounded border border-slate-600 bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-50 flex items-center gap-1.5"
+                                >
+                                    <RefreshCw className={`w-3.5 h-3.5 ${isTesting ? 'animate-spin' : ''}`} /> Testar o que a automação vê
+                                </button>
+
                                 {cloudSync !== 'synced' && (
                                     <button
                                         onClick={() => syncToCloud(apiKeys, pexelsKey, true)}
@@ -322,6 +377,13 @@ export const Settings: React.FC = () => {
                                     </button>
                                 )}
                             </div>
+
+                            {cloudInfo && (
+                                <p className="mb-2 text-[11px] text-slate-400">
+                                    Na nuvem: <span className="text-slate-200 font-medium">{cloudInfo.count} chave(s)</span> salvas para <span className="text-slate-200 font-medium">{cloudInfo.email}</span>
+                                    {cloudInfo.updatedAt ? ` · atualizado em ${new Date(cloudInfo.updatedAt).toLocaleString('pt-BR')}` : ''}
+                                </p>
+                            )}
 
                             {cloudMessage && (
                                 <p className="mb-4 text-xs text-amber-300/90 bg-amber-500/5 border border-amber-500/20 rounded-lg p-3">

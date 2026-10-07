@@ -71,12 +71,16 @@ serve(async (req) => {
     if (action === 'get_settings') {
       const { data, error } = await admin
         .from('user_settings')
-        .select('gemini_api_keys, pexels_api_key')
+        .select('gemini_api_keys, pexels_api_key, updated_at')
         .eq('user_email', email)
         .maybeSingle()
       if (error) return json({ error: error.message }, 500, CORS)
+      const keys = data?.gemini_api_keys ?? []
       return json({
-        gemini_api_keys: data?.gemini_api_keys ?? [],
+        email,
+        count: keys.length,
+        updated_at: data?.updated_at ?? null,
+        gemini_api_keys: keys,
         pexels_api_key: data?.pexels_api_key ?? null,
       }, 200, CORS)
     }
@@ -92,7 +96,19 @@ serve(async (req) => {
         updated_at: new Date().toISOString(),
       }, { onConflict: 'user_email' })
       if (error) return json({ error: error.message }, 500, CORS)
-      return json({ ok: true }, 200, CORS)
+      // Relê para devolver o que realmente ficou gravado (e para QUAL e-mail).
+      const { data: saved, error: readErr } = await admin
+        .from('user_settings')
+        .select('gemini_api_keys, updated_at')
+        .eq('user_email', email)
+        .maybeSingle()
+      if (readErr) return json({ error: readErr.message }, 500, CORS)
+      return json({
+        ok: true,
+        email,
+        count: saved?.gemini_api_keys?.length ?? 0,
+        updated_at: saved?.updated_at ?? null,
+      }, 200, CORS)
     }
 
     if (action === 'get_project_auth') {

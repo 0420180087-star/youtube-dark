@@ -34,7 +34,7 @@ const getGoogleToken = async (): Promise<string | null> => {
  * usuário já consentiu). Retorna null se não for possível — nesse caso a UI
  * oferece o botão "Entrar novamente e sincronizar".
  */
-export const renewGoogleToken = async (interactive = false): Promise<string | null> => {
+export const renewGoogleToken = async (interactive = false, loginHint?: string): Promise<string | null> => {
   const g = (globalThis as any).google;
   if (!g?.accounts?.oauth2) return null;
   let clientId = '';
@@ -62,7 +62,8 @@ export const renewGoogleToken = async (interactive = false): Promise<string | nu
         },
         error_callback: () => done(null),
       });
-      client.requestAccessToken(interactive ? { prompt: 'consent' } : { prompt: '' });
+      const hint = loginHint ? { login_hint: loginHint } : {};
+      client.requestAccessToken(interactive ? { prompt: 'select_account', ...hint } : { prompt: '', ...hint });
       setTimeout(() => done(null), 30_000);
     } catch {
       done(null);
@@ -103,11 +104,19 @@ async function callUserData<T>(action: string, payload: Record<string, unknown> 
   return body as T;
 }
 
-export const getUserSettings = () =>
-  callUserData<{ gemini_api_keys: string[]; pexels_api_key: string | null }>('get_settings');
+export interface CloudSettings {
+  /** E-mail em que a nuvem leu/gravou (o da sessão Google, não o digitado). */
+  email?: string;
+  count?: number;
+  updated_at?: string | null;
+  gemini_api_keys: string[];
+  pexels_api_key: string | null;
+}
+
+export const getUserSettings = () => callUserData<CloudSettings>('get_settings');
 
 export const saveUserSettings = (geminiApiKeys: string[], pexelsApiKey: string | null) =>
-  callUserData<{ ok: true }>('save_settings', {
+  callUserData<{ ok: true; email?: string; count?: number; updated_at?: string | null }>('save_settings', {
     gemini_api_keys: geminiApiKeys,
     pexels_api_key: pexelsApiKey,
   });

@@ -89,12 +89,21 @@ export const AutomationHealth: React.FC = () => {
         const settings = await getUserSettings();
         const geminiCount = settings.gemini_api_keys?.length || 0;
         const hasPexels = !!settings.pexels_api_key;
+        const cloudEmail = (settings.email || '').toLowerCase();
+        const appEmail = user.email.trim().toLowerCase();
+        if (cloudEmail && cloudEmail !== appEmail) {
+          result.push({
+            label: 'Chaves de API',
+            state: 'fail',
+            detail: `A nuvem respondeu pela conta ${cloudEmail}, mas seus projetos pertencem a ${appEmail}. A automação procura em ${appEmail}. Em Configurações, clique em "Entrar novamente e sincronizar" e escolha ${appEmail}.`,
+          });
+        } else
         result.push({
           label: 'Chaves de API',
           state: geminiCount > 0 ? (hasPexels ? 'ok' : 'warn') : 'fail',
           detail: geminiCount === 0
-            ? 'Nenhuma chave Gemini salva. Sem ela o runner não gera nada — salve em Configurações.'
-            : `${geminiCount} chave(s) Gemini${hasPexels ? ' + Pexels' : ' — Pexels ausente, os visuais cairão para geração por IA'}.`,
+            ? `Nenhuma chave Gemini salva para ${cloudEmail || appEmail}. Sem ela o runner não gera nada — salve em Configurações.`
+            : `${geminiCount} chave(s) Gemini para ${cloudEmail || appEmail}${hasPexels ? ' + Pexels' : ' — Pexels ausente, os visuais cairão para geração por IA'}.`,
         });
       } catch (e: any) {
         result.push({
