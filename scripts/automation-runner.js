@@ -213,6 +213,135 @@ async function writeHeartbeat(detail) {
 }
 
 
+// --- RECEBIMENTO DAS CHAVES ENVIADAS PELO APP (sem depender da função user-data) ---
+// Ver src/services/keyDropService.ts. A chave privada fica em user_settings
+// (só service_role lê); a pública vai para automation_heartbeat (o app lê).
+const KEYPAIR_ROW = '__runner_keypair__';
+const KEY_DROP_PROJECT_ID = '__keys__';
+const b64ToBytes = (b64) => Uint8Array.from(Buffer.from(String(b64 || ''), 'base64'));
+
+async function ensureRunnerKeypair() {
+  if (!SCHEMA.user_settings) return null;
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) { log('⚠️', 'WebCrypto indisponível — envio de chaves pelo app desativado.'); return null; }
+  try {
+    const { data, error } = await supabase
+      .from('user_settings').select('pexels_api_key').eq('user_email', KEYPAIR_ROW).maybeSingle();
+    if (error) { log('⚠️', `Par de chaves: leitura falhou (${error.message})`); return null; }
+    let pair = null;
+    try { pair = data?.pexels_api_key ? JSON.parse(data.pexels_api_key) : null; } catch { pair = null; }
+    if (!pair?.privateJwk || !pair?.publicJwk) {
+      const kp = await subtle.generateKey(
+        { name: 'RSA-OAEP', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+        true, ['encrypt', 'decrypt']);
+      pair = { privateJwk: await subtle.exportKey('jwk', kp.privateKey), publicJwk: await subtle.exportKey('jwk', kp.publicKey) };
+      const { error: upErr } = await supabase.from('user_settings').upsert({
+        user_email: KEYPAIR_ROW, gemini_api_keys: [], pexels_api_key: JSON.stringify(pair), updated_at: new Date().toISOString(),
+      }, { onConflict: 'user_email' });
+      if (upErr) { log('⚠️', `Par de chaves: gravação falhou (${upErr.message})`); return null; }
+      log('🔐', 'Par de chaves da automação criado.');
+    }
+    if (SCHEMA.automation_heartbeat) {
+      await supabase.from('automation_heartbeat').upsert({
+        runner: 'runner_public_key', last_seen_at: new Date().toISOString(), detail: JSON.stringify(pair.publicJwk),
+      }, { onConflict: 'runner' });
+    }
+    return await subtle.importKey('jwk', pair.privateJwk, { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['decrypt']);
+  } catch (e) {
+    log('⚠️', `Par de chaves: ${e.message}`);
+    return null;
+  }
+}
+
+async function reportKeyDrop(email, detail) {
+  if (!SCHEMA.automation_heartbeat || !email) return;
+  try {
+    await supabase.from('automation_heartbeat').upsert({
+      runner: `keys:${email}`, last_seen_at: new Date().toISOString(), detail: String(detail).slice(0, 500),
+    }, { onConflict: 'runner' });
+  } catch { /* non-fatal */ }
+}
+
+async function consumeKeyDrops(privateKey) {
+  if (!privateKey) return;
+  const subtle = globalThis.crypto.subtle;
+  const { data: rows, error } = await supabase
+    .from('autopilot_logs').select('id,user_email,message,created_at')
+    .eq('project_id', KEY_DROP_PROJECT_ID).order('created_at', { ascending: true }).limit(50);
+  if (error) { log('⚠️', `Leitura das chaves enviadas pelo app falhou: ${error.message}`); return; }
+  if (!rows?.length) return;
+  log('📨', `${rows.length} envio(s) de chaves pelo app para processar`);
+
+  for (const row of rows) {
+    const rowEmail = normalizeEmail(row.user_email);
+    try {
+      const env = JSON.parse(row.message || '{}');
+      const aesRaw = await subtle.decrypt({ name: 'RSA-OAEP' }, privateKey, b64ToBytes(env.wk));
+      const aes = await subtle.importKey('raw', aesRaw, 'AES-GCM', false, ['decrypt']);
+      const pt = await subtle.decrypt({ name: 'AES-GCM', iv: b64ToBytes(env.iv) }, aes, b64ToBytes(env.ct));
+      const payload = JSON.parse(new TextDecoder().decode(pt));
+      const payloadEmail = normalizeEmail(payload.email);
+      const keys = (Array.isArray(payload.gemini_api_keys) ? payload.gemini_api_keys : [])
+        .map((k) => String(k || '').trim()).filter((k) => k.length > 20);
+
+      if (!rowEmail || rowEmail !== payloadEmail) throw new Error('e-mail do pacote não confere');
+
+      // Prova de identidade: o token do login do app precisa ser desta conta.
+      let verified = false;
+      let tokenExpired = false;
+      if (payload.token) {
+        try {
+          const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+            headers: { Authorization: `Bearer ${payload.token}` }, signal: AbortSignal.timeout(15_000),
+          });
+          if (res.ok) {
+            const info = await res.json();
+            if (normalizeEmail(info?.email) !== payloadEmail) throw new Error(`token é da conta ${info?.email}, não de ${payloadEmail}`);
+            verified = true;
+          } else {
+            tokenExpired = true;
+          }
+        } catch (e) {
+          if (String(e.message).startsWith('token é da conta')) throw e;
+          tokenExpired = true;
+        }
+      }
+
+      if (!verified) {
+        // Sem prova válida (token expirou antes do cron rodar): só aceita se a
+        // conta ainda não tem nenhuma chave E é dona de algum projeto — nunca
+        // sobrescreve chaves existentes sem prova de identidade.
+        const { data: cur } = await supabase.from('user_settings').select('gemini_api_keys').eq('user_email', payloadEmail).maybeSingle();
+        const { data: owned } = await supabase.from('projects').select('id').eq('user_email', payloadEmail).limit(1);
+        const empty = !cur?.gemini_api_keys?.length;
+        if (!(empty && owned?.length)) {
+          throw new Error(tokenExpired
+            ? 'sessão do login expirou antes da automação rodar — salve de novo em Configurações'
+            : 'pacote sem sessão de login — saia e entre de novo no app e salve');
+        }
+      }
+
+      if (!keys.length) throw new Error('pacote sem nenhuma chave Gemini válida');
+
+      const { error: upErr } = await supabase.from('user_settings').upsert({
+        user_email: payloadEmail,
+        gemini_api_keys: keys,
+        pexels_api_key: payload.pexels_api_key ? String(payload.pexels_api_key).trim() : null,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'user_email' });
+      if (upErr) throw new Error(`gravação falhou: ${upErr.message}`);
+
+      log('🔑', `Chaves enviadas pelo app aplicadas para ${payloadEmail}: ${keys.length} Gemini${payload.pexels_api_key ? ' + Pexels' : ''}${verified ? '' : ' (primeiro cadastro)'}`);
+      await reportKeyDrop(payloadEmail, `ok: ${keys.length} chave(s) Gemini aplicadas`);
+    } catch (e) {
+      log('⚠️', `Envio de chaves de ${rowEmail || '?'} recusado: ${e.message}`);
+      await reportKeyDrop(rowEmail, `recusado: ${e.message}`);
+    } finally {
+      await supabase.from('autopilot_logs').delete().eq('id', row.id);
+    }
+  }
+}
+
 // Per-run mutable keys — populated from user_settings before each project runs.
 // Falls back to ENV if no per-user key is configured.
 let GEMINI_API_KEY = ENV_GEMINI_API_KEY || VITE_GEMINI_API_KEY || '';
@@ -1881,6 +2010,9 @@ async function main() {
   if (!ready) {
     process.exit(1);
   }
+
+  // Antes de tudo: aplica chaves que o app enviou desde a última execução.
+  await consumeKeyDrops(await ensureRunnerKeypair());
 
   let query = supabase.from('projects').select('*');
 

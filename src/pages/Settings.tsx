@@ -5,8 +5,9 @@ import { supabase } from '../lib/supabaseClient';
 import { Settings as SettingsIcon, User, Key, Shield, LogOut, Save, CheckCircle, RefreshCw, AlertTriangle, Trash2, Youtube, LogIn, Copy, ExternalLink, Plus, X, Link2, Activity, Cloud, CloudOff } from 'lucide-react';
 import { getKeyStatus, clearExhaustedKeys } from '../services/geminiService';
 import { getUserSettings, saveUserSettings, renewGoogleToken } from '../services/userDataService';
+import { sendKeysToAutomation, getKeyDropStatus } from '../services/keyDropService';
 
-type CloudSyncState = 'unknown' | 'checking' | 'synced' | 'local_only' | 'error';
+type CloudSyncState = 'unknown' | 'checking' | 'synced' | 'pending' | 'local_only' | 'error';
 
 export const Settings: React.FC = () => {
     const { user, login, logout, googleClientId, setGoogleClientId, isLoading: isAuthLoading, youtubeChannel, disconnectYoutube } = useAuth();
@@ -24,7 +25,9 @@ export const Settings: React.FC = () => {
     const [saveSuccess, setSaveSuccess] = useState(false);
     const [hasEnvKey, setHasEnvKey] = useState(false);
     const [cloudSync, setCloudSync] = useState<CloudSyncState>('unknown');
-    const [cloudMessage, setCloudMessage] = useState('');
+    const cloudMessageRef = React.useRef('');
+    const [cloudMessage, setCloudMessageState] = useState('');
+    const setCloudMessage = (m: string) => { cloudMessageRef.current = m; setCloudMessageState(m); };
     const [isSyncing, setIsSyncing] = useState(false);
 
     const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
@@ -65,7 +68,41 @@ export const Settings: React.FC = () => {
         }
     };
 
+    const [dropStatus, setDropStatus] = useState<{ detail: string; at: string } | null>(null);
+    useEffect(() => {
+        if (user?.email) getKeyDropStatus(user.email).then(setDropStatus).catch(() => {});
+    }, [user?.email]);
+
+    /**
+     * Caminho 1: função de nuvem user-data (instantâneo, quando publicada).
+     * Caminho 2 (sempre que o 1 falhar): pacote cifrado que a própria
+     * automação do GitHub abre e aplica — não depende de nenhuma função.
+     */
     const syncToCloud = async (keys: string[], pexels: string | null, interactive = false): Promise<boolean> => {
+        const viaFunction = await syncViaFunction(keys, pexels, interactive);
+        if (viaFunction || !user?.email || keys.length === 0) return viaFunction;
+        const previousMsg = cloudMessageRef.current;
+        setIsSyncing(true);
+        try {
+            const drop = await sendKeysToAutomation(user.email, keys, pexels && pexels.trim() ? pexels.trim() : null);
+            if (drop.ok) {
+                setCloudSync('pending');
+                setCloudMessage(drop.message);
+                return true;
+            }
+            setCloudSync('error');
+            setCloudMessage(`${drop.message}${previousMsg ? ` (função de nuvem: ${previousMsg})` : ''}`);
+            return false;
+        } catch (e: any) {
+            setCloudSync('error');
+            setCloudMessage(`Falha ao enviar as chaves para a automação: ${e?.message || e}`);
+            return false;
+        } finally {
+            setIsSyncing(false);
+        }
+    };
+
+    const syncViaFunction = async (keys: string[], pexels: string | null, interactive = false): Promise<boolean> => {
         if (!supabase || !user?.email) {
             setCloudSync('local_only');
             setCloudMessage('Sem conexão com a nuvem — a automação não verá estas chaves.');
@@ -345,6 +382,10 @@ export const Settings: React.FC = () => {
                                     <span className="text-[11px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-1 rounded flex items-center gap-1.5">
                                         <Cloud className="w-3.5 h-3.5" /> Salva na nuvem (a automação enxerga)
                                     </span>
+                                ) : cloudSync === 'pending' && !isSyncing ? (
+                                    <span className="text-[11px] bg-sky-500/10 text-sky-300 border border-sky-500/20 px-2 py-1 rounded flex items-center gap-1.5">
+                                        <Cloud className="w-3.5 h-3.5" /> Enviada para a automação — aplica na próxima execução
+                                    </span>
                                 ) : cloudSync === 'checking' || isSyncing ? (
                                     <span className="text-[11px] bg-slate-800 text-slate-300 border border-slate-700 px-2 py-1 rounded flex items-center gap-1.5">
                                         <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Verificando na nuvem...
@@ -367,7 +408,7 @@ export const Settings: React.FC = () => {
                                     <RefreshCw className={`w-3.5 h-3.5 ${isTesting ? 'animate-spin' : ''}`} /> Testar o que a automação vê
                                 </button>
 
-                                {cloudSync !== 'synced' && (
+                                {cloudSync !== 'synced' && cloudSync !== 'pending' && (
                                     <button
                                         onClick={() => syncToCloud(apiKeys, pexelsKey, true)}
                                         disabled={isSyncing}
@@ -377,6 +418,12 @@ export const Settings: React.FC = () => {
                                     </button>
                                 )}
                             </div>
+
+                            {dropStatus && (
+                                <p className={`mb-2 text-[11px] ${dropStatus.detail.startsWith('ok') ? 'text-emerald-400' : 'text-red-400'}`}>
+                                    Último recebimento pela automação ({new Date(dropStatus.at).toLocaleString('pt-BR')}): {dropStatus.detail.startsWith('ok') ? 'chaves aplicadas ✔' : dropStatus.detail}
+                                </p>
+                            )}
 
                             {cloudInfo && (
                                 <p className="mb-2 text-[11px] text-slate-400">
