@@ -37,7 +37,12 @@ interface AuthContextType {
   clearReconnectFlag: () => void;
 }
 
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
+// Mantém o MESMO objeto de contexto entre recargas a quente do editor: sem
+// isso, editar este arquivo recriava o contexto e o ProjectProvider (ainda com
+// a referência antiga) quebrava com "useAuth must be used within an AuthProvider".
+const g = globalThis as any;
+const AuthContext: React.Context<AuthContextType | undefined> =
+  g.__dsAuthContext || (g.__dsAuthContext = createContext<AuthContextType | undefined>(undefined));
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<UserProfile | null>(null);
