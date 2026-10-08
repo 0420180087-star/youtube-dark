@@ -26,7 +26,8 @@ export const Settings: React.FC = () => {
     const [hasEnvKey, setHasEnvKey] = useState(false);
     const [cloudSync, setCloudSync] = useState<CloudSyncState>('unknown');
     const cloudMessageRef = React.useRef('');
-    const [cloudMessage, setCloudMessage] = useState('');
+    const [cloudMessage, setCloudMessageState] = useState('');
+    const setCloudMessage = (m: string) => { cloudMessageRef.current = m; setCloudMessageState(m); };
     const [isSyncing, setIsSyncing] = useState(false);
 
     const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
@@ -381,6 +382,10 @@ export const Settings: React.FC = () => {
                                     <span className="text-[11px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-1 rounded flex items-center gap-1.5">
                                         <Cloud className="w-3.5 h-3.5" /> Salva na nuvem (a automação enxerga)
                                     </span>
+                                ) : cloudSync === 'pending' && !isSyncing ? (
+                                    <span className="text-[11px] bg-sky-500/10 text-sky-300 border border-sky-500/20 px-2 py-1 rounded flex items-center gap-1.5">
+                                        <Cloud className="w-3.5 h-3.5" /> Enviada para a automação — aplica na próxima execução
+                                    </span>
                                 ) : cloudSync === 'checking' || isSyncing ? (
                                     <span className="text-[11px] bg-slate-800 text-slate-300 border border-slate-700 px-2 py-1 rounded flex items-center gap-1.5">
                                         <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Verificando na nuvem...
@@ -403,7 +408,7 @@ export const Settings: React.FC = () => {
                                     <RefreshCw className={`w-3.5 h-3.5 ${isTesting ? 'animate-spin' : ''}`} /> Testar o que a automação vê
                                 </button>
 
-                                {cloudSync !== 'synced' && (
+                                {cloudSync !== 'synced' && cloudSync !== 'pending' && (
                                     <button
                                         onClick={() => syncToCloud(apiKeys, pexelsKey, true)}
                                         disabled={isSyncing}
@@ -413,6 +418,12 @@ export const Settings: React.FC = () => {
                                     </button>
                                 )}
                             </div>
+
+                            {dropStatus && (
+                                <p className={`mb-2 text-[11px] ${dropStatus.detail.startsWith('ok') ? 'text-emerald-400' : 'text-red-400'}`}>
+                                    Último recebimento pela automação ({new Date(dropStatus.at).toLocaleString('pt-BR')}): {dropStatus.detail.startsWith('ok') ? 'chaves aplicadas ✔' : dropStatus.detail}
+                                </p>
+                            )}
 
                             {cloudInfo && (
                                 <p className="mb-2 text-[11px] text-slate-400">
