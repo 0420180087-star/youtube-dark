@@ -5,8 +5,9 @@ import { supabase } from '../lib/supabaseClient';
 import { Settings as SettingsIcon, User, Key, Shield, LogOut, Save, CheckCircle, RefreshCw, AlertTriangle, Trash2, Youtube, LogIn, Copy, ExternalLink, Plus, X, Link2, Activity, Cloud, CloudOff } from 'lucide-react';
 import { getKeyStatus, clearExhaustedKeys } from '../services/geminiService';
 import { getUserSettings, saveUserSettings, renewGoogleToken } from '../services/userDataService';
+import { sendKeysToAutomation, getKeyDropStatus } from '../services/keyDropService';
 
-type CloudSyncState = 'unknown' | 'checking' | 'synced' | 'local_only' | 'error';
+type CloudSyncState = 'unknown' | 'checking' | 'synced' | 'pending' | 'local_only' | 'error';
 
 export const Settings: React.FC = () => {
     const { user, login, logout, googleClientId, setGoogleClientId, isLoading: isAuthLoading, youtubeChannel, disconnectYoutube } = useAuth();
@@ -24,6 +25,7 @@ export const Settings: React.FC = () => {
     const [saveSuccess, setSaveSuccess] = useState(false);
     const [hasEnvKey, setHasEnvKey] = useState(false);
     const [cloudSync, setCloudSync] = useState<CloudSyncState>('unknown');
+    const cloudMessageRef = React.useRef('');
     const [cloudMessage, setCloudMessage] = useState('');
     const [isSyncing, setIsSyncing] = useState(false);
 
@@ -65,7 +67,41 @@ export const Settings: React.FC = () => {
         }
     };
 
+    const [dropStatus, setDropStatus] = useState<{ detail: string; at: string } | null>(null);
+    useEffect(() => {
+        if (user?.email) getKeyDropStatus(user.email).then(setDropStatus).catch(() => {});
+    }, [user?.email]);
+
+    /**
+     * Caminho 1: função de nuvem user-data (instantâneo, quando publicada).
+     * Caminho 2 (sempre que o 1 falhar): pacote cifrado que a própria
+     * automação do GitHub abre e aplica — não depende de nenhuma função.
+     */
     const syncToCloud = async (keys: string[], pexels: string | null, interactive = false): Promise<boolean> => {
+        const viaFunction = await syncViaFunction(keys, pexels, interactive);
+        if (viaFunction || !user?.email || keys.length === 0) return viaFunction;
+        const previousMsg = cloudMessageRef.current;
+        setIsSyncing(true);
+        try {
+            const drop = await sendKeysToAutomation(user.email, keys, pexels && pexels.trim() ? pexels.trim() : null);
+            if (drop.ok) {
+                setCloudSync('pending');
+                setCloudMessage(drop.message);
+                return true;
+            }
+            setCloudSync('error');
+            setCloudMessage(`${drop.message}${previousMsg ? ` (função de nuvem: ${previousMsg})` : ''}`);
+            return false;
+        } catch (e: any) {
+            setCloudSync('error');
+            setCloudMessage(`Falha ao enviar as chaves para a automação: ${e?.message || e}`);
+            return false;
+        } finally {
+            setIsSyncing(false);
+        }
+    };
+
+    const syncViaFunction = async (keys: string[], pexels: string | null, interactive = false): Promise<boolean> => {
         if (!supabase || !user?.email) {
             setCloudSync('local_only');
             setCloudMessage('Sem conexão com a nuvem — a automação não verá estas chaves.');
