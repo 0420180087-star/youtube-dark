@@ -1638,7 +1638,7 @@ async function processProject(projectRow) {
   CURRENT_USER_EMAIL = normalizeEmail(projectRow.user_email);
   await loadUserKeys(projectRow.user_email);
   if (!GEMINI_API_KEY) {
-    log('❌', `Nenhuma chave Gemini disponível para ${CURRENT_USER_EMAIL} (nem em user_settings, nem no ambiente). AÇÃO: abra Configurações no app com este mesmo e-mail, confirme o selo "Salva na nuvem (a automação enxerga)" e clique em Salvar. Alternativa: definir GEMINI_API_KEY nos secrets do GitHub Actions. Pulando.`);
+    log('❌', `Nenhuma chave Gemini disponível para ${CURRENT_USER_EMAIL}. Nuvem: 0 chaves. Secret GEMINI_API_KEY do GitHub: NÃO configurado. SOLUÇÃO DEFINITIVA: GitHub → Settings → Secrets and variables → Actions → New repository secret → GEMINI_API_KEY (e PEXELS_API_KEY). Pulando.`);
     if (!data.scheduleSettings) data.scheduleSettings = {};
     if (data.scheduleSettings.autoGenerate) {
       // Retry curto: não perder o dia inteiro por um problema de leitura de chave.
