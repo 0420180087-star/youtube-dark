@@ -1305,15 +1305,10 @@ async function stepUploadYouTube(projectData, metadata, renderResult, thumbnailB
     throw new Error('Nenhum refresh_token do YouTube encontrado para este projeto. Reconecte o canal na aba Settings do projeto.');
   }
 
-  // Reuse cached access_token if it still has >5min of life
+  // Sempre renova pelo refresh_token antes de postar. O access_token salvo
+  // pode ter sido sobrescrito por outra sessão/conta ou revogado mesmo com
+  // "validade" restante — reaproveitá-lo causou HTTP 401 no upload.
   let accessToken = null;
-  if (authRow?.youtube_access_token && authRow?.token_expires_at) {
-    const msLeft = new Date(authRow.token_expires_at).getTime() - Date.now();
-    if (msLeft > 5 * 60 * 1000) {
-      accessToken = authRow.youtube_access_token;
-      log('🔑', `Reusing cached access token (expires in ${Math.round(msLeft / 60000)}min)`);
-    }
-  }
 
   try {
     if (!accessToken) {
