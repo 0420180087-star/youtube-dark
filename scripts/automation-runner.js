@@ -242,9 +242,14 @@ async function ensureRunnerKeypair() {
       log('🔐', 'Par de chaves da automação criado.');
     }
     if (SCHEMA.automation_heartbeat) {
-      await supabase.from('automation_heartbeat').upsert({
+      const { error: pubErr } = await supabase.from('automation_heartbeat').upsert({
         runner: 'runner_public_key', last_seen_at: new Date().toISOString(), detail: JSON.stringify(pair.publicJwk),
       }, { onConflict: 'runner' });
+      log(pubErr ? '⚠️' : '🔐', pubErr
+        ? `Chave pública NÃO publicada (${pubErr.message}) — o app não conseguirá enviar as chaves.`
+        : 'Recebimento de chaves pelo app: pronto (chave pública publicada).');
+    } else {
+      log('⚠️', 'Tabela automation_heartbeat ausente — o app não consegue enviar as chaves. Rode supabase/bootstrap.sql.');
     }
     return await subtle.importKey('jwk', pair.privateJwk, { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['decrypt']);
   } catch (e) {
@@ -269,7 +274,10 @@ async function consumeKeyDrops(privateKey) {
     .from('autopilot_logs').select('id,user_email,message,created_at')
     .eq('project_id', KEY_DROP_PROJECT_ID).order('created_at', { ascending: true }).limit(50);
   if (error) { log('⚠️', `Leitura das chaves enviadas pelo app falhou: ${error.message}`); return; }
-  if (!rows?.length) return;
+  if (!rows?.length) {
+    log('📭', 'Nenhum envio de chaves pelo app desde a última execução (ninguém clicou em Salvar em Configurações, ou o envio falhou no navegador).');
+    return;
+  }
   log('📨', `${rows.length} envio(s) de chaves pelo app para processar`);
 
   for (const row of rows) {
