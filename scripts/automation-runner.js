@@ -399,7 +399,9 @@ function getCooldownMs(err) {
       const delay = d?.retryDelay || d?.retry_delay;
       if (typeof delay === 'string') {
         const s = parseFloat(delay.replace('s', ''));
-        if (!isNaN(s) && s > 0) return Math.ceil(s * 1000);
+        // retryDelay longo (ex: 59514s) = reset DIÁRIO de cota. Não podemos
+        // estacionar o projeto por 16h: limitamos a 30 min, igual ao caso RPD.
+        if (!isNaN(s) && s > 0) return Math.min(Math.ceil(s * 1000), 30 * 60 * 1000);
       }
     }
   }
@@ -421,6 +423,17 @@ function quotaReason(err) {
   const raw = String(err?.message || '').toLowerCase();
   if (status === 503 || raw.includes('unavailable') || raw.includes('overloaded')) return 'Servidor sobrecarregado (503)';
   if (raw.includes('per-day') || raw.includes('rpd') || raw.includes('daily')) return 'Limite diário (RPD) atingido';
+  // retryDelay > 1h = reset diário de cota, não limite por minuto.
+  const details = err?.response?.data?.error?.details;
+  if (Array.isArray(details)) {
+    for (const d of details) {
+      const delay = d?.retryDelay || d?.retry_delay;
+      if (typeof delay === 'string') {
+        const s = parseFloat(delay.replace('s', ''));
+        if (!isNaN(s) && s > 3600) return 'Limite diário (RPD) atingido';
+      }
+    }
+  }
   return 'Limite por minuto (RPM/429) atingido';
 }
 
