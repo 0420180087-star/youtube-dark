@@ -310,6 +310,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return null;
   };
 
+  // IMPORTANTE: nunca chamar google.accounts.oauth2.revoke aqui. Revogar um
+  // access_token revoga a AUTORIZAÇÃO INTEIRA no Google — inclusive o
+  // refresh_token salvo na nuvem que a automação usa para postar. Era isso que
+  // fazia o canal "desconectar sozinho" (invalid_grant / HTTP 401) depois que o
+  // usuário saía e entrava de novo no app.
   const disconnectYoutube = () => {
     setYoutubeChannel(null);
     setAccessToken(null);
@@ -317,13 +322,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     localStorage.removeItem('ds_youtube_channel');
     localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
     localStorage.removeItem(NEEDS_RECONNECT_KEY);
-
-    if (accessToken && typeof google !== 'undefined') {
-      try { google.accounts.oauth2.revoke(accessToken, () => {}); } catch (e) {}
-    }
   };
 
   const logout = () => {
+    // Sair só limpa a sessão local; a conexão do canal na nuvem continua
+    // valendo para a automação.
     disconnectYoutube();
     setUser(null);
     localStorage.removeItem('ds_user_profile');
