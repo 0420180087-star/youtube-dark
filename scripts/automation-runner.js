@@ -399,7 +399,9 @@ function getCooldownMs(err) {
       const delay = d?.retryDelay || d?.retry_delay;
       if (typeof delay === 'string') {
         const s = parseFloat(delay.replace('s', ''));
-        if (!isNaN(s) && s > 0) return Math.ceil(s * 1000);
+        // retryDelay longo (ex: 59514s) = reset DIÁRIO de cota. Não podemos
+        // estacionar o projeto por 16h: limitamos a 30 min, igual ao caso RPD.
+        if (!isNaN(s) && s > 0) return Math.min(Math.ceil(s * 1000), 30 * 60 * 1000);
       }
     }
   }
@@ -421,6 +423,17 @@ function quotaReason(err) {
   const raw = String(err?.message || '').toLowerCase();
   if (status === 503 || raw.includes('unavailable') || raw.includes('overloaded')) return 'Servidor sobrecarregado (503)';
   if (raw.includes('per-day') || raw.includes('rpd') || raw.includes('daily')) return 'Limite diário (RPD) atingido';
+  // retryDelay > 1h = reset diário de cota, não limite por minuto.
+  const details = err?.response?.data?.error?.details;
+  if (Array.isArray(details)) {
+    for (const d of details) {
+      const delay = d?.retryDelay || d?.retry_delay;
+      if (typeof delay === 'string') {
+        const s = parseFloat(delay.replace('s', ''));
+        if (!isNaN(s) && s > 3600) return 'Limite diário (RPD) atingido';
+      }
+    }
+  }
   return 'Limite por minuto (RPM/429) atingido';
 }
 
@@ -429,22 +442,31 @@ function maskKey(key) {
   return `${key.slice(0, 4)}…${key.slice(-4)}`;
 }
 
-function isKeyReady(key) {
-  const cd = keyCooldowns.get(key);
+// Cooldowns são POR TIPO de chamada ('text' | 'image'): um 429 do modelo de
+// imagem (thumbnail) NÃO pode bloquear chamadas de texto (script/metadata/TTS),
+// que têm cotas separadas no Google. Antes disto, um estouro de cota de imagem
+// derrubava o vídeo inteiro na etapa de metadata.
+function cdKey(key, kind) {
+  return `${key}::${kind || 'text'}`;
+}
+
+function isKeyReady(key, kind = 'text') {
+  const k = cdKey(key, kind);
+  const cd = keyCooldowns.get(k);
   if (!cd) return true;
   if (Date.now() >= cd.availableAt) {
-    keyCooldowns.delete(key);
+    keyCooldowns.delete(k);
     return true;
   }
   return false;
 }
 
 /** Menor tempo restante até alguma chave voltar. null se alguma já está pronta. */
-function shortestCooldownMs() {
-  if (GEMINI_API_KEYS.some((k) => isKeyReady(k))) return null;
+function shortestCooldownMs(kind = 'text') {
+  if (GEMINI_API_KEYS.some((k) => isKeyReady(k, kind))) return null;
   let min = Infinity;
   for (const k of GEMINI_API_KEYS) {
-    const cd = keyCooldowns.get(k);
+    const cd = keyCooldowns.get(cdKey(k, kind));
     if (cd) min = Math.min(min, cd.availableAt - Date.now());
   }
   return min === Infinity ? null : Math.max(1000, min);
@@ -466,22 +488,22 @@ async function recordQuotaEvent(key, err, cooldownMs) {
   }
 }
 
-/** Coloca a chave atual em cooldown e persiste o evento. */
-async function cooldownCurrentKey(err) {
+/** Coloca a chave atual em cooldown (para o tipo de chamada) e persiste o evento. */
+async function cooldownCurrentKey(err, kind = 'text') {
   const key = GEMINI_API_KEY;
   const ms = getCooldownMs(err);
-  keyCooldowns.set(key, { availableAt: Date.now() + ms, reason: quotaReason(err), cooldownMs: ms });
-  log('🧊', `Chave ${maskKey(key)} em cooldown por ${Math.round(ms / 1000)}s — ${quotaReason(err)}`);
+  keyCooldowns.set(cdKey(key, kind), { availableAt: Date.now() + ms, reason: quotaReason(err), cooldownMs: ms });
+  log('🧊', `Chave ${maskKey(key)} em cooldown (${kind}) por ${Math.round(ms / 1000)}s — ${quotaReason(err)}`);
   await recordQuotaEvent(key, err, ms);
 }
 
-/** Move para a próxima chave PRONTA. Retorna false se todas estão em cooldown. */
-function rotateGeminiKey() {
+/** Move para a próxima chave PRONTA (para o tipo de chamada). Retorna false se todas estão em cooldown. */
+function rotateGeminiKey(kind = 'text') {
   if (!GEMINI_API_KEYS.length) return false;
   for (let i = 1; i <= GEMINI_API_KEYS.length; i++) {
     const idx = (GEMINI_KEY_INDEX + i) % GEMINI_API_KEYS.length;
     const candidate = GEMINI_API_KEYS[idx];
-    if (isKeyReady(candidate)) {
+    if (isKeyReady(candidate, kind)) {
       GEMINI_KEY_INDEX = idx;
       GEMINI_API_KEY = candidate;
       log('🔁', `Usando chave Gemini #${idx + 1}/${GEMINI_API_KEYS.length} (${maskKey(candidate)})`);
