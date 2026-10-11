@@ -826,8 +826,8 @@ async function geminiGenerateImage(prompt) {
     }
   }
 
-  if (shortestCooldownMs()) {
-    throw new GeminiQuotaExhaustedError(shortestCooldownMs(), 'cota de imagem esgotada');
+  if (shortestCooldownMs('image')) {
+    throw new GeminiQuotaExhaustedError(shortestCooldownMs('image'), 'cota de imagem esgotada');
   }
 
   log('⚠️', 'Todos os modelos de imagem falharam — usando fallback');
