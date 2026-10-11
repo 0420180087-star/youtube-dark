@@ -26,6 +26,7 @@ export function setInjectedGeminiKeys(keys: string[]): void {
   injectedGeminiKeys = keys.filter(Boolean);
 }
 
+let lastLoggedKeyCount = -1;
 const loadAllKeys = async (): Promise<string[]> => {
     const raw: string[] = [...(injectedGeminiKeys || [])];
 
