@@ -704,10 +704,10 @@ async function geminiWithRetry(fn, retries = 3) {
   let attempt = 0;
   let lastErr = null;
 
-  // Garante que a chave atual está pronta antes de começar.
-  if (!isKeyReady(GEMINI_API_KEY) && !rotateGeminiKey()) {
-    const wait = shortestCooldownMs() || 65_000;
-    throw new GeminiQuotaExhaustedError(wait, keyCooldowns.get(GEMINI_API_KEY)?.reason || 'cota');
+  // Garante que a chave atual está pronta antes de começar (tipo 'text').
+  if (!isKeyReady(GEMINI_API_KEY, 'text') && !rotateGeminiKey('text')) {
+    const wait = shortestCooldownMs('text') || 65_000;
+    throw new GeminiQuotaExhaustedError(wait, keyCooldowns.get(cdKey(GEMINI_API_KEY, 'text'))?.reason || 'cota');
   }
 
   while (attempt < retries) {
@@ -717,21 +717,21 @@ async function geminiWithRetry(fn, retries = 3) {
       lastErr = err;
       if (!isQuotaError(err)) throw err;
 
-      await cooldownCurrentKey(err);
+      await cooldownCurrentKey(err, 'text');
 
-      if (rotateGeminiKey()) {
+      if (rotateGeminiKey('text')) {
         log('⏭️', 'Erro de cota — trocando de chave sem gastar tentativa.');
         continue; // rotação não consome tentativa
       }
 
-      const wait = shortestCooldownMs() || getCooldownMs(err);
+      const wait = shortestCooldownMs('text') || getCooldownMs(err);
       // Espera curta (RPM/503) pode ser absorvida aqui mesmo.
       if (wait <= 90_000 && attempt < retries - 1) {
         attempt++;
         log('⏳', `Todas as chaves em cooldown — aguardando ${Math.round(wait / 1000)}s (tentativa ${attempt + 1}/${retries}).`);
         await new Promise((r) => setTimeout(r, wait + 1000));
-        for (const k of GEMINI_API_KEYS) isKeyReady(k); // expira cooldowns vencidos
-        rotateGeminiKey();
+        for (const k of GEMINI_API_KEYS) isKeyReady(k, 'text'); // expira cooldowns vencidos
+        rotateGeminiKey('text');
         continue;
       }
 
@@ -803,7 +803,7 @@ async function geminiGenerateImage(prompt) {
   for (const entry of IMAGE_MODELS) {
     // Uma volta por chave disponível para este modelo.
     for (let keyTry = 0; keyTry < Math.max(1, GEMINI_API_KEYS.length); keyTry++) {
-      if (!isKeyReady(GEMINI_API_KEY) && !rotateGeminiKey()) break;
+      if (!isKeyReady(GEMINI_API_KEY, 'image') && !rotateGeminiKey('image')) break;
       try {
         const b64 = await callModel(entry);
         if (b64) {
@@ -814,8 +814,8 @@ async function geminiGenerateImage(prompt) {
       } catch (err) {
         const code = err?.response?.status;
         if (isQuotaError(err)) {
-          await cooldownCurrentKey(err);
-          if (rotateGeminiKey()) continue; // mesma modelo, próxima chave
+          await cooldownCurrentKey(err, 'image');
+          if (rotateGeminiKey('image')) continue; // mesma modelo, próxima chave
           break; // todas em cooldown — tenta o próximo modelo (pode ser mais barato)
         }
         if (code !== 400 && code !== 403 && code !== 404) {
@@ -826,8 +826,8 @@ async function geminiGenerateImage(prompt) {
     }
   }
 
-  if (shortestCooldownMs()) {
-    throw new GeminiQuotaExhaustedError(shortestCooldownMs(), 'cota de imagem esgotada');
+  if (shortestCooldownMs('image')) {
+    throw new GeminiQuotaExhaustedError(shortestCooldownMs('image'), 'cota de imagem esgotada');
   }
 
   log('⚠️', 'Todos os modelos de imagem falharam — usando fallback');
