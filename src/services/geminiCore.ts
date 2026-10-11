@@ -26,6 +26,7 @@ export function setInjectedGeminiKeys(keys: string[]): void {
   injectedGeminiKeys = keys.filter(Boolean);
 }
 
+let lastLoggedKeyCount = -1;
 const loadAllKeys = async (): Promise<string[]> => {
     const raw: string[] = [...(injectedGeminiKeys || [])];
 
@@ -71,10 +72,15 @@ const loadAllKeys = async (): Promise<string[]> => {
     const valid = [...new Set(raw.map(k => k.trim()))]
         .filter(k => k.length > 20 && !['undefined', 'null', '[object Object]'].includes(k));
 
-    if (valid.length > 0) {
-        console.log(`[DarkStream AI] 🔑 ${valid.length} chave(s) API carregada(s).`);
-    } else {
-        console.warn("[DarkStream AI] ⚠️ Nenhuma chave API encontrada.");
+    // Só loga quando a quantidade muda — antes repetia a cada chamada e
+    // poluía o log da automação.
+    if (valid.length !== lastLoggedKeyCount) {
+        lastLoggedKeyCount = valid.length;
+        if (valid.length > 0) {
+            console.log(`[DarkStream AI] 🔑 ${valid.length} chave(s) API carregada(s).`);
+        } else {
+            console.warn("[DarkStream AI] ⚠️ Nenhuma chave API encontrada.");
+        }
     }
     return valid;
 };
@@ -351,14 +357,40 @@ export const executeGeminiRequest = <T>(
     });
 };
 
+/** Máximo de rodadas (todas as chaves tentadas) antes de desistir. */
+export const MAX_ROTATION_ROUNDS = 3;
+/** Espera automática máxima entre rodadas; acima disso, desiste na hora. */
+const MAX_AUTO_WAIT_MS = 70_000;
+
 /**
- * Core rotation logic:
- * 1. Get all keys
- * 2. Try each ready key in round-robin order
- * 3. On quota error → cooldown that key, try next
- * 4. If all keys exhausted → wait for shortest cooldown, then retry once
+ * Erro "todas as chaves sem cota". Tem `isQuotaExhausted`/`waitMs` para o
+ * runner do GitHub reagendar o vídeo (sem gastar tentativa) em vez de travar.
  */
-const runWithRotation = async <T>(op: (ai: GoogleGenAI) => Promise<T>, isRetry = false): Promise<T> => {
+export class GeminiQuotaExhaustedError extends Error {
+    isQuotaExhausted = true;
+    waitMs: number;
+    reason: string;
+    constructor(keyCount: number, waitMs: number, reason: string) {
+        super(`Cota Gemini esgotada em todas as ${keyCount} chave(s) — ${reason}. Tente de novo em ${Math.max(1, Math.ceil(waitMs / 60000))} min.`);
+        this.name = 'GeminiQuotaExhaustedError';
+        this.waitMs = waitMs;
+        this.reason = reason;
+    }
+}
+
+/**
+ * Core rotation logic (sempre termina):
+ * 1. Tenta cada chave pronta, em round-robin
+ * 2. Erro de cota → cooldown na chave e passa para a próxima
+ * 3. Nenhuma chave conseguiu → espera o menor cooldown (até 70s) e repete,
+ *    no máximo MAX_ROTATION_ROUNDS rodadas
+ * 4. Esgotou as rodadas ou cooldown longo → lança GeminiQuotaExhaustedError
+ *
+ * Antes havia um "forçar limpeza de cooldowns" que reiniciava o contador de
+ * tentativas, criando um loop infinito sem espera quando a cota estava
+ * realmente esgotada.
+ */
+const runWithRotation = async <T>(op: (ai: GoogleGenAI) => Promise<T>, round = 1): Promise<T> => {
     const allKeys = await loadAllKeys();
     if (allKeys.length === 0) {
         throw new Error("Nenhuma chave API encontrada. Vá em Configurações e adicione suas chaves do Google AI Studio.");
@@ -367,63 +399,22 @@ const runWithRotation = async <T>(op: (ai: GoogleGenAI) => Promise<T>, isRetry =
     // Clean expired cooldowns
     for (const [k, cd] of keyCooldowns) { if (Date.now() >= cd.availableAt) keyCooldowns.delete(k); }
 
-    // Auto-reset: if ALL cooldowns have short duration (< 30s remaining) they are
-    // temporary 503 errors — clear them and retry immediately instead of erroring
+    // 503 (servidor sobrecarregado) não é cota: libera as chaves na hora.
+    // Seguro porque o número de rodadas é limitado.
     if (keyCooldowns.size > 0 && keyCooldowns.size >= allKeys.length) {
-        const allShortOrTemporary = [...keyCooldowns.values()].every(cd => {
-            const remaining = cd.availableAt - Date.now();
+        const allTemporary = [...keyCooldowns.values()].every(cd => {
             const r = (cd.reason || '').toLowerCase();
-            const isTemporaryReason = r.includes('unavailable') || r.includes('high demand') ||
+            return r.includes('unavailable') || r.includes('high demand') ||
                 r.includes('503') || r.includes('try again') || r.includes('overload');
-            const isShortWait = remaining < 30_000;
-            return isTemporaryReason || isShortWait;
         });
-        if (allShortOrTemporary) {
-            console.log('[DarkStream AI] 🔄 Cooldowns temporários detectados. Limpando e tentando novamente...');
+        if (allTemporary) {
+            console.log('[DarkStream AI] 🔄 Servidor sobrecarregado (503). Tentando de novo...');
             keyCooldowns.clear();
         }
     }
 
     const readyKeys = allKeys.filter(isKeyReady);
 
-    // If no keys ready, wait for the shortest cooldown (only once)
-    if (readyKeys.length === 0) {
-        if (isRetry) {
-            // Last resort: clear all cooldowns and try one more time
-            // This handles the case where keys were stuck from a previous session
-            const hadCooldowns = keyCooldowns.size > 0;
-            keyCooldowns.clear();
-            if (hadCooldowns) {
-                console.warn('[DarkStream AI] 🔄 Forçando limpeza de cooldowns e tentando novamente...');
-                return runWithRotation(op, false);
-            }
-            throw new Error(`Todas as ${allKeys.length} chaves estão em cooldown. Verifique suas chaves no Google AI Studio ou aguarde alguns minutos.`);
-        }
-
-        let minWait = Infinity;
-        for (const [, cd] of keyCooldowns) {
-            const remaining = cd.availableAt - Date.now();
-            if (remaining > 0 && remaining < minWait) minWait = remaining;
-        }
-
-        // If wait is short (< 20s), wait automatically — otherwise surface the error
-        if (minWait <= 20_000) {
-            console.log(`[DarkStream AI] ⏳ Aguardando ${Math.ceil(minWait / 1000)}s para próxima chave disponível...`);
-            await delay(minWait + 300);
-            return runWithRotation(op, true);
-        }
-
-        // Long cooldown (quota exceeded) — wait up to 2min automatically, else error
-        if (minWait > 120_000) {
-            throw new Error(`Todas as ${allKeys.length} chaves em cooldown longo (${Math.ceil(minWait / 60000)}min). Adicione mais chaves no Google AI Studio.`);
-        }
-
-        console.log(`[DarkStream AI] ⏳ Aguardando ${Math.ceil(minWait / 1000)}s para próxima chave disponível...`);
-        await delay(minWait + 500);
-        return runWithRotation(op, true);
-    }
-
-    // Round-robin through ready keys
     let lastError: any = null;
     for (let i = 0; i < readyKeys.length; i++) {
         const idx = (roundRobinIndex + i) % readyKeys.length;
@@ -435,11 +426,6 @@ const runWithRotation = async <T>(op: (ai: GoogleGenAI) => Promise<T>, isRetry =
         try {
             const ai = new GoogleGenAI({ apiKey: key });
             const result = await op(ai);
-            // Success — advance round-robin globally
-            // Mod by allKeys.length (not readyKeys.length) so the index stays
-            // bounded and cycles correctly across calls with varying ready-key counts.
-            // Without the mod, roundRobinIndex grows unboundedly and eventually exceeds
-            // Number.MAX_SAFE_INTEGER after millions of requests.
             roundRobinIndex = (roundRobinIndex + i + 1) % allKeys.length;
             console.log(`[DarkStream AI] ✅ Sucesso com chave ${masked}`);
             return result;
@@ -466,12 +452,26 @@ const runWithRotation = async <T>(op: (ai: GoogleGenAI) => Promise<T>, isRetry =
         }
     }
 
-    // All ready keys hit quota — try waiting if not already retrying
-    if (!isRetry) {
-        return runWithRotation(op, true);
+    // Nenhuma chave conseguiu nesta rodada.
+    let minWait = Infinity;
+    let reason = '';
+    for (const [, cd] of keyCooldowns) {
+        const remaining = cd.availableAt - Date.now();
+        if (remaining > 0 && remaining < minWait) { minWait = remaining; reason = cd.reason; }
+    }
+    if (!Number.isFinite(minWait)) {
+        if (lastError) throw lastError;
+        minWait = 65_000;
     }
 
-    throw new Error(`Todas as chaves falharam. Último erro: ${lastError?.message || 'Desconhecido'}`);
+    if (round >= MAX_ROTATION_ROUNDS || minWait > MAX_AUTO_WAIT_MS) {
+        console.warn(`[DarkStream AI] 🛑 Todas as chaves sem cota após ${round} rodada(s). Parando esta etapa.`);
+        throw new GeminiQuotaExhaustedError(allKeys.length, minWait, reason || 'cota esgotada');
+    }
+
+    console.log(`[DarkStream AI] ⏳ Todas as chaves no limite. Aguardando ${Math.ceil(minWait / 1000)}s (rodada ${round + 1}/${MAX_ROTATION_ROUNDS})...`);
+    await delay(minWait + 500);
+    return runWithRotation(op, round + 1);
 };
 
 // Robust JSON repair function
@@ -1213,6 +1213,8 @@ export const generateVoiceover = async (
             lastErr = err;
             const reason = err?.ttsReason;
             if (reason === 'SAFETY' || reason === 'REFUSAL') throw err;
+            // Sem cota: repetir só multiplicaria a espera — sobe direto.
+            if (err?.isQuotaExhausted) throw err;
             if (attempt < MAX_ATTEMPTS) {
                 await jitterDelay(800 * Math.pow(2, attempt - 1));
                 continue;
