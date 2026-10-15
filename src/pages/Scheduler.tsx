@@ -4,6 +4,7 @@ import { ProjectStatus } from '../types';
 import { STEP_LABELS } from '../services/automationService';
 import { supabase } from '../lib/supabaseClient';
 import { AutomationHealth } from '../components/AutomationHealth';
+import { isUsableImageUrl } from '../services/projectSync';
 
 import { 
   Calendar as CalendarIcon, Clock, ListOrdered, PlayCircle, Bot, Zap, 
@@ -488,7 +489,7 @@ export const Scheduler: React.FC = () => {
               scheduledQueue.map((video, idx) => {
                 const date = new Date(video.scheduledDate!);
                 const isNext = idx === 0;
-                const visual = video.visualScenes?.[0]?.imageUrl;
+                const visual = video.visualScenes?.find(s => isUsableImageUrl(s.imageUrl))?.imageUrl;
 
                 return (
                   <Link to={`/project/${video.projectId}/video/${video.id}/editor`} key={video.id} className="block group">
