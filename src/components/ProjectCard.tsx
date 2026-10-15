@@ -2,6 +2,7 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import { Project, ProjectStatus } from '../types';
 import { Clock, Film, Layers, Trash2 } from 'lucide-react';
+import { isUsableImageUrl } from '../services/projectSync';
 
 interface ProjectCardProps {
   project: Project;
@@ -18,7 +19,8 @@ export const ProjectCard: React.FC<ProjectCardProps> = ({ project, onDelete }) =
   const totalVideos = project.videos ? project.videos.length : 0;
 
   const hasThumbnail = latestVideo && latestVideo.visualScenes && latestVideo.visualScenes.length > 0;
-  const thumbnail = hasThumbnail ? latestVideo.visualScenes![0].imageUrl : null;
+  // Ignora marcadores da nuvem ("__runner_image__"): não são URLs de imagem.
+  const thumbnail = hasThumbnail ? (latestVideo.visualScenes!.find(s => isUsableImageUrl(s.imageUrl))?.imageUrl ?? null) : null;
   
   // Deterministic gradient fallback - Warm Tones
   const getGradient = (id: string) => {
