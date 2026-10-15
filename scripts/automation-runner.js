@@ -28,6 +28,18 @@ import { setInjectedPexelsKey } from '../src/services/pexelsService.ts';
 import { setInjectedGeminiKeys } from '../src/services/geminiCore.ts';
 import { buildSlotVisualPrompt, collectPexelsIds, getSegmentVisualPrompts } from '../src/services/visualSceneService.ts';
 import { generateVoiceover } from '../src/services/geminiCore.ts';
+import { createPersistState, persistMerged } from '../src/services/projectSync.ts';
+import {
+  buildIdeasPrompt,
+  buildChannelMemory,
+  buildLibraryContext,
+  buildFallbackIdeas,
+  selectFreshIdeas,
+  isTooSimilarTopic,
+  linkIdeaToVideo,
+  backfillIdeaVideoLinks,
+  FRESH_ANGLES,
+} from '../src/services/ideaEngine.ts';
 
 // --- ENV ---
 const {
@@ -910,21 +922,67 @@ function getToneModifier(tone) {
 
 // --- PIPELINE STEPS ---
 
-// Similaridade por palavras (Jaccard). >0.6 = mesmo assunto com outra roupa.
-function topicWords(t) {
-  return new Set(String(t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w.length > 3));
-}
-function isTooSimilar(topic, previous) {
-  const a = topicWords(topic);
-  if (!a.size) return true;
-  return previous.some((p) => {
-    const b = topicWords(p);
-    if (!b.size) return false;
-    let inter = 0;
-    for (const w of a) if (b.has(w)) inter++;
-    return inter / (a.size + b.size - inter) > 0.6;
-  });
+// Similaridade de tópicos (Jaccard) e fallback agora vêm de src/services/ideaEngine.ts
+// — a mesma lógica do app, compartilhada e testada.
+
+// Estoque mínimo de ideias "novas" no Brainstorm depois de cada vídeo produzido.
+const BRAINSTORM_MIN_POOL = 3;
+const IDEA_BATCH_SIZE = 5;
+const IDEA_AI_ATTEMPTS = 3;
+
+/**
+ * Gera um lote de ideias NOVAS com o MESMO prompt do app (descrição do canal,
+ * Biblioteca, ângulo diferente a cada tentativa) + a "memória do canal" (o que
+ * já foi produzido e o que você descartou).
+ *  - Erro de COTA nunca vira ideia genérica: propaga, e o pipeline reagenda.
+ *  - Falha de rede/JSON: tenta de novo com outro ângulo; só no fim usa o
+ *    fallback, que fala o idioma do projeto.
+ */
+async function generateIdeaBatch(projectData, { allowFallback = true, attempts = IDEA_AI_ATTEMPTS } = {}) {
+  const ideas = projectData.ideas || [];
+  // Do mais antigo ao mais novo: o prompt só leva as 25 últimas exclusões.
+  const videoTitlesOldestFirst = (projectData.videos || []).map((v) => v.title).filter(Boolean).reverse();
+  const previous = [...ideas.map((i) => i.topic), ...videoTitlesOldestFirst].filter(Boolean);
+  const libraryContext = buildLibraryContext(projectData.library);
+  const channelMemory = buildChannelMemory(projectData);
+
+  let fresh = [];
+  for (let attempt = 0; attempt < attempts && fresh.length === 0; attempt++) {
+    const freshAngle = attempt === 0 ? '' : FRESH_ANGLES[Math.floor(Math.random() * FRESH_ANGLES.length)];
+    try {
+      const prompt = buildIdeasPrompt({
+        channelTheme: projectData.channelTheme,
+        description: projectData.description,
+        tone: projectData.defaultTone,
+        language: projectData.language,
+        excludeTopics: previous,
+        libraryContext,
+        freshAngle,
+        channelMemory,
+        count: IDEA_BATCH_SIZE,
+        jsonInstruction: true,
+      });
+      const batch = normalizeIdeaBatch(await geminiGenerateJSON(prompt, 6144));
+      fresh = selectFreshIdeas(batch, previous);
+      if (!fresh.length) {
+        log('⚠️', `Brainstorm (tentativa ${attempt + 1}/${attempts}): ${batch.length} ideia(s), todas repetidas/parecidas — tentando outro ângulo.`);
+      }
+    } catch (e) {
+      if (e?.isQuotaExhausted) throw e; // nunca troca um problema de cota por ideia genérica
+      log('⚠️', `Brainstorm (tentativa ${attempt + 1}/${attempts}) falhou: ${e.message}`);
+    }
+  }
+
+  if (!fresh.length && allowFallback) {
+    log('⚠️', 'Brainstorm sem ideias novas pela IA — usando ideias automáticas no idioma do projeto.');
+    const fallback = buildFallbackIdeas({
+      channelTheme: projectData.channelTheme,
+      description: projectData.description,
+      language: projectData.language,
+    }).map((i) => makeProjectIdea(i, 'new'));
+    fresh = selectFreshIdeas(fallback, previous);
+  }
+  return fresh;
 }
 
 async function stepIdea(projectData) {
@@ -933,65 +991,87 @@ async function stepIdea(projectData) {
   const ideas = projectData.ideas || [];
   const videoTitles = (projectData.videos || []).map((v) => v.title).filter(Boolean);
   for (const i of ideas) {
-    if (i.status === 'new' && isTooSimilar(i.topic, videoTitles)) i.status = 'dismissed';
+    if (i.status === 'new' && isTooSimilarTopic(i.topic, videoTitles)) i.status = 'dismissed';
   }
   const unused = ideas.find((i) => i.status === 'new');
 
   if (unused) {
     unused.status = 'used';
+    unused.usedAt = new Date().toISOString();
     log('✅', `Using existing idea: "${unused.topic}"`);
-    return { topic: unused.topic, context: unused.context, specificContext: unused.specificContext, updatedIdeas: ideas };
+    return {
+      ideaId: unused.id,
+      topic: unused.topic,
+      context: unused.context,
+      specificContext: unused.specificContext,
+      updatedIdeas: ideas,
+      newIdeaIds: [],
+    };
   }
 
   log('🔄', 'No unused ideas, generating new brainstorm batch...');
-  const usedTopics = [
-    ...(projectData.ideas || []).map((i) => i.topic),
-    ...(projectData.videos || []).map((v) => v.title),
-  ].filter(Boolean).slice(-50);
-  const prompt = `You are a YouTube content strategist. Generate 5 unique video ideas for a channel about "${projectData.channelTheme}".
-Tone: ${projectData.defaultTone || 'Engaging'}.
-Language: ${projectData.language || 'en'}.
-Avoid these already-used topics: ${usedTopics.join(' | ') || 'none'}.
-
-Return JSON: { "ideas": [{ "topic": "video title", "context": "brief description", "specificContext": "detailed angle" }] }`;
-
-  let generatedIdeas = [];
-  try {
-    generatedIdeas = normalizeIdeaBatch(await geminiGenerateJSON(prompt));
-    if (!generatedIdeas.length) throw new Error('AI returned no ideas');
-  } catch (e) {
-    // Fallback: never block autopilot just because brainstorm failed
-    log('⚠️', `Brainstorm fallback (IA falhou: ${e.message}). Gerando ideia automática.`);
-    const seeds = ['The Untold Story of', 'The Hidden Truth Behind', 'What Nobody Tells You About', 'Why Everyone is Wrong About', 'The Strangest Case of', 'The Forgotten Side of'];
-    const angles = ['in the 1980s', 'that police ignored', 'no one solved', 'from a survivor\'s view', 'behind closed doors', 'that shocked a small town', 'with one tiny clue', 'decades later'];
-    const stamp = new Date().toISOString().slice(0, 10);
-    generatedIdeas = seeds.slice(0, 3).map((seed) => makeProjectIdea({
-      topic: `${seed} ${projectData.channelTheme} ${angles[Math.floor(Math.random() * angles.length)]} (#${stamp}-${Math.floor(Math.random() * 1000)})`,
-      context: `An engaging deep-dive about ${projectData.channelTheme}.`,
-      specificContext: `Explore ${projectData.channelTheme} from a fresh, click-worthy angle. ${projectData.description || ''}`.trim(),
-    }, 'new'));
-  }
-
-  const previous = [
-    ...ideas.map((i) => i.topic),
-    ...(projectData.videos || []).map((v) => v.title),
-  ].filter(Boolean);
-  const freshIdeas = generatedIdeas.filter((i) => !isTooSimilar(i.topic, previous));
+  const freshIdeas = await generateIdeaBatch(projectData);
   if (!freshIdeas.length) {
-    // Nunca grava duplicata: falha explícita → STANDBY curto e nova tentativa.
+    // Nunca grava duplicata: falha explícita.
     throw new Error('Brainstorm só devolveu ideias repetidas/parecidas com vídeos anteriores — nova tentativa em breve');
   }
   const chosen = freshIdeas[0];
+  const usedAt = new Date().toISOString();
   const updatedIdeas = [
     ...ideas,
-    ...freshIdeas.map((i, idx) => ({ ...i, status: i.topic === chosen.topic && idx === 0 ? 'used' : 'new' })),
+    ...freshIdeas.map((i, idx) => (idx === 0 ? { ...i, status: 'used', usedAt } : i)),
   ];
 
   log('✅', `Generated brainstorm batch (${freshIdeas.length}) and selected: "${chosen.topic}"`);
-  return { topic: chosen.topic, context: chosen.context, specificContext: chosen.specificContext, updatedIdeas };
+  return {
+    ideaId: chosen.id,
+    topic: chosen.topic,
+    context: chosen.context,
+    specificContext: chosen.specificContext,
+    updatedIdeas,
+    newIdeaIds: freshIdeas.map((i) => i.id),
+  };
 }
 
-async function stepScript(topic, projectData) {
+/**
+ * Depois de cada vídeo produzido, repõe o estoque de ideias "novas" do
+ * Brainstorm usando a memória do canal (que já inclui o vídeo recém-feito).
+ * É isso que mantém a aba AI Brainstorming sempre abastecida.
+ * Melhor esforço: se falhar, o vídeo já está salvo e NADA é afetado.
+ */
+async function topUpBrainstorm(projectId, data, persistState) {
+  try {
+    const pool = (data.ideas || []).filter((i) => i.status === 'new').length;
+    if (pool >= BRAINSTORM_MIN_POOL || !GEMINI_API_KEY) return 0;
+    if (!isKeyReady(GEMINI_API_KEY, 'text') && !rotateGeminiKey('text')) {
+      log('🧊', 'Reposição do Brainstorm adiada: nenhuma chave Gemini pronta agora.');
+      return 0;
+    }
+    // Melhor esforço: 2 tentativas bastam (a próxima execução tenta de novo se o estoque continuar baixo).
+    const batch = await generateIdeaBatch(data, { allowFallback: false, attempts: 2 });
+    if (!batch.length) {
+      log('ℹ️', 'Reposição do Brainstorm: a IA não trouxe ideias novas desta vez.');
+      return 0;
+    }
+    data.ideas = [...(data.ideas || []), ...batch];
+    batch.forEach((i) => persistState.ownedIdeaIds.add(i.id));
+    await persistProjectData(projectId, data, 'Brainstorm replenished');
+    await safeInsertAutopilotLog({
+      project_id: projectId,
+      status: 'success',
+      message: `Brainstorm reabastecido: +${batch.length} ideias novas (estoque era ${pool})`,
+      step: 'idea',
+      runner: 'github-actions',
+    });
+    log('💡', `Brainstorm reabastecido: +${batch.length} ideias novas (estoque era ${pool}).`);
+    return batch.length;
+  } catch (e) {
+    log('⚠️', `Reposição do Brainstorm falhou (o vídeo já está salvo): ${e.message}`);
+    return 0;
+  }
+}
+
+async function stepScript(topic, projectData, specificContext = '') {
   log('📝', 'Step 2: Generating script...');
   
   const dur = (projectData.defaultDuration || 'Standard (5-8 min)').toLowerCase();
@@ -1001,10 +1081,19 @@ async function stepScript(topic, projectData) {
   else if (dur.includes('deep') || dur.includes('20+')) { minWords = 2250; maxWords = 3000; segments = 16; }
   else { minWords = 750; maxWords = 1200; segments = 7; }
 
+  // Conhecimento do canal: o ângulo escolhido no Brainstorm e a Biblioteca (como no app).
+  const angleBlock = specificContext
+    ? `\nSPECIFIC ANGLE / KEY POINTS TO COVER (chosen in the channel brainstorm — follow this direction):\n${specificContext}\n`
+    : '';
+  const libraryCtx = buildLibraryContext(projectData.library);
+  const libraryBlock = libraryCtx
+    ? `\nCHANNEL KNOWLEDGE BASE & REFERENCES (use as factual source material, never copy verbatim; [YOUTUBE_REFERENCE_CHANNEL] items are style references only):\n${libraryCtx.substring(0, 12000)}\n`
+    : '';
+
   const prompt = `Write a YouTube video script about "${topic}" for a ${projectData.defaultTone || 'Engaging'} channel about "${projectData.channelTheme}".
 Target duration: ${projectData.defaultDuration || 'Standard (5-8 min)'}.
 Language: ${projectData.language || 'en'}.
-
+${angleBlock}${libraryBlock}
 WORD COUNT REQUIREMENT: Write narrator text totaling between ${minWords} and ${maxWords} words across all segments combined.
 NUMBER OF SEGMENTS: Generate exactly ${segments} segments.
 SPEAKING RATE: Assume 150 words per minute for narration timing. Each segment's estimatedDuration should reflect the word count of its narratorText at this rate.
@@ -1442,12 +1531,41 @@ function calculateNextRunIso(settings = {}) {
   return nextRun.toISOString();
 }
 
+// Gravação com merge. O projeto inteiro vive numa linha (projects.data) e o app
+// grava nela enquanto o runner trabalha por 20–50 min. Antes o runner regravava
+// o projeto inteiro com a cópia lida no INÍCIO da execução (velha), apagando o
+// que o app tinha feito; e o app apagava o que o runner tinha feito. Agora cada
+// gravação lê a linha atual, mescla (ver src/services/projectSync.ts) e só então
+// grava. O vídeo e as ideias que o runner está produzindo sempre prevalecem.
+const persistStates = new Map(); // projectId -> { base, ownedVideoIds, ownedIdeaIds }
+
+function getPersistState(projectId, data) {
+  let st = persistStates.get(projectId);
+  if (!st) {
+    st = createPersistState(data);
+    persistStates.set(projectId, st);
+  }
+  return st;
+}
+
+const projectStore = {
+  async read(projectId) {
+    const { data, error } = await supabase.from('projects').select('data').eq('id', projectId).maybeSingle();
+    return { data: data?.data ?? null, error: error ? error.message : null };
+  },
+  async write(projectId, data) {
+    const { error } = await supabase
+      .from('projects')
+      .update({ data, updated_at: new Date().toISOString() })
+      .eq('id', projectId);
+    return { error: error ? error.message : null };
+  },
+};
+
 async function persistProjectData(projectId, data, message = 'Project data persisted') {
-  const { error } = await supabase
-    .from('projects')
-    .update({ data, updated_at: new Date().toISOString() })
-    .eq('id', projectId);
-  if (error) log('⚠️', `${message} failed: ${error.message}`);
+  const res = await persistMerged(projectStore, projectId, data, getPersistState(projectId, data));
+  if (!res.ok) log('⚠️', `${message} failed: ${res.error}`);
+  else if (res.readFailed) log('⚠️', `${message}: leitura da nuvem falhou — gravado sem mesclar`);
 }
 
 async function updateRunnerVideo(projectId, data, videoId, updates, logMessage) {
@@ -1635,6 +1753,18 @@ async function processProject(projectRow) {
   const startTime = Date.now();
   let videoTitle = data.channelTheme || projectId;
 
+  // Base do merge = linha como foi lida AGORA (antes de qualquer alteração deste processamento).
+  const persistState = createPersistState(projectRow.data);
+  persistStates.set(projectId, persistState);
+
+  // Gestão de conhecimento: restaura o vínculo ideia → vídeo das ideias usadas por vídeos
+  // antigos da automação (casamento exato pelo contexto; só quando é inequívoco).
+  const backfill = backfillIdeaVideoLinks(data.ideas, data.videos);
+  if (backfill.linked > 0) {
+    data.ideas = backfill.ideas;
+    log('🔗', `Vínculos ideia → vídeo restaurados em ${backfill.linked} ideia(s) usada(s) antes desta versão.`);
+  }
+
   // Acquire distributed lock — prevents browser scheduler from running
   // the same project at the same time as this GitHub Actions runner.
   const { acquired: lockAcquired } = await acquireLock(projectId, 90);
@@ -1722,6 +1852,9 @@ async function processProject(projectRow) {
   const resumeVideo = findRetryableVideo(data, Date.now(), tokenHealth.ok);
   const isResume = !!resumeVideo;
   let videoId = resumeVideo?.id || null;
+  let ideaId = resumeVideo?.ideaId || null;
+  if (videoId) persistState.ownedVideoIds.add(videoId);
+  if (ideaId) persistState.ownedIdeaIds.add(ideaId);
 
   log('🚀', isResume
     ? `Retomando "${resumeVideo.title}" (tentativa ${(resumeVideo.retryCount || 0) + 1}/${MAX_AUTO_RETRIES})`
@@ -1762,6 +1895,11 @@ async function processProject(projectRow) {
       await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Buscando/criando ideia no Brainstorm', step: currentStep, runner: 'github-actions' });
       idea = await stepIdea(data);
 
+      // Ideias que este runner criou/consumiu: a versão dele prevalece no merge.
+      ideaId = idea.ideaId || null;
+      if (ideaId) persistState.ownedIdeaIds.add(ideaId);
+      (idea.newIdeaIds || []).forEach((id) => persistState.ownedIdeaIds.add(id));
+
       // Update ideas in Supabase
       if (idea.updatedIdeas) {
         data.ideas = idea.updatedIdeas;
@@ -1770,10 +1908,12 @@ async function processProject(projectRow) {
 
       videoTitle = idea.topic;
       videoId = `auto_${Date.now()}`;
+      persistState.ownedVideoIds.add(videoId);
       if (!data.videos) data.videos = [];
       data.videos.unshift({
         id: videoId,
         projectId,
+        ideaId: ideaId || undefined, // vínculo vídeo → ideia do Brainstorm
         title: idea.topic,
         status: 'DRAFT',
         targetDuration: data.defaultDuration || 'Standard (5-8 min)',
@@ -1792,7 +1932,7 @@ async function processProject(projectRow) {
       log('♻️', 'Roteiro reaproveitado do vídeo em standby');
     } else {
       await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Gerando roteiro', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
-      script = await stepScript(idea.topic, data);
+      script = await stepScript(idea.topic, data, idea.specificContext || idea.context || '');
     }
     await updateRunnerVideo(projectId, data, videoId, { script, status: 'SCRIPTING' }, 'Script saved');
 
@@ -1860,6 +2000,7 @@ async function processProject(projectRow) {
     if (!tokenHealth.ok) {
       currentStep = 'upload';
       cleanupTmp(renderResult.tmpDir);
+      data.ideas = linkIdeaToVideo(data.ideas, ideaId, { videoId, videoTitle });
       await updateRunnerVideo(projectId, data, videoId, {
         status: 'SCHEDULED',
         scheduledDate: new Date().toISOString(),
@@ -1880,6 +2021,7 @@ async function processProject(projectRow) {
         runner: 'github-actions',
       });
       log('🕒', `Vídeo pronto em ${waitDuration}s, aguardando reconexão do YouTube.`);
+      await topUpBrainstorm(projectId, data, persistState);
       return true;
     }
 
@@ -1887,6 +2029,8 @@ async function processProject(projectRow) {
     await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Enviando vídeo para o YouTube', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
     const uploadResult = await stepUploadYouTube(data, metadata, renderResult, thumbnailBase64, projectRow.user_email);
 
+    // Gestão de conhecimento: a ideia usada passa a apontar para o vídeo publicado.
+    data.ideas = linkIdeaToVideo(data.ideas, ideaId, { videoId, videoTitle, youtubeUrl: uploadResult?.videoUrl });
     await updateRunnerVideo(projectId, data, videoId, {
       status: 'PUBLISHED',
       youtubeUrl: uploadResult?.videoUrl || null,
@@ -1908,6 +2052,9 @@ async function processProject(projectRow) {
       runner: 'github-actions',
     });
 
+    // Repõe o estoque de ideias novas do Brainstorm (melhor esforço — o vídeo já está salvo).
+    await topUpBrainstorm(projectId, data, persistState);
+
     log('🎉', `Project complete! Duration: ${duration}s. Next run: ${data.scheduleSettings.nextScheduledRun}`);
     return true;
   } catch (err) {
@@ -1922,6 +2069,12 @@ async function processProject(projectRow) {
     data.standbyInfo = standbyInfo;
     if (data.scheduleSettings?.autoGenerate) {
       data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
+      if (!videoId && err.isQuotaExhausted) {
+        // Cota esgotada ANTES de existir vídeo (etapa de ideia): não perde o dia — tenta de
+        // novo quando a cota voltar (antes, uma ideia genérica em inglês mascarava isso).
+        const waitMs = Math.min(Math.max(err.waitMs || 65_000, 5 * 60_000), 2 * 60 * 60 * 1000);
+        data.scheduleSettings.nextScheduledRun = new Date(Date.now() + waitMs).toISOString();
+      }
     }
 
     if (videoId) {
@@ -2021,6 +2174,7 @@ async function processProject(projectRow) {
     // Always release the lock — even on crash — so the project isn't
     // permanently blocked from future runs.
     await releaseLock(projectId);
+    persistStates.delete(projectId);
   }
 }
 
