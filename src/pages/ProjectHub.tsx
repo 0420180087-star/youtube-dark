@@ -6,6 +6,7 @@ import { useAuth } from '../context/AuthContext';
 import { ProjectStatus, VideoDuration, ProjectIdea, LibraryItemType, VideoFormat, VisualPacingStyle } from '../types';
 import { generateVoiceover, decodeAudioData, generateVideoIdeas, VideoIdea } from '../services/geminiService';
 import { calculateNextRunTime } from '../services/automationService';
+import { isUsableImageUrl } from '../services/projectSync';
 import { 
     ArrowLeft, Film, Clock, FileText, Mic, Image as ImageIcon, 
     MoreVertical, Play, Calendar, Save, Trash2, AlertOctagon, 
@@ -579,7 +580,9 @@ export const ProjectHub: React.FC = () => {
                     {project.videos.map((video) => {
                         const status = statusConfig[video.status] ?? statusConfig[ProjectStatus.DRAFT];
                         const hasThumbnail = video.visualScenes && video.visualScenes.length > 0;
-                        const thumbnail = hasThumbnail ? video.visualScenes![0].imageUrl : null;
+                        // Vídeos da automação guardam marcadores ("__runner_image__") no lugar das imagens
+                        // que não cabem na nuvem — não são URLs. Usa a primeira cena com imagem real.
+                        const thumbnail = hasThumbnail ? (video.visualScenes!.find(s => isUsableImageUrl(s.imageUrl))?.imageUrl ?? null) : null;
                         const isShort = video.format && video.format.includes('9:16');
 
                         return (
@@ -735,7 +738,17 @@ export const ProjectHub: React.FC = () => {
                                     {/* New Object History */}
                                     {[...usedIdeas, ...dismissedIdeas].map((idea) => (
                                         <tr key={idea.id} className="hover:bg-slate-800/50 transition-colors">
-                                            <td className="px-6 py-3 font-medium text-slate-300">{idea.topic}</td>
+                                            <td className="px-6 py-3 font-medium text-slate-300">
+                                                {idea.topic}
+                                                {idea.videoTitle && (
+                                                    <div className="mt-1 text-[11px] font-normal text-slate-500">
+                                                        🎬 Became video:{' '}
+                                                        {idea.youtubeUrl
+                                                            ? <a href={idea.youtubeUrl} target="_blank" rel="noreferrer" className="text-orange-400 hover:underline">{idea.videoTitle}</a>
+                                                            : idea.videoTitle}
+                                                    </div>
+                                                )}
+                                            </td>
                                             <td className="px-6 py-3">
                                                 <span className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded ${idea.status === 'used' ? 'bg-orange-500/10 text-orange-400' : 'bg-red-500/10 text-red-400'}`}>
                                                     {idea.status}
