@@ -90,6 +90,13 @@ export interface ProjectIdea {
   specificContext?: string;
   status: 'new' | 'used' | 'dismissed';
   createdAt: string;
+
+  // Gestão de conhecimento — vínculo ideia → vídeo (gravado pela automação).
+  // Permite ver, no histórico do Brainstorm, em qual vídeo cada ideia virou.
+  usedAt?: string;
+  videoId?: string;
+  videoTitle?: string;
+  youtubeUrl?: string;
 }
 
 export type LibraryItemType = 'text' | 'link' | 'reference' | 'book' | 'file' | 'youtube_channel';
@@ -133,6 +140,9 @@ export interface Video {
   retryCount?: number;
   nextRetryAt?: string;
   lastError?: string;
+
+  // Ideia do Brainstorm que originou este vídeo (vínculo gravado pela automação).
+  ideaId?: string;
 }
 
 
