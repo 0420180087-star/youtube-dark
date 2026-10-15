@@ -4,6 +4,7 @@ import { get, set } from 'idb-keyval';
 import { useAuth } from './AuthContext';
 import { supabase } from '../lib/supabaseClient';
 import { deleteProjectAuth } from '../services/userDataService';
+import { mergeProjectData, restoreCloudBlobs, stableSignature, cloneJson } from '../services/projectSync';
 import { 
     generateVideoIdeas, 
     VideoIdea as GeminiVideoIdea
@@ -106,6 +107,133 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
   };
 
+  // ---------------------------------------------------------------------------
+  // Sincronização segura com a nuvem (merge de 3 vias)
+  //
+  // O projeto inteiro vive numa linha só (projects.data) e o runner do GitHub
+  // Actions grava nela enquanto o app está aberto. Antes, o app regravava o
+  // projeto com o que tinha na memória (velho) e apagava os vídeos, fases e
+  // ideias criados pela automação. Agora toda leitura/gravação passa por um
+  // merge com a última versão da nuvem (ver services/projectSync.ts).
+  // ---------------------------------------------------------------------------
+  // Linha JSON da nuvem (projects.data): forma livre, tratada de forma genérica pelo merge.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  type CloudJson = any;
+  const cloudBaselineRef = useRef<Map<string, CloudJson>>(new Map()); // último estado da nuvem VISTO por este navegador
+  const cloudMetaRef = useRef<Map<string, string>>(new Map());  // updated_at da nuvem visto por último
+  const cloudLoadedRef = useRef(false);                         // só grava depois da 1ª leitura da nuvem
+  const syncChainRef = useRef<Map<string, Promise<void>>>(new Map()); // uma gravação por vez, por projeto
+  const isPullingRef = useRef(false);
+
+  // Incorpora ao estado local o que está na nuvem (merge base × local × nuvem).
+  // Síncrono: usa o estado MAIS RECENTE (projectsRef), então não há corrida com edições do usuário.
+  const absorbCloudData = (projectId: string, remoteData: CloudJson, lock?: { until: string | null; by: string | null }) => {
+    const current = projectsRef.current.find(p => p.id === projectId);
+    if (!current || !remoteData) return;
+
+    const baseline = cloudBaselineRef.current.get(projectId);
+    const localLight = buildCloudProject(current);
+    const merged: CloudJson = mergeProjectData(baseline, localLight, remoteData);
+
+    // O estado local passa a conter tudo o que está na nuvem: ela vira a nova base.
+    cloudBaselineRef.current.set(projectId, cloneJson(remoteData));
+
+    const lockChanged = !!lock && ((current.autopilotLockedUntil ?? null) !== lock.until || (current.autopilotLockedBy ?? null) !== lock.by);
+    if (!lockChanged && stableSignature(merged) === stableSignature(localLight)) return;
+
+    const absorbed = {
+      ...restoreCloudBlobs(merged, current),
+      autopilotLockedUntil: lock ? lock.until : current.autopilotLockedUntil,
+      autopilotLockedBy: lock ? lock.by : current.autopilotLockedBy,
+    } as Project;
+    const next = projectsRef.current.map(p => (p.id === projectId ? absorbed : p));
+    projectsRef.current = next;
+    setProjects(next);
+  };
+
+  const doSyncProjectToCloud = async (projectId: string) => {
+    if (!supabase || !userEmailRef.current) return;
+
+    // 1) O runner gravou depois da última vez que olhamos? Só então baixa a linha e mescla.
+    try {
+      const { data: lite } = await supabase.from('projects').select('updated_at').eq('id', projectId).maybeSingle();
+      const known = cloudMetaRef.current.get(projectId);
+      if (lite && !(lite.updated_at && known && lite.updated_at === known)) {
+        const { data: row, error } = await supabase.from('projects').select('data').eq('id', projectId).maybeSingle();
+        if (!error && row?.data) absorbCloudData(projectId, row.data);
+      }
+    } catch (e) {
+      console.warn('[Supabase] Não deu para ler a nuvem antes de gravar (gravando sem mesclar):', e);
+    }
+
+    // 2) Grava o estado já mesclado — e só se algo mudou em relação ao que a nuvem tem.
+    const current = projectsRef.current.find(p => p.id === projectId);
+    if (!current) return;
+    const toWrite = buildCloudProject(current);
+    const baseline = cloudBaselineRef.current.get(projectId);
+    if (baseline && stableSignature(toWrite) === stableSignature(baseline)) return;
+
+    const { data: saved, error } = await supabase.from('projects').upsert({
+      id: projectId,
+      user_email: userEmailRef.current,
+      data: toWrite,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'id' }).select('updated_at');
+    if (error) throw error; // antes o erro era ignorado e o projeto era marcado como "sincronizado"
+
+    cloudBaselineRef.current.set(projectId, cloneJson(toWrite));
+    const savedStamp = (saved as CloudJson)?.[0]?.updated_at;
+    if (savedStamp) cloudMetaRef.current.set(projectId, savedStamp);
+  };
+
+  // Serializa as gravações de um mesmo projeto (a debounced e a imediata não se atropelam).
+  const syncProjectToCloud = (projectId: string): Promise<void> => {
+    const previous = syncChainRef.current.get(projectId) || Promise.resolve();
+    const run = previous.catch(() => {}).then(() => doSyncProjectToCloud(projectId));
+    syncChainRef.current.set(projectId, run);
+    run.then(() => {}, () => {}).then(() => {
+      if (syncChainRef.current.get(projectId) === run) syncChainRef.current.delete(projectId);
+    });
+    return run;
+  };
+
+  // Traz da nuvem o que a automação fez (vídeo novo, fase, ideias) sem recarregar a página.
+  // Consulta leve (id + updated_at); só baixa a linha inteira dos projetos que mudaram.
+  const pullFromCloud = async () => {
+    if (!supabase || !userEmailRef.current || !cloudLoadedRef.current) return;
+    if (isPullingRef.current || syncChainRef.current.size > 0) return;
+    isPullingRef.current = true;
+    try {
+      const known = projectsRef.current.map(p => p.id);
+      if (known.length === 0) return;
+
+      const { data: metas, error } = await supabase.from('projects').select('id, updated_at').eq('user_email', userEmailRef.current);
+      if (error || !metas) return;
+      const changed = (metas as CloudJson[])
+        .filter(m => known.includes(m.id) && !(m.updated_at && cloudMetaRef.current.get(m.id) === m.updated_at))
+        .map(m => m.id);
+      if (changed.length === 0) return;
+
+      let res: CloudJson = await supabase.from('projects').select('id, data, updated_at, autopilot_locked_until, autopilot_locked_by').in('id', changed);
+      if (res.error) res = await supabase.from('projects').select('id, data, updated_at').in('id', changed);
+      if (res.error || !res.data) return;
+
+      for (const row of res.data as CloudJson[]) {
+        if (!row?.data) continue;
+        if (syncChainRef.current.has(row.id)) continue; // uma gravação começou enquanto baixávamos: o próximo ciclo cuida
+        const lock = 'autopilot_locked_until' in row
+          ? { until: row.autopilot_locked_until ?? null, by: row.autopilot_locked_by ?? null }
+          : undefined;
+        absorbCloudData(row.id, row.data, lock);
+        if (row.updated_at) cloudMetaRef.current.set(row.id, row.updated_at);
+      }
+    } catch (e) {
+      console.warn('[Supabase] Falha ao atualizar a partir da nuvem:', e);
+    } finally {
+      isPullingRef.current = false;
+    }
+  };
+
   const returnStatusToIdle = (delayMs = 5000) => {
     window.setTimeout(() => setAutoPilotStatus('Idle'), delayMs);
   };
@@ -115,11 +243,13 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   useEffect(() => {
     const loadProjects = async () => {
       setIsLoading(true);
+      cloudLoadedRef.current = false;
       try {
         // STEP 1: Load from IndexedDB immediately — this is always fast (<50ms)
         // The UI becomes usable right away with local data
         const localData: Project[] = (await get(storageKey)) || [];
         if (Array.isArray(localData) && localData.length > 0) {
+          projectsRef.current = localData; // síncrono: a gravação nunca pode enxergar um estado mais velho que a tela
           setProjects(localData);
         }
 
@@ -130,13 +260,13 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
         if (supabase && user?.email) {
           let { data, error } = await supabase
             .from("projects")
-            .select("data, autopilot_locked_until, autopilot_locked_by")
+            .select("data, updated_at, autopilot_locked_until, autopilot_locked_by")
             .eq("user_email", user.email);
 
           if (error && (error.message || '').includes('column')) {
             const fallback = await supabase
               .from("projects")
-              .select("data")
+              .select("data, updated_at")
               .eq("user_email", user.email);
             data = fallback.data as any;
             error = fallback.error;
@@ -149,49 +279,39 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
               autopilotLockedBy: row.autopilot_locked_by ?? null,
             }));
 
-            const mergeBlobs = (remote: Project, local: Project | undefined): Project => {
-              if (!local) return remote;
-              return {
-                ...remote,
-                videos: remote.videos.map((rv: Video) => {
-                  const lv = local.videos?.find((l: Video) => l.id === rv.id);
-                  if (!lv) return rv;
-                  return {
-                    ...rv,
-                    audioUrl: rv.audioUrl === '__has_audio__' ? lv.audioUrl : rv.audioUrl,
-                    backgroundMusicUrl: rv.backgroundMusicUrl === '__has_music__' ? lv.backgroundMusicUrl : rv.backgroundMusicUrl,
-                    thumbnailUrl: rv.thumbnailUrl === '__has_thumbnail__' ? lv.thumbnailUrl : rv.thumbnailUrl,
-                    visualScenes: rv.visualScenes?.map((rs: any) => {
-                      const ls = lv.visualScenes?.find((s: any) =>
-                        s.startTime === rs.startTime && s.segmentIndex === rs.segmentIndex
-                      );
-                      return {
-                        ...rs,
-                        imageUrl: rs.imageUrl === '__has_image__' && ls?.imageUrl ? ls.imageUrl : rs.imageUrl,
-                      };
-                    }),
-                  };
-                }),
-              };
+            // Base do merge de 3 vias: o que a nuvem tinha quando carregamos.
+            cloudBaselineRef.current = new Map();
+            cloudMetaRef.current = new Map();
+            data.forEach((row: any) => {
+              const rid = row?.data?.id;
+              if (!rid) return;
+              cloudBaselineRef.current.set(rid, cloneJson(row.data));
+              if (row.updated_at) cloudMetaRef.current.set(rid, row.updated_at);
+            });
+
+            // Remove duplicatas por id: versões anteriores deste merge gravavam
+            // cada vídeo criado pela automação duas vezes.
+            const dedupeVideos = (list: Video[] = []): Video[] => {
+              const seen = new Set<string>();
+              return list.filter((v: Video) => {
+                if (!v?.id) return true;
+                if (seen.has(v.id)) return false;
+                seen.add(v.id);
+                return true;
+              });
             };
 
-            const merged = remoteProjects.map(remote => {
-              const local = localData.find(l => l.id === remote.id);
-              const mergedProject = mergeBlobs(remote, local);
+            // A nuvem manda; blobs pesados (áudio/imagens) que só existem neste navegador são devolvidos.
+            // Os vídeos criados pelo runner já vêm em remote.videos — por isso NÃO são
+            // prependidos de novo (isso duplicava cada vídeo da automação).
+            const mergeBlobs = (remote: Project, local: Project | undefined): Project => {
+              const base: Project = { ...remote, videos: dedupeVideos(remote.videos) };
+              return local ? restoreCloudBlobs(base, local) : base;
+            };
 
-              // Bug fix: include videos that exist on Supabase (created by GitHub Actions runner)
-              // but don't exist in local IndexedDB. Without this, runner-created videos
-              // never appear in the UI — the user sees no new videos despite the workflow succeeding.
-              if (local) {
-                const localVideoIds = new Set(local.videos?.map((v: Video) => v.id) || []);
-                const runnerVideos = remote.videos.filter((rv: Video) => !localVideoIds.has(rv.id));
-                if (runnerVideos.length > 0) {
-                  mergedProject.videos = [...runnerVideos, ...(mergedProject.videos || [])];
-                }
-              }
-
-              return mergedProject;
-            });
+            const merged = remoteProjects.map(remote =>
+              mergeBlobs(remote, localData.find(l => l.id === remote.id))
+            );
 
             // Add local-only projects not yet on Supabase
             const remoteIds = new Set(remoteProjects.map((p: Project) => p.id));
@@ -203,16 +323,21 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
             // survive a page reload without needing another Supabase round-trip
             set(storageKey, finalProjects).catch(() => {});
 
+            projectsRef.current = finalProjects; // síncrono (ver acima)
             setProjects(finalProjects);
           }
         }
+        cloudLoadedRef.current = true;
       } catch (e) {
         console.error('Failed to load projects', e);
+        cloudLoadedRef.current = true;
         setIsLoading(false);
         try {
           const fallback = await get(storageKey);
-          setProjects(Array.isArray(fallback) ? fallback : []);
-        } catch { setProjects([]); }
+          const fallbackProjects: Project[] = Array.isArray(fallback) ? fallback : [];
+          projectsRef.current = fallbackProjects;
+          setProjects(fallbackProjects);
+        } catch { projectsRef.current = []; setProjects([]); }
       }
     };
     loadProjects();
@@ -241,27 +366,30 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       clearTimeout(supabaseSyncTimerRef.current);
     }
 
-    supabaseSyncTimerRef.current = window.setTimeout(async () => {
-      for (const project of projects) {
+    const flush = async () => {
+      // Antes da 1ª leitura da nuvem o estado local pode estar velho (IndexedDB): espera.
+      if (!cloudLoadedRef.current) {
+        supabaseSyncTimerRef.current = window.setTimeout(flush, 1000);
+        return;
+      }
+      // Sempre o estado MAIS RECENTE (não o capturado quando o timer foi armado).
+      for (const project of projectsRef.current) {
         try {
           const lightProject = buildCloudProject(project);
           const signature = JSON.stringify(lightProject);
           const previous = lastSyncSnapshotRef.current.get(project.id);
           if (previous === signature) continue; // unchanged — skip
 
-          await supabase.from('projects').upsert({
-            id: project.id,
-            user_email: user.email,
-            data: lightProject,
-            updated_at: new Date().toISOString(),
-          }, { onConflict: 'id' });
+          // Mescla com a nuvem e grava (não apaga o que a automação fez).
+          await syncProjectToCloud(project.id);
 
           lastSyncSnapshotRef.current.set(project.id, signature);
         } catch (err) {
           console.warn('[Supabase] Falha ao sincronizar projeto:', project.id, err);
         }
       }
-    }, 1500);
+    };
+    supabaseSyncTimerRef.current = window.setTimeout(flush, 1500);
 
     return () => {
       if (supabaseSyncTimerRef.current) {
@@ -270,6 +398,22 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
     };
   }, [projects, isLoading, storageKey, user?.email]);
+
+  // Mantém o app em dia com a automação (GitHub Actions): vídeos novos, fases e
+  // ideias aparecem sozinhos — a cada minuto com a aba visível e ao voltar para ela.
+  useEffect(() => {
+    if (isLoading || !supabase || !user?.email) return;
+    const tick = () => { if (document.visibilityState === 'visible') void pullFromCloud(); };
+    const interval = window.setInterval(tick, 60_000);
+    document.addEventListener('visibilitychange', tick);
+    window.addEventListener('focus', tick);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', tick);
+      window.removeEventListener('focus', tick);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoading, user?.email]);
 
   // Load persisted log
   useEffect(() => {
@@ -645,6 +789,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
         updated_at: new Date().toISOString(),
       }, { onConflict: 'id' }).then(({ error }) => {
         if (error) console.warn('[Supabase] Falha ao criar projeto remoto:', error);
+        else cloudBaselineRef.current.set(newProject.id, cloneJson(buildCloudProject(newProject)));
       });
     }
 
@@ -668,18 +813,13 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
         v.visualScenes?.some(s => s.imageUrl?.startsWith('data:'))
       ) ?? false;
 
-      if (!hasBlob && supabase && userEmailRef.current) {
+      if (!hasBlob && supabase && userEmailRef.current && cloudLoadedRef.current) {
         const project = updated.find(p => p.id === id);
         if (project) {
-          const lightProject = buildCloudProject(project);
-          supabase.from('projects').upsert({
-            id: project.id,
-            user_email: userEmailRef.current,
-            data: lightProject,
-            updated_at: new Date().toISOString(),
-          }, { onConflict: 'id' }).then(({ error }) => {
-            if (error) console.warn('[Supabase] updateProject sync failed:', error.message);
-          });
+          // Passa pelo merge com a nuvem (o runner pode ter gravado desde a última leitura).
+          syncProjectToCloud(project.id).catch((error: CloudJson) =>
+            console.warn('[Supabase] updateProject sync failed:', error?.message || error)
+          );
         }
       }
 
@@ -758,6 +898,8 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const deleteProject = (id: string) => {
     setProjects(prev => prev.filter(p => p.id !== id));
     lastSyncSnapshotRef.current.delete(id);
+    cloudBaselineRef.current.delete(id);
+    cloudMetaRef.current.delete(id);
 
     // Also delete from Supabase so the project doesn't re-sync on next load.
     // Without this, the load effect merges the stale remote row back in and
