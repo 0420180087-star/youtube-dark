@@ -7,6 +7,7 @@
 import { GoogleGenAI, Type, Modality, HarmCategory, HarmBlockThreshold, ThinkingLevel } from "@google/genai";
 import { ScriptData, GenerateScriptParams, VideoMetadata, ScriptSegment } from "../types";
 import { decryptData } from "./securityService";
+import { buildIdeasPrompt } from "./ideaEngine";
 
 // =============================================
 // HELPERS
@@ -512,38 +513,14 @@ function repairJson(jsonStr: string): string {
 
 export interface VideoIdea { topic: string; context: string; specificContext?: string; }
 
-export const generateVideoIdeas = async (channelTheme: string, description: string, tone: string = 'Engaging', language: string = 'English', excludeTopics: string[] = [], libraryContext: string = '', freshAngle: string = ''): Promise<VideoIdea[]> => {
+export const generateVideoIdeas = async (channelTheme: string, description: string, tone: string = 'Engaging', language: string = 'English', excludeTopics: string[] = [], libraryContext: string = '', freshAngle: string = '', channelMemory: string = ''): Promise<VideoIdea[]> => {
     return executeGeminiRequest(async (ai) => {
-        let exclusionsText = "";
-        if (excludeTopics.length > 0) {
-            const recentExclusions = excludeTopics.slice(-25);
-            exclusionsText = `ALREADY COVERED (avoid repeating these exact topics): ${JSON.stringify(recentExclusions)}. Explore completely different angles and subjects.`;
-        }
-        const freshAngleText = freshAngle
-            ? `CREATIVE DIRECTION FOR THIS BATCH: Focus your ideas around the angle of "${freshAngle}". This will help generate fresh perspectives not covered before.`
-            : '';
-        let libraryPrompt = "";
-        if (libraryContext) { 
-            libraryPrompt = `CHANNEL KNOWLEDGE BASE & REFERENCES:\n--------------------------------------------------\n${libraryContext.substring(0, 15000)}\n--------------------------------------------------\n
-            INSTRUCTIONS FOR REFERENCES:
-            - If you see [YOUTUBE_REFERENCE_CHANNEL], these are channels that the user likes. Analyze their titles, style, and themes from the provided context/URL and adapt the "vibe" to our channel.
-            - Use other [TEXT], [LINK], or [BOOK] items as factual source material for the ideas.`; 
-        }
-        const clickbaitStrategy = `
-        CLICKBAIT STRATEGY (Hybrid Type 1 & Type 2):
-        - Type 1 (Curiosity Gap): Create a massive information gap. Use "The Secret...", "What they didn't tell you...", "The truth about...".
-        - Type 2 (Extreme/Polarizing): Use strong emotional hooks or consequences. "I Regret This", "The End of...", "Don't Do This", "This Changed Everything".
-        - HYBRID GOAL: Combine both. Create a mystery with a high-stakes consequence.
-        `;
-
-        const prompt = `You are a YouTube Strategist for a channel about "${channelTheme}". Channel Description: "${description || 'General niche content'}". Target Narrative Tone: "${tone}". Target Language: "${language}" (Write the topics and context strictly in this language). ${libraryPrompt} ${exclusionsText} ${freshAngleText}
-        Generate 4 unique, high-potential, click-worthy video ideas that fit this channel. 
-        ${clickbaitStrategy}
-        The ideas MUST reflect the specified Tone (e.g., if tone is 'Dark', use mysterious vocabulary; if 'Tech', use modern/crisp vocabulary). 
-        For each idea provide: 
-        1. A catchy 'topic' (Video Title). Must be in ${language}. 
-        2. A 'context' (A brief 1-2 sentence summary for the idea card). Must be in ${language}.
-        3. A 'specificContext' (A detailed, paragraph-long explanation including specific plot points, key details to cover, or a unique angle to explore. This will be used to guide the script generator). Must be in ${language}.`;
+        // Prompt montado em ideaEngine.ts (fonte única, compartilhada com o runner
+        // headless). `channelMemory` é opcional: sem ele o prompt é o mesmo de sempre.
+        const prompt = buildIdeasPrompt({
+            channelTheme, description, tone, language, excludeTopics,
+            libraryContext, freshAngle, channelMemory,
+        });
         
         const response = await ai.models.generateContent({ 
             model: "gemini-2.5-flash", 
