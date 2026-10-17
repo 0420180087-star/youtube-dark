@@ -14,6 +14,15 @@ import { spawn } from 'child_process';
 
 const streamPipeline = promisify(pipeline);
 
+// Cada transição (xfade) faz dois clipes se sobreporem por este tempo, ENCURTANDO a linha do
+// tempo. Para o vídeo final durar exatamente o planejado, cada clipe (menos o último) é
+// renderizado CROSSFADE_SECONDS mais longo (ver renderedDuration em renderVideo).
+export const CROSSFADE_SECONDS = 0.4;
+
+// Folga depois da última palavra da narração: o vídeo SEMPRE dura pelo menos
+// (narração + folga), e o `-shortest` do mix encerra no fim do áudio.
+const NARRATION_TAIL_SECONDS = 0.25;
+
 // ─── Download file with retries and validation ───────────────────────────────
 export async function downloadFile(url, destPath, retries = 3) {
   if (/^data:/i.test(url)) {
@@ -156,9 +165,13 @@ function trimVideo(inputPath, outputPath, duration) {
 }
 
 // ─── Concatenate clips with crossfade transitions ────────────────────────────
-export function concatenateWithCrossfade(clipPaths, outputPath, crossfadeDuration = 0.5) {
+export function concatenateWithCrossfade(clipPaths, outputPath, crossfadeDuration = 0.5, { minTotalDuration = 0 } = {}) {
   return new Promise((resolve, reject) => {
     if (clipPaths.length === 1) {
+      if (minTotalDuration > 0) {
+        // Um clipe só: o simpleConcat reencoda e completa a duração se faltar.
+        return simpleConcat(clipPaths, outputPath, { minTotalDuration }).then(resolve, reject);
+      }
       // Single clip — just copy it
       fs.copyFileSync(clipPaths[0], outputPath);
       return resolve();
@@ -179,13 +192,22 @@ export function concatenateWithCrossfade(clipPaths, outputPath, crossfadeDuratio
       for (let i = 1; i < clipPaths.length; i++) {
         const safeXfade = Math.max(0.15, Math.min(crossfadeDuration, Math.min(dur[i - 1], dur[i]) * 0.4));
         const offset = Math.max(0, timeline - safeXfade);
-        const nextStream = i === clipPaths.length - 1 ? '[outv]' : `[v${i}]`;
+        const nextStream = i === clipPaths.length - 1 ? '[vend]' : `[v${i}]`;
         filterComplex += `${currentStream}[${i}:v]xfade=transition=fade:duration=${safeXfade.toFixed(3)}:offset=${offset.toFixed(3)}${nextStream};`;
         currentStream = nextStream;
         timeline = offset + safeXfade + dur[i] - safeXfade; // = offset + dur[i]
       }
 
-      filterComplex = filterComplex.replace(/;$/, '');
+      // A linha do tempo termina em `timeline` s. Se a narração for mais longa, congela o último
+      // quadro pelo tempo que falta: o vídeo NUNCA pode acabar antes da fala (o -shortest do
+      // mix cortaria a narração no meio da frase).
+      const pad = minTotalDuration > timeline + 0.05 ? minTotalDuration - timeline : 0;
+      if (pad > NARRATION_TAIL_SECONDS + 0.1) {
+        console.log(`  ⏱️ Vídeo (${timeline.toFixed(1)}s) mais curto que a narração (${(minTotalDuration - NARRATION_TAIL_SECONDS).toFixed(1)}s) — estendendo o último quadro em ${pad.toFixed(1)}s para não cortar a fala`);
+      }
+      filterComplex += pad > 0
+        ? `[vend]tpad=stop_mode=clone:stop_duration=${pad.toFixed(3)}[outv]`
+        : '[vend]null[outv]';
 
       cmd
         .complexFilter(filterComplex)
@@ -203,7 +225,7 @@ export function concatenateWithCrossfade(clipPaths, outputPath, crossfadeDuratio
         .on('error', (err) => {
           // Fallback: simple concat without crossfade
           console.warn('  ⚠️ Crossfade failed, using simple concat:', err.message);
-          simpleConcat(clipPaths, outputPath).then(resolve).catch(reject);
+          simpleConcat(clipPaths, outputPath, { minTotalDuration }).then(resolve).catch(reject);
         })
         .run();
     }).catch(reject);
@@ -211,18 +233,30 @@ export function concatenateWithCrossfade(clipPaths, outputPath, crossfadeDuratio
 }
 
 // ─── Simple concat fallback (re-encode: stream copy trava com streams diferentes) ──
-export function simpleConcat(clipPaths, outputPath) {
+export function simpleConcat(clipPaths, outputPath, { minTotalDuration = 0 } = {}) {
   return new Promise((resolve, reject) => {
     const listFile = outputPath + '.txt';
     fs.writeFileSync(listFile, clipPaths.map(p => `file '${path.resolve(p)}'`).join('\n'));
-    ffmpeg()
-      .input(listFile)
-      .inputOptions(['-f', 'concat', '-safe', '0'])
-      .outputOptions(['-c:v', 'libx264', '-preset', 'fast', '-crf', '20', '-pix_fmt', 'yuv420p', '-r', '30', '-an'])
-      .output(outputPath)
-      .on('end', () => { try { fs.unlinkSync(listFile); } catch {} resolve(); })
-      .on('error', reject)
-      .run();
+    Promise.all(clipPaths.map(p => getVideoDuration(p))).then((durations) => {
+      // Mesma regra do crossfade: se o vídeo ficar mais curto que a narração, congela o último quadro.
+      const total = durations.reduce((sum, d) => sum + (Number(d) || 0), 0);
+      const pad = minTotalDuration > total + 0.05 ? minTotalDuration - total : 0;
+      const cmd = ffmpeg()
+        .input(listFile)
+        .inputOptions(['-f', 'concat', '-safe', '0']);
+      if (pad > 0) {
+        if (pad > NARRATION_TAIL_SECONDS + 0.1) {
+          console.log(`  ⏱️ Vídeo (${total.toFixed(1)}s) mais curto que a narração (${(minTotalDuration - NARRATION_TAIL_SECONDS).toFixed(1)}s) — estendendo o último quadro em ${pad.toFixed(1)}s`);
+        }
+        cmd.videoFilter(`tpad=stop_mode=clone:stop_duration=${pad.toFixed(3)}`);
+      }
+      cmd
+        .outputOptions(['-c:v', 'libx264', '-preset', 'fast', '-crf', '20', '-pix_fmt', 'yuv420p', '-r', '30', '-an'])
+        .output(outputPath)
+        .on('end', () => { try { fs.unlinkSync(listFile); } catch {} resolve(); })
+        .on('error', reject)
+        .run();
+    }).catch(reject);
   });
 }
 
@@ -297,7 +331,7 @@ function mixAudio(videoPath, voicePath, musicPath, outputPath, narrationSpeed = 
 }
 
 // ─── Main render function ─────────────────────────────────────────────────────
-export async function renderVideo({ visuals, segments, audioBase64, audioMimeType = 'audio/pcm', musicUrl, thumbnailBase64, narrationSpeed = 1, tmpDir }) {
+export async function renderVideo({ visuals, segments, audioBase64, audioMimeType = 'audio/pcm', musicUrl, thumbnailBase64, narrationSpeed = 1, audioDurationSeconds = 0, tmpDir }) {
   fs.mkdirSync(tmpDir, { recursive: true });
 
   // { index, path } for every scene that ended up with SOME real content
@@ -310,6 +344,12 @@ export async function renderVideo({ visuals, segments, audioBase64, audioMimeTyp
     const segment = segments[i] || segments[segments.length - 1] || {};
     return Math.max(2, Number(visual?.duration) || Number(segment?.estimatedDuration) || 5);
   };
+
+  // Duração com que o clipe é de fato RENDERIZADO: o crossfade com o próximo clipe "come"
+  // CROSSFADE_SECONDS da linha do tempo, então todo clipe (menos o último) ganha esse tempo a
+  // mais — assim o vídeo final dura exatamente o que foi planejado (antes perdia ~0,4 s por
+  // transição, cortando o final da narração).
+  const renderedDuration = (i) => clipDuration(i) + (i < visuals.length - 1 ? CROSSFADE_SECONDS : 0);
 
   const borrowNeighbor = (i, outPath) => {
     if (resolvedClips.length === 0) return false;
@@ -327,7 +367,7 @@ export async function renderVideo({ visuals, segments, audioBase64, audioMimeTyp
 
   for (let i = 0; i < visuals.length; i++) {
     const visual = visuals[i];
-    const duration = clipDuration(i);
+    const duration = renderedDuration(i);
     const outPath = path.join(tmpDir, `clip_${i}.mp4`);
 
     if (!visual?.url) {
@@ -400,7 +440,7 @@ export async function renderVideo({ visuals, segments, audioBase64, audioMimeTyp
     for (let i = 0; i < visuals.length; i++) {
       const outPath = path.join(tmpDir, `clip_${i}.mp4`);
       try {
-        await makePlaceholderClip(outPath, clipDuration(i), i);
+        await makePlaceholderClip(outPath, renderedDuration(i), i);
         resolvedClips.push({ index: i, path: outPath });
       } catch (e2) { console.warn(`  ⚠️ Placeholder do clipe ${i + 1} falhou: ${e2.message}`); }
     }
@@ -410,11 +450,6 @@ export async function renderVideo({ visuals, segments, audioBase64, audioMimeTyp
   const processedClips = resolvedClips.map(c => c.path);
 
   if (processedClips.length === 0) throw new Error('Nenhum clipe processado com sucesso');
-
-  // Concatenate all clips with crossfade transitions
-  console.log(`  🔗 Concatenando ${processedClips.length} clipes com crossfade...`);
-  const concatPath = path.join(tmpDir, 'concat.mp4');
-  await concatenateWithCrossfade(processedClips, concatPath, 0.4);
 
   // Save narration audio
   console.log('  🎙️ Adicionando narração...');
@@ -448,6 +483,24 @@ export async function renderVideo({ visuals, segments, audioBase64, audioMimeTyp
       })
       .run();
   });
+
+  // Duração REAL da narração (já na velocidade final). O vídeo precisa durar pelo menos isso:
+  // antes ele durava só a soma dos clipes planejados e o -shortest cortava a fala restante.
+  const narrationSpeedUsed = Math.max(1, Math.min(1.4, Number(narrationSpeed) || 1));
+  const narrationRaw = Number(await getVideoDuration(voiceConvPath)) || Number(audioDurationSeconds) || 0;
+  const narrationSeconds = narrationRaw / narrationSpeedUsed;
+  const minTotalDuration = narrationSeconds > 0 ? narrationSeconds + NARRATION_TAIL_SECONDS : 0;
+
+  // Concatenate all clips with crossfade transitions
+  console.log(`  🔗 Concatenando ${processedClips.length} clipes com crossfade...`);
+  const concatPath = path.join(tmpDir, 'concat.mp4');
+  await concatenateWithCrossfade(processedClips, concatPath, CROSSFADE_SECONDS, { minTotalDuration });
+
+  const concatSeconds = Number(await getVideoDuration(concatPath)) || 0;
+  console.log(`  ⏱️ Duração: vídeo ${concatSeconds.toFixed(1)}s | narração ${narrationSeconds.toFixed(1)}s`);
+  if (narrationSeconds > 0 && concatSeconds + 0.1 < narrationSeconds) {
+    console.warn(`  ⚠️ O vídeo (${concatSeconds.toFixed(1)}s) ficou mais curto que a narração (${narrationSeconds.toFixed(1)}s) — o final da fala pode ser cortado`);
+  }
 
   // Background music: accept either a remote URL or a local file path already on disk
   let musicPath = null;
