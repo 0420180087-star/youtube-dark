@@ -40,6 +40,14 @@ import {
   backfillIdeaVideoLinks,
   FRESH_ANGLES,
 } from '../src/services/ideaEngine.ts';
+import {
+  getScriptBudget,
+  countScriptWords,
+  isScriptOverBudget,
+  buildCondensePrompt,
+  parseCondensedScript,
+  WORDS_PER_MINUTE,
+} from '../src/services/scriptBudget.ts';
 
 // --- ENV ---
 const {
@@ -1074,12 +1082,8 @@ async function topUpBrainstorm(projectId, data, persistState) {
 async function stepScript(topic, projectData, specificContext = '') {
   log('📝', 'Step 2: Generating script...');
   
-  const dur = (projectData.defaultDuration || 'Standard (5-8 min)').toLowerCase();
-  let minWords, maxWords, segments;
-  if (dur.includes('short') || dur.includes('< 3')) { minWords = 100; maxWords = 450; segments = 4; }
-  else if (dur.includes('long') || dur.includes('10-15')) { minWords = 1500; maxWords = 2250; segments = 12; }
-  else if (dur.includes('deep') || dur.includes('20+')) { minWords = 2250; maxWords = 3000; segments = 16; }
-  else { minWords = 750; maxWords = 1200; segments = 7; }
+  // Orçamento de palavras por duração (src/services/scriptBudget.ts — mesma tabela de sempre).
+  const { minWords, maxWords, segments } = getScriptBudget(projectData.defaultDuration);
 
   // Conhecimento do canal: o ângulo escolhido no Brainstorm e a Biblioteca (como no app).
   const angleBlock = specificContext
@@ -1120,11 +1124,57 @@ Return JSON with this structure:
   return script;
 }
 
+// Quantas vezes pedir à IA para condensar um roteiro que estourou o limite de palavras.
+const SCRIPT_CONDENSE_ATTEMPTS = 2;
+
+/**
+ * Garante que o roteiro CAIBA na duração-alvo ANTES de ser narrado. O Gemini nem sempre obedece
+ * "entre N e M palavras": um roteiro de 10 min para um alvo de 3 min era narrado por inteiro e
+ * depois cortado no meio da frase na hora de montar o vídeo. Se passar do limite, pede à IA para
+ * CONDENSAR (mantendo gancho, fatos principais e um final de verdade) — nunca corta o texto.
+ * Se a condensação falhar, o roteiro original é mantido e narrado por INTEIRO (o vídeo fica um
+ * pouco mais longo que o alvo, mas nunca é cortado).
+ */
+async function enforceScriptBudget(script, topic, projectData) {
+  const budget = getScriptBudget(projectData.defaultDuration);
+  let best = script;
+  let words = countScriptWords(best);
+
+  for (let attempt = 1; attempt <= SCRIPT_CONDENSE_ATTEMPTS && isScriptOverBudget(best, budget); attempt++) {
+    log('✂️', `Roteiro com ${words} palavras (~${(words / WORDS_PER_MINUTE).toFixed(1)} min) acima do limite de ${budget.maxWords} para "${projectData.defaultDuration || 'Standard (5-8 min)'}" — condensando (tentativa ${attempt}/${SCRIPT_CONDENSE_ATTEMPTS})...`);
+    try {
+      const prompt = buildCondensePrompt({ script: best, budget, topic, language: projectData.language, tone: projectData.defaultTone });
+      const raw = await geminiWithRetry(() => geminiGenerateJSON(prompt, 16384));
+      const candidate = parseCondensedScript(raw, best);
+      if (!candidate) {
+        log('⚠️', 'Condensação devolveu um formato inválido — tentando de novo / mantendo o roteiro atual.');
+        continue;
+      }
+      const candidateWords = countScriptWords(candidate);
+      log('✂️', `  Versão condensada: ${candidateWords} palavras (era ${words}).`);
+      if (candidateWords < words) { best = candidate; words = candidateWords; }
+    } catch (e) {
+      log('⚠️', `Condensação do roteiro falhou (${e.message}) — mantendo o roteiro atual, que será narrado por inteiro.`);
+      break;
+    }
+  }
+
+  if (isScriptOverBudget(best, budget)) {
+    log('⚠️', `Roteiro segue com ${words} palavras (limite ${budget.maxWords}). Será narrado POR INTEIRO: o vídeo fica um pouco mais longo que o alvo, mas NUNCA é cortado.`);
+  } else {
+    log('✅', `Roteiro dentro do limite: ${words} palavras (~${(words / WORDS_PER_MINUTE).toFixed(1)} min).`);
+  }
+  return best;
+}
+
 /**
  * 🎙️ Step 3: Generate voice narration for ALL segments using Gemini TTS.
  * Concatenates all segment audio into a single base64 buffer.
  * Returns the combined audio as a base64 string ready for the renderer.
  */
+// PCM bruto do TTS: 24 kHz, mono, 16 bits → 48.000 bytes por segundo.
+const PCM_BYTES_PER_SECOND = 24000 * 2;
+
 async function stepVoice(script, projectData) {
   log('🎙️', 'Step 3: Generating voice narration...');
 
@@ -1136,6 +1186,9 @@ async function stepVoice(script, projectData) {
   if (segments.length === 0) throw new Error('No segments in script for TTS');
 
   const audioChunks = [];
+  // Duração REAL de áudio de cada segmento (inclui a pausa depois dele). É ela — e não a
+  // estimativa da IA — que define quanto tempo de vídeo cada segmento precisa.
+  const segmentSeconds = new Array(segments.length).fill(0);
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'autopost_tts_'));
 
   try {
@@ -1154,11 +1207,13 @@ async function stepVoice(script, projectData) {
 
       const normalizedPcm = await normalizeAudioChunkToPcm(Buffer.from(arrayBuffer), 'audio/pcm', tmpDir, i);
       audioChunks.push(normalizedPcm);
+      segmentSeconds[i] = normalizedPcm.length / PCM_BYTES_PER_SECOND;
 
       // Small delay between segments to avoid rate limits
       if (i < segments.length - 1) {
         const silence = Buffer.alloc(Math.floor(24000 * 2 * 0.35));
         audioChunks.push(silence);
+        segmentSeconds[i] += silence.length / PCM_BYTES_PER_SECOND;
         await new Promise(r => setTimeout(r, 2000));
       }
     }
@@ -1170,8 +1225,9 @@ async function stepVoice(script, projectData) {
     const combinedBase64 = combined.toString('base64');
     const mimeType = 'audio/pcm';
 
-    log('✅', `Voice generated: ${(segments.length)} segments, ${(combined.length / 1024 / 1024).toFixed(1)}MB total, normalized=${mimeType}`);
-    return { audioBase64: combinedBase64, mimeType };
+    const totalSeconds = combined.length / PCM_BYTES_PER_SECOND;
+    log('✅', `Voice generated: ${(segments.length)} segments, ${(combined.length / 1024 / 1024).toFixed(1)}MB total, ${totalSeconds.toFixed(1)}s de narração, normalized=${mimeType}`);
+    return { audioBase64: combinedBase64, mimeType, segmentSeconds, totalSeconds };
   } finally {
     try { cleanupTmp(tmpDir); } catch {}
   }
@@ -1190,7 +1246,7 @@ const VISUAL_CONCURRENCY = 3;
 // compartilhado por TODAS as chamadas de rede do runner).
 
 
-async function stepVisuals(script, projectData, existingScenes) {
+async function stepVisuals(script, projectData, existingScenes, segmentSeconds) {
   log('🎨', 'Step 4: Searching visuals...');
 
   // Node has no localStorage — inject the keys loadUserKeys() already
@@ -1209,10 +1265,21 @@ async function stepVisuals(script, projectData, existingScenes) {
   // richer Pexels queries.
   const slots = [];
   let cursorTime = 0;
+  // Com a narração já gerada, cada segmento dura o que o ÁUDIO dura. A estimativa da IA
+  // (estimatedDuration) errava — principalmente em roteiros longos — e o vídeo terminava antes
+  // da fala. Ela só é usada se não houver áudio medido.
+  const hasRealDurations = Array.isArray(segmentSeconds) && segmentSeconds.length === script.segments.length;
   for (let i = 0; i < script.segments.length; i++) {
     const seg = script.segments[i];
     const prompts = getSegmentVisualPrompts(seg);
-    const segDur = Math.max(2, Number(seg.estimatedDuration) || 5);
+    let segDur;
+    if (hasRealDurations) {
+      const real = Number(segmentSeconds[i]) || 0;
+      if (real <= 0.05) continue; // segmento sem áudio: não precisa de visuais
+      segDur = Math.max(2, real);
+    } else {
+      segDur = Math.max(2, Number(seg.estimatedDuration) || 5);
+    }
     // No per-segment cap: however many slots it takes to keep every slot at
     // or under MAX_MEDIA_DUR is how many it gets. A previous fixed cap of 8
     // silently let a long segment's slots run longer than configured —
@@ -1266,8 +1333,15 @@ async function stepVisuals(script, projectData, existingScenes) {
     },
   });
 
-  log('✅', `Found ${scenes.length} visual scenes (max ${MAX_MEDIA_DUR}s per media)`);
-  return scenes;
+  // Cenas reaproveitadas de um vídeo retomado mantêm a duração do plano ANTIGO: reaplica a do
+  // plano atual (as cenas voltam alinhadas aos slots, na mesma ordem).
+  const timedScenes = scenes.length === slots.length
+    ? scenes.map((sc, i) => ({ ...sc, startTime: slots[i].startTime, duration: slots[i].duration, segmentIndex: slots[i].segmentIndex }))
+    : scenes;
+
+  const plannedSeconds = timedScenes.reduce((sum, sc) => sum + (Number(sc.duration) || 0), 0);
+  log('✅', `Found ${timedScenes.length} visual scenes (max ${MAX_MEDIA_DUR}s per media, ${plannedSeconds.toFixed(1)}s no total${hasRealDurations ? ' — igual à narração real' : ' — pela estimativa do roteiro'})`);
+  return timedScenes;
 }
 
 
@@ -1344,7 +1418,7 @@ Return JSON:
   return metadata;
 }
 
-async function stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, projectData, audioMimeType = 'audio/pcm') {
+async function stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, projectData, audioMimeType = 'audio/pcm', audioSeconds = 0) {
   log('🎬', 'Step 7: Rendering video with FFmpeg...');
 
   const tmpDir = path.join(os.tmpdir(), `autopost_${Date.now()}`);
@@ -1361,7 +1435,8 @@ async function stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, pro
   const clipSegments = visuals.map((v) => ({ estimatedDuration: v.duration }));
 
   // 🎵 Step 6.5: Generate procedural ambience to match total video duration
-  const totalDuration = visuals.reduce((sum, v) => sum + (v.duration || 0), 0);
+  // A ambiência cobre o MAIOR entre os visuais e a narração (nunca acaba antes da fala).
+  const totalDuration = Math.max(visuals.reduce((sum, v) => sum + (v.duration || 0), 0), Number(audioSeconds) || 0);
   let musicPath = null;
   try {
     musicPath = path.join(tmpDir, 'ambience.m4a');
@@ -1379,6 +1454,7 @@ async function stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, pro
     audioMimeType: audioMimeType,
     musicUrl: musicPath,
     thumbnailBase64: thumbnailBase64 || null,
+    audioDurationSeconds: Number(audioSeconds) || 0,
     tmpDir,
   });
 
@@ -1934,6 +2010,8 @@ async function processProject(projectRow) {
       await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Gerando roteiro', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
       script = await stepScript(idea.topic, data, idea.specificContext || idea.context || '');
     }
+    // O roteiro precisa caber no alvo ANTES de narrar (senão a narração passa do vídeo e seria cortada).
+    script = await enforceScriptBudget(script, idea.topic, data);
     await updateRunnerVideo(projectId, data, videoId, { script, status: 'SCRIPTING' }, 'Script saved');
 
 
@@ -1943,6 +2021,8 @@ async function processProject(projectRow) {
     const voiceResult = await stepVoice(script, data);
     const audioBase64 = voiceResult.audioBase64;
     const audioMimeType = voiceResult.mimeType;
+    const narrationSeconds = voiceResult.totalSeconds || 0;
+    log('⏱️', `Narração real: ${Math.floor(narrationSeconds / 60)}m${String(Math.round(narrationSeconds % 60)).padStart(2, '0')}s (alvo: ${data.defaultDuration || 'Standard (5-8 min)'})`);
     await updateRunnerVideo(projectId, data, videoId, { audioUrl: '__runner_audio__', status: 'AUDIO_GENERATED' }, 'Voice state saved');
 
     // Step 4: Visuals — existing scenes from a resumed video are reused
@@ -1951,7 +2031,7 @@ async function processProject(projectRow) {
     // that failed, instead of all-or-nothing).
     currentStep = 'visuals';
     await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Buscando/gerando visuais', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
-    const scenes = await stepVisuals(script, data, isResume ? resumeVideo?.visualScenes : undefined);
+    const scenes = await stepVisuals(script, data, isResume ? resumeVideo?.visualScenes : undefined, voiceResult.segmentSeconds);
     await updateRunnerVideo(projectId, data, videoId, { visualScenes: scenes, status: 'VIDEO_GENERATED' }, 'Visuals saved');
 
     // Step 5: Thumbnail (optional — does not break pipeline)
@@ -1990,7 +2070,7 @@ async function processProject(projectRow) {
     // Step 7: Render Video (now receives audio!)
     currentStep = 'render';
     await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Renderizando vídeo no runner headless', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
-    const renderResult = await stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, data, audioMimeType);
+    const renderResult = await stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, data, audioMimeType, narrationSeconds);
 
     if (!data.scheduleSettings) data.scheduleSettings = {};
     data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
