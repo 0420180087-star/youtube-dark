@@ -12,6 +12,7 @@ import {
   generateDarkAmbience,
   generateThumbnail,
   generateComposedThumbnail,
+  generateGeminiThumbnail,
   decodeAudioData,
   mergeAudioBuffers,
   audioBufferToBase64,
@@ -389,36 +390,50 @@ export async function stepGenerateThumbnail(
   callbacks.onStepStart('thumbnail', 'Gerando thumbnail com clickbait...');
   const scriptSummary = script.segments.slice(0, 3).map((s: any) => s.narratorText).join(' ').slice(0, 500);
 
-  // A thumbnail NUNCA deve travar ou derrubar o pipeline: teto de 2 min e
-  // fallback silencioso. Tenta primeiro a versão composta (cena real do
-  // vídeo + gancho de clickbait sobreposto — a mesma composição que já
-  // existia só no editor manual); se isso falhar por completo, cai para o
-  // generateThumbnail() simples (foto sem texto, com seu próprio fallback
-  // sintético caso a IA falhe também).
+  // A thumbnail NUNCA deve travar ou derrubar o pipeline: teto por tentativa e
+  // fallback silencioso. Ordem:
+  //   1. Prompt-base faceless/clickbait, imagem INTEIRA pelo Gemini — a MESMA lógica do
+  //      GitHub Actions (100% automático) e do editor manual;
+  //   2. composição (cena real do vídeo + gancho sobreposto);
+  //   3. generateThumbnail() simples (foto sem texto, com seu próprio fallback sintético).
   let thumbnailUrl: string | undefined;
   try {
     thumbnailUrl = await Promise.race([
-      generateComposedThumbnail({
+      generateGeminiThumbnail({
         title: video.title,
-        tone: project.defaultTone,
-        scriptSummary,
-        script,
         channelTheme: project.channelTheme,
         language: project.language,
-        sceneImageUrls: video.visualScenes?.map(s => s.imageUrl),
+        script,
+        scriptSummary,
       }),
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error('thumbnail_step_timeout')), 120_000)),
     ]);
-  } catch (err: any) {
-    console.warn('[Pipeline] Thumbnail composta falhou, tentando versão simples:', err?.message);
+  } catch (errGemini: unknown) {
+    console.warn('[Pipeline] Thumbnail Gemini (prompt-base) falhou, tentando a composição:', errGemini instanceof Error ? errGemini.message : errGemini);
     try {
       thumbnailUrl = await Promise.race([
-        generateThumbnail(video.title, project.defaultTone, scriptSummary, script, project.channelTheme, project.library),
+        generateComposedThumbnail({
+          title: video.title,
+          tone: project.defaultTone,
+          scriptSummary,
+          script,
+          channelTheme: project.channelTheme,
+          language: project.language,
+          sceneImageUrls: video.visualScenes?.map(s => s.imageUrl),
+        }),
         new Promise<never>((_, rej) => setTimeout(() => rej(new Error('thumbnail_step_timeout')), 120_000)),
       ]);
-    } catch (err2: unknown) {
-      console.warn('[Pipeline] Thumbnail simples também falhou, seguindo sem ela:', err2 instanceof Error ? err2.message : err2);
-      thumbnailUrl = undefined;
+    } catch (err: any) {
+      console.warn('[Pipeline] Thumbnail composta falhou, tentando versão simples:', err?.message);
+      try {
+        thumbnailUrl = await Promise.race([
+          generateThumbnail(video.title, project.defaultTone, scriptSummary, script, project.channelTheme, project.library),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error('thumbnail_step_timeout')), 120_000)),
+        ]);
+      } catch (err2: unknown) {
+        console.warn('[Pipeline] Thumbnail simples também falhou, seguindo sem ela:', err2 instanceof Error ? err2.message : err2);
+        thumbnailUrl = undefined;
+      }
     }
   }
 
