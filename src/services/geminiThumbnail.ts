@@ -22,6 +22,13 @@
 import { Modality, HarmCategory, HarmBlockThreshold } from '@google/genai';
 import { executeGeminiRequest, isQuotaError } from './geminiCore';
 import { ScriptData } from '../types';
+import {
+    buildThumbnailBriefPrompt,
+    buildThumbnailImagePrompt,
+    buildFallbackThumbnailBrief,
+    parseThumbnailBrief,
+    type ThumbnailContext,
+} from './thumbnailPrompt';
 
 export type ThumbnailStyle = 1 | 2;
 
@@ -329,6 +336,161 @@ export const generateThumbnail = async (
         } catch { /* mantém o título */ }
         return generateCanvasThumbnail(headline, tone);
     }
+};
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PROMPT-BASE FACELESS — a thumbnail INTEIRA é criada pelo Gemini
+//
+// É a MESMA lógica usada pelo GitHub Actions (100% automático), pelo piloto
+// automático do navegador e pelo editor manual: um prompt-base único
+// (src/services/thumbnailPrompt.ts) preenchido com os dados do vídeo. O texto do
+// gancho, a seta, o círculo e a interrogação são desenhados pelo próprio Gemini.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface GeminiThumbnailOptions {
+    title: string;
+    channelTheme?: string;
+    language?: string;
+    /** Resumo explícito (opcional): sem ele sai da descrição/narração do roteiro. */
+    description?: string;
+    script?: ScriptData;
+    scriptSummary?: string;
+}
+
+/** 400 / INVALID_ARGUMENT: o modelo não aceitou algum parâmetro (ex.: imageConfig). */
+const isInvalidArgument = (err: unknown): boolean => {
+    const e = err as { status?: number; message?: string } | null;
+    return e?.status === 400 || /\b400\b|INVALID_ARGUMENT|imageConfig|aspect.?ratio/i.test(String(e?.message || ''));
+};
+
+type ImageModelResponse = {
+    candidates?: Array<{ content?: { parts?: Array<{ inlineData?: { mimeType?: string; data?: string } }> } }>;
+};
+
+/**
+ * Renderiza o prompt-base JÁ PRONTO. Diferente de renderImageFromPrompt(), NÃO acrescenta "no text":
+ * o texto do gancho faz parte da imagem. Pede 16:9 nativo (imageConfig); modelos que recusam o
+ * parâmetro são repetidos sem ele.
+ */
+const renderThumbnailFromBasePrompt = async (prompt: string): Promise<string> => {
+    return executeGeminiRequest(async (ai) => {
+        let lastError: unknown = null;
+
+        for (const modelName of IMAGE_MODELS) {
+            for (const withAspect of [true, false]) {
+                try {
+                    console.log(`[Thumbnail] 🖼️ Prompt-base → ${modelName}${withAspect ? ' (16:9 nativo)' : ''}`);
+                    const response = (await withTimeout(
+                        ai.models.generateContent({
+                            model: modelName,
+                            contents: { parts: [{ text: prompt }] },
+                            config: {
+                                responseModalities: [Modality.IMAGE, Modality.TEXT],
+                                safetySettings: SAFETY_SETTINGS,
+                                ...(withAspect ? { imageConfig: { aspectRatio: '16:9' } } : {}),
+                            },
+                        }),
+                        PER_MODEL_TIMEOUT_MS,
+                        `thumbnail_image_${modelName}`,
+                    )) as ImageModelResponse;
+                    const inline = response.candidates?.[0]?.content?.parts?.find((p) => p.inlineData)?.inlineData;
+                    if (inline?.data) return `data:${inline.mimeType || 'image/png'};base64,${inline.data}`;
+                    throw new Error(`Sem dados de imagem em ${modelName}`);
+                } catch (err: unknown) {
+                    if (isQuotaError(err)) throw err; // sobe para a rotação de chaves
+                    lastError = err;
+                    if (withAspect && isInvalidArgument(err)) continue; // repete o MESMO modelo sem imageConfig
+                    console.warn(`[Thumbnail] Erro em ${modelName}: ${err instanceof Error ? err.message : String(err)}. Tentando próximo...`);
+                    break;
+                }
+            }
+        }
+        throw lastError || new Error('Nenhum modelo de imagem disponível');
+    });
+};
+
+/**
+ * Deixa a imagem em 1280×720 JPEG (cover-fit) abaixo de 2 MB — o limite do YouTube.
+ * Se não der (sem canvas / erro), devolve a imagem original.
+ */
+const normalizeThumbnailDataUrl = async (dataUrl: string): Promise<string> => {
+    if (typeof document === 'undefined') return dataUrl;
+    try {
+        const img = await withTimeout(
+            new Promise<HTMLImageElement>((resolve, reject) => {
+                const im = new Image();
+                im.onload = () => resolve(im);
+                im.onerror = reject;
+                im.src = dataUrl;
+            }),
+            8_000,
+            'thumbnail_normalize',
+        );
+        const canvas = document.createElement('canvas');
+        canvas.width = 1280;
+        canvas.height = 720;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return dataUrl;
+        const scale = Math.max(1280 / img.width, 720 / img.height);
+        const w = img.width * scale;
+        const h = img.height * scale;
+        ctx.drawImage(img, (1280 - w) / 2, (720 - h) / 2, w, h);
+        for (const quality of [0.92, 0.85, 0.75, 0.6]) {
+            const out = canvas.toDataURL('image/jpeg', quality);
+            if (out.length * 0.75 <= 1_900_000) return out; // base64 → bytes
+        }
+        return canvas.toDataURL('image/jpeg', 0.5);
+    } catch {
+        return dataUrl;
+    }
+};
+
+/**
+ * Cria a thumbnail INTEIRA pelo Gemini com o prompt-base faceless/clickbait:
+ *   1. Briefing (Gemini texto): gancho, dica direta, dica visual e elemento central do vídeo
+ *      (se falhar, briefing local por tema — nunca fica campo vazio);
+ *   2. Prompt-base preenchido com tema, título, resumo e roteiro do vídeo;
+ *   3. Gemini imagem em 16:9 → normalizada para 1280×720 JPEG.
+ * Lança erro se a imagem não puder ser gerada (quem chama decide o fallback).
+ */
+export const generateGeminiThumbnail = async (opts: GeminiThumbnailOptions): Promise<string> => {
+    const ctx: ThumbnailContext = {
+        channelTheme: opts.channelTheme || '',
+        title: opts.title,
+        language: opts.language,
+        description: opts.description,
+        script: opts.script,
+        fallbackSummary: opts.scriptSummary,
+    };
+
+    const pipeline = async (): Promise<string> => {
+        let brief = buildFallbackThumbnailBrief(ctx);
+        try {
+            const text = await withTimeout(
+                executeGeminiRequest(async (ai) => {
+                    const response = await ai.models.generateContent({
+                        model: 'gemini-2.5-flash',
+                        contents: buildThumbnailBriefPrompt(ctx),
+                        config: { temperature: 0.9, responseMimeType: 'application/json' },
+                    });
+                    return response.text || '';
+                }),
+                PROMPT_TIMEOUT_MS,
+                'thumbnail_brief',
+            );
+            brief = parseThumbnailBrief(text, ctx);
+        } catch (err: unknown) {
+            console.warn(`[Thumbnail] Briefing via IA falhou (${err instanceof Error ? err.message : String(err)}). Usando briefing local.`);
+        }
+
+        const prompt = buildThumbnailImagePrompt(ctx, brief);
+        console.log(`[Thumbnail] 📝 Prompt-base pronto — gancho: "${brief.hookWord}" / "${brief.directHint}"`);
+        const raw = await withTimeout(renderThumbnailFromBasePrompt(prompt), RENDER_TOTAL_TIMEOUT_MS, 'thumbnail_render');
+        return normalizeThumbnailDataUrl(raw);
+    };
+
+    return withTimeout(pipeline(), THUMBNAIL_TOTAL_TIMEOUT_MS, 'thumbnail_pipeline');
 };
 
 
