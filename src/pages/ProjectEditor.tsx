@@ -9,7 +9,7 @@ import {
     generateDarkAmbience, decodeAudioData, mergeAudioBuffers, 
     audioBufferToBase64, generateThumbnail, generateVideoMetadata,
     generateSingleNarratorText, generateMissingNarratorTexts,
-    generateThumbnailHook, clearExhaustedKeys, cancelGeminiSession
+    generateThumbnailHook, generateGeminiThumbnail, clearExhaustedKeys, cancelGeminiSession
 } from '../services/geminiService';
 import { uploadVideoToYouTube } from '../services/youtubeService';
 import { buildSlotVisualPrompt, collectPexelsIds, getSegmentVisualPrompts } from '../services/visualSceneService';
@@ -975,6 +975,25 @@ export const ProjectEditor: React.FC = () => {
       setThumbnailError(null);
       try {
           const scriptSummary = video!.script!.segments.slice(0, 3).map(s => s.narratorText).join(" ").slice(0, 500);
+
+          // ── 0. PROMPT-BASE GEMINI (faceless/clickbait) ───────────────────
+          // A thumbnail INTEIRA criada pelo Gemini — a MESMA lógica do automático
+          // (GitHub Actions) e do piloto automático. Só se falhar (cota, bloqueio...)
+          // cai na composição abaixo (cena do vídeo + textos desenhados no canvas).
+          try {
+              const geminiThumb = await generateGeminiThumbnail({
+                  title: video!.title,
+                  channelTheme: project!.channelTheme,
+                  language: project!.language || 'Portuguese',
+                  script: video!.script,
+                  scriptSummary,
+              });
+              updateVideo(project!.id, video!.id, { thumbnailUrl: geminiThumb });
+              alert("✅ Thumbnail clickbait gerada com sucesso!");
+              return;
+          } catch (geminiErr: unknown) {
+              console.warn('[Thumbnail] Prompt-base Gemini falhou — usando a composição com a cena do vídeo:', geminiErr instanceof Error ? geminiErr.message : geminiErr);
+          }
 
           // ── 1. BACKGROUND: prefer a real scene image from the video ──────
           // A real frame from the video makes the thumbnail topic-specific and
