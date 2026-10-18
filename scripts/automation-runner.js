@@ -48,6 +48,12 @@ import {
   parseCondensedScript,
   WORDS_PER_MINUTE,
 } from '../src/services/scriptBudget.ts';
+import {
+  buildThumbnailBriefPrompt,
+  buildThumbnailImagePrompt,
+  buildFallbackThumbnailBrief,
+  parseThumbnailBrief,
+} from '../src/services/thumbnailPrompt.ts';
 
 // --- ENV ---
 const {
@@ -654,6 +660,28 @@ function runFfmpeg(args, label = 'ffmpeg') {
   });
 }
 
+// O YouTube aceita thumbnail de no máximo 2 MB e a recomendada é 1280x720. Converte QUALQUER imagem
+// do Gemini (PNG ou JPEG, 16:9 ou não) para 1280x720 JPEG (corte central) abaixo de ~1,9 MB.
+async function normalizeThumbnailImage(base64) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'thumb_'));
+  try {
+    const input = path.join(dir, 'in');
+    fs.writeFileSync(input, Buffer.from(base64, 'base64'));
+    for (const q of [2, 4, 7, 12]) { // -q:v do mjpeg: 2 = melhor qualidade
+      const out = path.join(dir, `out_${q}.jpg`);
+      await runFfmpeg(['-y', '-i', input, '-vf', 'scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720', '-frames:v', '1', '-q:v', String(q), out], 'thumbnail');
+      const buf = fs.readFileSync(out);
+      if (buf.length <= 1_900_000) return buf.toString('base64');
+    }
+    return base64;
+  } catch (e) {
+    log('⚠️', `Normalização da thumbnail falhou (${e.message}) — usando a imagem original`);
+    return base64;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function normalizeAudioChunkToPcm(audioBuffer, mimeType, tmpDir, index) {
   const inputPath = path.join(tmpDir, `tts_${index}`);
   const outputPath = path.join(tmpDir, `tts_${index}.pcm`);
@@ -782,12 +810,13 @@ async function geminiGenerateJSON(prompt, maxTokens = 4096) {
 // MODELO, não por tentativa. Cada modelo é tentado com a chave atual e, em erro
 // de cota, a chave entra em cooldown e o mesmo modelo é retentado com a próxima
 // chave pronta. 400/403/404 = modelo indisponível → próximo modelo.
-async function geminiGenerateImage(prompt) {
-  const IMAGE_MODELS = [
-    { model: 'imagen-3.0-generate-001', kind: 'imagen' },
-    { model: 'gemini-2.5-flash-image', kind: 'flash' },
-    { model: 'gemini-2.0-flash-preview-image-generation', kind: 'flash' },
-  ];
+async function geminiGenerateImage(prompt, { textInImage = false } = {}) {
+  const IMAGEN = { model: 'imagen-3.0-generate-001', kind: 'imagen' };
+  const FLASH_25 = { model: 'gemini-2.5-flash-image', kind: 'flash' };
+  const FLASH_20 = { model: 'gemini-2.0-flash-preview-image-generation', kind: 'flash' };
+  // Thumbnail com TEXTO escrito dentro da imagem: o gemini-2.5-flash-image desenha texto bem melhor
+  // que o Imagen 3, então ele vai primeiro. Cenas de vídeo (sem texto) mantêm a ordem original.
+  const IMAGE_MODELS = textInImage ? [FLASH_25, IMAGEN, FLASH_20] : [IMAGEN, FLASH_25, FLASH_20];
 
   const callModel = async ({ model, kind }) => {
     geminiRequestCount++;
@@ -804,18 +833,31 @@ async function geminiGenerateImage(prompt) {
       return res.data.predictions?.[0]?.bytesBase64Encoded || null;
     }
 
-    const res = await raceTimeout(
+    // Thumbnail: o prompt-base já é completo (formato, texto, estilo) e o 16:9 é pedido de forma
+    // nativa (imageConfig). Cena de vídeo: exatamente como antes.
+    const postFlash = (withAspect) => raceTimeout(
       axios.post(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
         {
-          contents: [{ parts: [{ text: `Generate a 16:9 cinematic image: ${prompt}` }] }],
-          generationConfig: { responseModalities: ['IMAGE', 'TEXT'] },
+          contents: [{ parts: [{ text: textInImage ? prompt : `Generate a 16:9 cinematic image: ${prompt}` }] }],
+          generationConfig: {
+            responseModalities: ['IMAGE', 'TEXT'],
+            ...(textInImage && withAspect ? { imageConfig: { aspectRatio: '16:9' } } : {}),
+          },
         },
         { timeout: NET_TIMEOUT.IMAGE }
       ),
       NET_TIMEOUT.IMAGE + 5_000,
       `Gemini (${model})`
     );
+    let res;
+    try {
+      res = await postFlash(true);
+    } catch (err) {
+      // Modelo que não aceita imageConfig (400): repete o MESMO modelo sem o parâmetro.
+      if (textInImage && err?.response?.status === 400) res = await postFlash(false);
+      else throw err;
+    }
     const parts = res.data.candidates?.[0]?.content?.parts || [];
     return parts.find((p) => p.inlineData?.data)?.inlineData?.data || null;
   };
@@ -1355,44 +1397,42 @@ function withStepTimeout(promise, ms, label) {
 }
 
 async function stepThumbnail(title, script, projectData) {
-  log('🖼️', 'Step 5: Generating thumbnail...');
+  log('🖼️', 'Step 5: Generating thumbnail (Gemini — prompt-base faceless/clickbait)...');
 
-  const toneStyle = getToneModifier(projectData.defaultTone);
-  const scriptSummary = script.segments
-    .slice(0, 3)
-    .map((s) => s.narratorText)
-    .join(' ')
-    .slice(0, 300);
+  // Mesmos campos do app e do piloto automático: tema, título, resumo e roteiro do vídeo
+  // (prompt-base único em src/services/thumbnailPrompt.ts).
+  const thumbCtx = {
+    channelTheme: projectData.channelTheme,
+    title,
+    language: projectData.language,
+    script,
+    fallbackSummary: (script?.segments || []).slice(0, 3).map((s) => s.narratorText).join(' ').slice(0, 500),
+  };
 
-  const prompt = `Generate a short clickbait text (max 5 words, in ${projectData.language || 'en'}) for a YouTube thumbnail about "${title}".
-Tone: ${projectData.defaultTone}. Channel niche: ${projectData.channelTheme}.
-Script summary: ${scriptSummary}
-Return JSON: { "clickbaitText": "...", "imagePrompt": "full prompt for thumbnail image generation" }`;
-
-  // Texto clickbait (25s de teto) — se falhar, deriva do título.
-  let result;
+  // 1) Briefing criativo (gancho, dica direta, dica visual, elemento central) — 25s de teto.
+  //    Se falhar, entra o briefing local por tema: a thumbnail nunca fica com campo vazio.
+  let brief;
   try {
-    result = await withStepTimeout(geminiWithRetry(() => geminiGenerateJSON(prompt)), 25000, 'thumb_text');
+    const raw = await withStepTimeout(geminiWithRetry(() => geminiGenerateJSON(buildThumbnailBriefPrompt(thumbCtx), 1024)), 25000, 'thumb_brief');
+    brief = parseThumbnailBrief(raw, thumbCtx);
   } catch (err) {
-    log('⚠️', `Texto de thumbnail falhou (${err.message}), derivando do título`);
-    result = {
-      clickbaitText: title.split(' ').slice(0, 4).join(' ').toUpperCase(),
-      imagePrompt: `dramatic scene about "${title}", one human face with extreme emotion looking at camera, ${toneStyle} atmosphere`,
-    };
+    log('⚠️', `Briefing da thumbnail falhou (${err.message}) — usando briefing local`);
+    brief = buildFallbackThumbnailBrief(thumbCtx);
   }
 
-  const fullPrompt = `YouTube thumbnail, ${toneStyle} style, text overlay "${result.clickbaitText}", ${result.imagePrompt}, high contrast, bold colors, professional design, 16:9 aspect ratio, no watermark`;
-
-  // Imagem: teto total de 100s. Estourando, segue sem imagem (não bloqueia).
+  // 2) Imagem INTEIRA pelo Gemini com o prompt-base preenchido — teto de 100s. Estourando, segue sem imagem.
+  const imagePrompt = buildThumbnailImagePrompt(thumbCtx, brief);
   let thumbnailBase64 = null;
   try {
-    thumbnailBase64 = await withStepTimeout(geminiGenerateImage(fullPrompt), 100000, 'thumb_image');
+    const raw = await withStepTimeout(geminiGenerateImage(imagePrompt, { textInImage: true }), 100000, 'thumb_image');
+    thumbnailBase64 = raw ? await normalizeThumbnailImage(raw) : null;
   } catch (err) {
     log('⚠️', `Imagem de thumbnail falhou (${err.message}) — seguindo sem ela`);
   }
 
-  log('✅', `Thumbnail: "${result.clickbaitText}" ${thumbnailBase64 ? '(image generated)' : '(text only, no image)'}`);
-  return { clickbaitText: result.clickbaitText, imagePrompt: fullPrompt, thumbnailBase64 };
+  const clickbaitText = `${brief.hookWord} ${brief.directHint}`.trim();
+  log('✅', `Thumbnail: "${brief.hookWord}" / "${brief.directHint}" ${thumbnailBase64 ? '(image generated)' : '(no image)'}`);
+  return { clickbaitText, imagePrompt, thumbnailBase64 };
 }
 
 
