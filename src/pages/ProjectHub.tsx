@@ -7,6 +7,7 @@ import { ProjectStatus, VideoDuration, ProjectIdea, LibraryItemType, VideoFormat
 import { generateVoiceover, decodeAudioData, generateVideoIdeas, VideoIdea } from '../services/geminiService';
 import { calculateNextRunTime } from '../services/automationService';
 import { isUsableImageUrl } from '../services/projectSync';
+import { ProjectIdChip, ForceRunPanel } from '../components/ProjectIdTools';
 import { 
     ArrowLeft, Film, Clock, FileText, Mic, Image as ImageIcon, 
     MoreVertical, Play, Calendar, Save, Trash2, AlertOctagon, 
@@ -516,6 +517,8 @@ export const ProjectHub: React.FC = () => {
                         <Calendar className="w-3.5 h-3.5" />
                         Created: {new Date(project.createdAt).toLocaleDateString()}
                     </div>
+                    {/* ID do projeto: usado na execução forçada do GitHub Actions */}
+                    <ProjectIdChip id={project.id} />
                 </div>
             </div>
         </div>
@@ -1071,6 +1074,9 @@ export const ProjectHub: React.FC = () => {
                         </label>
                     </div>
                 </div>
+
+                {/* Execução forçada: ID do projeto para o workflow do GitHub Actions */}
+                <ForceRunPanel projectId={project.id} />
 
                 {/* General Settings */}
                 <div className="space-y-6 bg-slate-900/40 p-6 rounded-2xl border border-slate-800">
