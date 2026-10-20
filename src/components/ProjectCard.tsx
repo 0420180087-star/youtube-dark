@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { Project, ProjectStatus } from '../types';
 import { Clock, Film, Layers, Trash2 } from 'lucide-react';
 import { isUsableImageUrl } from '../services/projectSync';
+import { CopyIdButton } from './ProjectIdTools';
 
 interface ProjectCardProps {
   project: Project;
@@ -100,6 +101,12 @@ export const ProjectCard: React.FC<ProjectCardProps> = ({ project, onDelete }) =
           </div>
         </div>
       </Link>
+
+      {/* Copiar o ID do projeto (execução forçada do GitHub Actions) — fora do Link, ao lado do Delete */}
+      <CopyIdButton
+        id={project.id}
+        className={`absolute top-3 ${onDelete ? 'right-14' : 'right-3'} z-20 p-2 bg-black/40 hover:bg-orange-500/80 text-white/60 hover:text-white rounded-lg backdrop-blur-sm border border-white/10 transition-all opacity-0 group-hover:opacity-100 focus:opacity-100`}
+      />
 
       {/* Delete Button - Absolute positioned outside the Link but inside the relative container */}
       {onDelete && (
