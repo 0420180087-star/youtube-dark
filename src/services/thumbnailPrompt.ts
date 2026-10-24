@@ -45,6 +45,8 @@ export interface ThumbnailBrief {
   visualHint: string;
   /** Elemento central da composição */
   centralElement: string;
+  /** 1 cor de destaque coerente com o tema e com este vídeo (entra na linha "Paleta"). */
+  accentColor: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -117,19 +119,20 @@ DADOS DO VÍDEO
 - CONTEÚDO (trechos do roteiro): ${buildThumbnailContent(ctx, 700)}
 - IDIOMA DOS TEXTOS ESCRITOS NA THUMBNAIL: ${collapse(ctx.language) || 'Portuguese'}
 
-Monte o briefing da thumbnail com 4 campos. Todos devem ser ESPECÍFICOS deste vídeo (nada genérico):
+Monte o briefing da thumbnail com 5 campos. Todos devem ser ESPECÍFICOS deste vídeo (nada genérico):
 
 1. hookWord — linha 1 do texto da imagem: um gancho curto de curiosidade/mistério, em MAIÚSCULAS, de 2 a 5 palavras, no idioma indicado acima. Exemplos de ESTILO (não copie): "ELES NÃO QUEREM QUE VOCÊ SAIBA", "NINGUÉM EXPLICOU ISSO".
 2. directHint — linha 2 (menor): dica direta e concreta do que o vídeo revela, em MAIÚSCULAS, de 2 a 5 palavras, no idioma indicado acima. Exemplo de ESTILO (não copie): "O QUE ACHEI NO PORÃO".
 3. visualHint — a dica visual que deve ser insinuada na imagem: UM detalhe típico do universo do TEMA DO CANAL, ligado ao conteúdo deste vídeo, em 1 frase em português. Adapte ao tema real: se for histórico, documento censurado/foto antiga/relíquia/arquivo; se for tecnologia, tela com erro/código/servidor; se for finanças, gráfico estranho/cofre/contrato; se for psicologia, espelho/corredor/símbolo/ambiente clínico; se for true crime, evidência/mapa com marcação/fita/pasta de caso. Nunca um elemento genérico de mistério.
 4. centralElement — o objeto, ambiente ou detalhe MAIS FORTE para ficar no centro da composição, em 1 frase em português.
+5. accentColor — a 1 cor de destaque da paleta (além de preto, vermelho sangue e branco sujo), coerente com o tema e com ESTE vídeo (ex.: âmbar, azul frio, verde doentio, dourado fosco, ciano de terminal), em até 6 palavras, em português.
 
 REGRAS
 - Canal faceless: nenhum campo pode pedir rosto, pessoa, apresentador, mão ou expressão facial.
 - Não invente fatos que contradigam o conteúdo. Sem emojis e sem aspas dentro dos textos.
 
 Responda SOMENTE com JSON válido, sem markdown:
-{"hookWord":"...","directHint":"...","visualHint":"...","centralElement":"..."}`;
+{"hookWord":"...","directHint":"...","visualHint":"...","centralElement":"...","accentColor":"..."}`;
 }
 
 const EMOJI_RE = /[\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}]/gu;
@@ -174,6 +177,15 @@ export function detectThemeKind(channelTheme: string): ThemeKind {
   if (/psicolog|mente|comportament|trauma|manipula|cerebro/.test(t)) return 'psychology';
   return 'generic';
 }
+
+const FALLBACK_ACCENT: Record<ThemeKind, string> = {
+  crime: 'azul frio de cena de crime',
+  history: 'âmbar envelhecido',
+  tech: 'verde fósforo de terminal',
+  finance: 'dourado fosco',
+  psychology: 'azul-gelo clínico',
+  generic: 'âmbar',
+};
 
 const FALLBACK_VISUALS: Record<ThemeKind, { visualHint: string; centralElement: string }> = {
   crime: {
@@ -237,6 +249,7 @@ export function buildFallbackThumbnailBrief(ctx: ThumbnailContext): ThumbnailBri
     hookWord: hookFromTitle(ctx.title) || (lang === 'pt' ? 'NINGUÉM EXPLICOU ISSO' : 'NOBODY EXPLAINED THIS'),
     directHint: FALLBACK_DIRECT_HINT[lang][kind],
     ...FALLBACK_VISUALS[kind],
+    accentColor: FALLBACK_ACCENT[kind],
   };
 }
 
@@ -264,6 +277,7 @@ export function parseThumbnailBrief(raw: unknown, ctx: ThumbnailContext): Thumbn
     directHint: cleanOverlayText(obj.directHint) || fb.directHint,
     visualHint: cleanVisualField(obj.visualHint, 220) || fb.visualHint,
     centralElement: cleanVisualField(obj.centralElement, 220) || fb.centralElement,
+    accentColor: cleanVisualField(obj.accentColor, 60) || fb.accentColor,
   };
 }
 
@@ -297,7 +311,7 @@ COMPOSIÇÃO:
 - Elemento central: ${brief.centralElement}
 - Metade direita da imagem reservada para texto grande e impactante, com espaço negativo escuro
 - Iluminação dramática em chiaroscuro, fundo escuro profundo com névoa sutil
-- Paleta: preto, vermelho sangue (#8B0000), branco sujo e 1 cor de destaque coerente com o tema (âmbar, azul frio, verde doentio, etc.)
+- Paleta: preto, vermelho sangue (#8B0000), branco sujo e 1 cor de destaque coerente com o tema e com este vídeo: ${brief.accentColor}
 - Alto contraste, granulação de filme/VHS, vinheta escura nas bordas
 - Regra dos terços, profundidade de campo rasa, lente 35mm, qualidade 8K
 

@@ -60,6 +60,7 @@ describe('prompt-base do usuário', () => {
     directHint: 'O QUE ACHEI NO PORÃO',
     visualHint: 'uma pasta de caso com fotos de evidências',
     centralElement: 'uma pasta de caso entreaberta sobre uma mesa escura',
+    accentColor: 'azul frio de cena de crime',
   };
   const prompt = buildThumbnailImagePrompt(ctx, brief);
 
@@ -70,6 +71,7 @@ describe('prompt-base do usuário', () => {
     expect(prompt).toContain('SCRIPT/RESUMO DO CONTEÚDO: Abertura:');
     expect(prompt).toContain('DICA VISUAL QUE DEVE SER INSINUADA: uma pasta de caso com fotos de evidências');
     expect(prompt).toContain('- Elemento central: uma pasta de caso entreaberta sobre uma mesa escura');
+    expect(prompt).toContain('- Paleta: preto, vermelho sangue (#8B0000), branco sujo e 1 cor de destaque coerente com o tema e com este vídeo: azul frio de cena de crime');
     expect(prompt).toContain('linha 1: “ELES NÃO QUEREM QUE VOCÊ SAIBA”');
     expect(prompt).toContain('linha 2 (menor, amarela): “O QUE ACHEI NO PORÃO”');
     // nenhum placeholder sobrando
@@ -114,6 +116,8 @@ describe('briefing criativo', () => {
     expect(p).toContain('true crime, evidência/mapa com marcação');
     expect(p).toContain('nenhum campo pode pedir rosto');
     expect(p).toContain('"hookWord"');
+    expect(p).toContain('"accentColor"');
+    expect(p).toContain('cor de destaque da paleta');
   });
 
   it('limpa o texto que vai escrito na imagem: sem aspas/emoji, MAIÚSCULAS, no máximo 6 palavras', () => {
@@ -125,8 +129,9 @@ describe('briefing criativo', () => {
   });
 
   it('aceita objeto ou texto JSON (inclusive com cerca de markdown) e sanitiza', () => {
-    const good = { hookWord: '"eles esconderam isso"', directHint: 'o que a polícia achou', visualHint: 'uma fita de CCTV com data apagada', centralElement: 'uma pasta de caso aberta' };
+    const good = { hookWord: '"eles esconderam isso"', directHint: 'o que a polícia achou', visualHint: 'uma fita de CCTV com data apagada', centralElement: 'uma pasta de caso aberta', accentColor: 'âmbar queimado' };
     const a = parseThumbnailBrief(good, ctx);
+    expect(a.accentColor).toBe('âmbar queimado');
     expect(a.hookWord).toBe('ELES ESCONDERAM ISSO');
     expect(a.directHint).toBe('O QUE A POLÍCIA ACHOU');
     expect(a.visualHint).toBe('uma fita de CCTV com data apagada');
@@ -136,7 +141,7 @@ describe('briefing criativo', () => {
 
   it('campos vazios ou inutilizáveis são trocados pelo briefing local (nunca fica campo vazio)', () => {
     const fb = buildFallbackThumbnailBrief(ctx);
-    const out = parseThumbnailBrief({ hookWord: '', directHint: '😱😱', visualHint: '', centralElement: null }, ctx);
+    const out = parseThumbnailBrief({ hookWord: '', directHint: '😱😱', visualHint: '', centralElement: null, accentColor: '' }, ctx);
     expect(out).toEqual(fb);
     expect(parseThumbnailBrief('isso não é json', ctx)).toEqual(fb);
     expect(parseThumbnailBrief(null, ctx)).toEqual(fb);
@@ -169,6 +174,8 @@ describe('briefing local por tema e idioma', () => {
     expect(crime.directHint).toBe('O QUE A POLÍCIA ESCONDEU');
     const tech = buildFallbackThumbnailBrief({ ...ctx, channelTheme: 'Tecnologia e IA' });
     expect(tech.visualHint).toMatch(/tela|código/);
+    expect(crime.accentColor).toBe('azul frio de cena de crime');
+    expect(tech.accentColor).toBe('verde fósforo de terminal');
   });
 
   it('gancho local vem do título (parte antes de ":") e o idioma muda a dica direta', () => {

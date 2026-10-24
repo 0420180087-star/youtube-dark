@@ -23,6 +23,15 @@ import { Modality, HarmCategory, HarmBlockThreshold } from '@google/genai';
 import { executeGeminiRequest, isQuotaError } from './geminiCore';
 import { ScriptData } from '../types';
 import {
+    THUMBNAIL_IMAGE_MODELS,
+    SCENE_IMAGE_MODEL_IDS,
+    imageConfigVariants,
+    pickGeneratedImage,
+    describeNoImage,
+    describeImageError,
+    isTransientImageError,
+} from './geminiImageModels';
+import {
     buildThumbnailBriefPrompt,
     buildThumbnailImagePrompt,
     buildFallbackThumbnailBrief,
@@ -208,13 +217,11 @@ Output ONLY the image generation prompt as a single paragraph. No explanation, n
 // STEP 2B — IMAGE GENERATION (Gemini image models)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Somente modelos que realmente devolvem imagem (inlineData).
-// `gemini-2.0-flash` / `-exp` NÃO geram imagem — usá-los só queimava cota
-// e fazia o loop terminar sem erro, impedindo o fallback de disparar.
-const IMAGE_MODELS = [
-    'gemini-2.5-flash-image',
-    'gemini-2.0-flash-preview-image-generation',
-];
+// Somente modelos que realmente devolvem imagem (inlineData). A lista vive em geminiImageModels.ts
+// (fonte única, compartilhada com o runner). O 2º modelo antigo
+// (`gemini-2.0-flash-preview-image-generation`) foi DESLIGADO pelo Google em nov/2025 — por isso a lista
+// agora termina em modelos atuais. `gemini-2.0-flash` / `-exp` NÃO geram imagem.
+const IMAGE_MODELS: readonly string[] = SCENE_IMAGE_MODEL_IDS;
 
 const SAFETY_SETTINGS = [
     { category: HarmCategory.HARM_CATEGORY_HARASSMENT,        threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
@@ -364,49 +371,73 @@ const isInvalidArgument = (err: unknown): boolean => {
     return e?.status === 400 || /\b400\b|INVALID_ARGUMENT|imageConfig|aspect.?ratio/i.test(String(e?.message || ''));
 };
 
-type ImageModelResponse = {
-    candidates?: Array<{ content?: { parts?: Array<{ inlineData?: { mimeType?: string; data?: string } }> } }>;
-};
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Erro com a causa real JÁ explicada em português (vai para o log e para a interface). */
+export class ThumbnailGenerationError extends Error {
+    readonly original?: unknown;
+    constructor(message: string, original?: unknown) {
+        super(message);
+        this.name = 'ThumbnailGenerationError';
+        this.original = original;
+    }
+}
+
+/** Motivo em português para mostrar ao usuário / registrar no log (qualquer erro de geração de thumbnail). */
+export const thumbnailErrorReason = (err: unknown): string =>
+    err instanceof ThumbnailGenerationError ? err.message : describeImageError(err);
 
 /**
  * Renderiza o prompt-base JÁ PRONTO. Diferente de renderImageFromPrompt(), NÃO acrescenta "no text":
- * o texto do gancho faz parte da imagem. Pede 16:9 nativo (imageConfig); modelos que recusam o
- * parâmetro são repetidos sem ele.
+ * o texto do gancho faz parte da imagem. Percorre os modelos ATUAIS (geminiImageModels.ts), pede 16:9
+ * nativo (imageConfig) e, se o modelo recusar o parâmetro (400), repete o MESMO modelo com uma
+ * configuração mais simples. Falha passageira (5xx/timeout) é repetida uma vez. Se nenhum modelo
+ * gerar imagem, lança ThumbnailGenerationError com a CAUSA real (ex.: chave sem faturamento).
  */
 const renderThumbnailFromBasePrompt = async (prompt: string): Promise<string> => {
     return executeGeminiRequest(async (ai) => {
         let lastError: unknown = null;
 
-        for (const modelName of IMAGE_MODELS) {
-            for (const withAspect of [true, false]) {
-                try {
-                    console.log(`[Thumbnail] 🖼️ Prompt-base → ${modelName}${withAspect ? ' (16:9 nativo)' : ''}`);
-                    const response = (await withTimeout(
-                        ai.models.generateContent({
-                            model: modelName,
-                            contents: { parts: [{ text: prompt }] },
-                            config: {
-                                responseModalities: [Modality.IMAGE, Modality.TEXT],
-                                safetySettings: SAFETY_SETTINGS,
-                                ...(withAspect ? { imageConfig: { aspectRatio: '16:9' } } : {}),
-                            },
-                        }),
-                        PER_MODEL_TIMEOUT_MS,
-                        `thumbnail_image_${modelName}`,
-                    )) as ImageModelResponse;
-                    const inline = response.candidates?.[0]?.content?.parts?.find((p) => p.inlineData)?.inlineData;
-                    if (inline?.data) return `data:${inline.mimeType || 'image/png'};base64,${inline.data}`;
-                    throw new Error(`Sem dados de imagem em ${modelName}`);
-                } catch (err: unknown) {
-                    if (isQuotaError(err)) throw err; // sobe para a rotação de chaves
-                    lastError = err;
-                    if (withAspect && isInvalidArgument(err)) continue; // repete o MESMO modelo sem imageConfig
-                    console.warn(`[Thumbnail] Erro em ${modelName}: ${err instanceof Error ? err.message : String(err)}. Tentando próximo...`);
-                    break;
+        for (const spec of THUMBNAIL_IMAGE_MODELS) {
+            for (const imageConfig of imageConfigVariants(spec)) {
+                let retriedTransient = false;
+                let tryNextVariant = false;
+                for (;;) {
+                    try {
+                        console.log(`[Thumbnail] 🖼️ Prompt-base → ${spec.id}${imageConfig ? ` ${JSON.stringify(imageConfig)}` : ''}`);
+                        const response = await withTimeout(
+                            ai.models.generateContent({
+                                model: spec.id,
+                                contents: { parts: [{ text: prompt }] },
+                                config: {
+                                    responseModalities: [Modality.IMAGE, Modality.TEXT],
+                                    safetySettings: SAFETY_SETTINGS,
+                                    ...(imageConfig ? { imageConfig } : {}),
+                                },
+                            }),
+                            PER_MODEL_TIMEOUT_MS,
+                            `thumbnail_image_${spec.id}`,
+                        );
+                        const image = pickGeneratedImage(response);
+                        if (image) return `data:${image.mimeType};base64,${image.data}`;
+                        throw new Error(describeNoImage(response, spec.id));
+                    } catch (err: unknown) {
+                        if (isQuotaError(err)) throw err; // sobe para a rotação de chaves
+                        lastError = err;
+                        if (isTransientImageError(err) && !retriedTransient) {
+                            retriedTransient = true;
+                            await sleep(2_000);
+                            continue;
+                        }
+                        tryNextVariant = imageConfig !== undefined && isInvalidArgument(err);
+                        break;
+                    }
                 }
+                if (!tryNextVariant) break; // outro tipo de erro: passa para o próximo MODELO
             }
+            console.warn(`[Thumbnail] ${spec.id} falhou: ${describeImageError(lastError)} Tentando o próximo modelo...`);
         }
-        throw lastError || new Error('Nenhum modelo de imagem disponível');
+        throw new ThumbnailGenerationError(describeImageError(lastError), lastError);
     });
 };
 
@@ -490,7 +521,12 @@ export const generateGeminiThumbnail = async (opts: GeminiThumbnailOptions): Pro
         return normalizeThumbnailDataUrl(raw);
     };
 
-    return withTimeout(pipeline(), THUMBNAIL_TOTAL_TIMEOUT_MS, 'thumbnail_pipeline');
+    try {
+        return await withTimeout(pipeline(), THUMBNAIL_TOTAL_TIMEOUT_MS, 'thumbnail_pipeline');
+    } catch (err: unknown) {
+        if (err instanceof ThumbnailGenerationError) throw err;
+        throw new ThumbnailGenerationError(describeImageError(err), err);
+    }
 };
 
 
@@ -961,13 +997,16 @@ export const generateSceneImage = async (
                         config: {
                             responseModalities: [Modality.IMAGE, Modality.TEXT],
                             safetySettings: SAFETY_SETTINGS,
+                            // Modelos atuais respondem 1:1 por padrão: pede a proporção do vídeo.
+                            // (o gemini-2.5-flash-image segue exatamente como antes)
+                            ...(modelName !== 'gemini-2.5-flash-image' ? { imageConfig: { aspectRatio } } : {}),
                         },
                     }),
                     perModelTimeout,
                     'scene_image',
                 );
-                const base64 = response.candidates?.[0]?.content?.parts
-                    ?.find((p: any) => p.inlineData)?.inlineData?.data;
+                // Ignora imagens intermediárias ("thought") dos modelos Gemini 3 e usa a final.
+                const base64 = pickGeneratedImage(response)?.data;
                 if (base64) return `data:image/jpeg;base64,${base64}`;
                 throw new Error('No image data in response');
             } catch (err: any) {
