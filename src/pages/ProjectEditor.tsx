@@ -9,7 +9,7 @@ import {
     generateDarkAmbience, decodeAudioData, mergeAudioBuffers, 
     audioBufferToBase64, generateThumbnail, generateVideoMetadata,
     generateSingleNarratorText, generateMissingNarratorTexts,
-    generateThumbnailHook, generateGeminiThumbnail, clearExhaustedKeys, cancelGeminiSession
+    generateThumbnailHook, generateGeminiThumbnail, thumbnailErrorReason, clearExhaustedKeys, cancelGeminiSession
 } from '../services/geminiService';
 import { uploadVideoToYouTube } from '../services/youtubeService';
 import { buildSlotVisualPrompt, collectPexelsIds, getSegmentVisualPrompts } from '../services/visualSceneService';
@@ -978,8 +978,8 @@ export const ProjectEditor: React.FC = () => {
 
           // ── 0. PROMPT-BASE GEMINI (faceless/clickbait) ───────────────────
           // A thumbnail INTEIRA criada pelo Gemini — a MESMA lógica do automático
-          // (GitHub Actions) e do piloto automático. Só se falhar (cota, bloqueio...)
-          // cai na composição abaixo (cena do vídeo + textos desenhados no canvas).
+          // (GitHub Actions) e do piloto automático. Se falhar, o motivo REAL é mostrado e a
+          // composição abaixo (cena do vídeo + textos no canvas) só é usada se você aceitar.
           try {
               const geminiThumb = await generateGeminiThumbnail({
                   title: video!.title,
@@ -992,7 +992,15 @@ export const ProjectEditor: React.FC = () => {
               alert("✅ Thumbnail clickbait gerada com sucesso!");
               return;
           } catch (geminiErr: unknown) {
-              console.warn('[Thumbnail] Prompt-base Gemini falhou — usando a composição com a cena do vídeo:', geminiErr instanceof Error ? geminiErr.message : geminiErr);
+              const reason = thumbnailErrorReason(geminiErr);
+              console.warn('[Thumbnail] Prompt-base Gemini falhou:', reason);
+              const useSimple = window.confirm(
+                  `❌ Não foi possível gerar a thumbnail com o Gemini.\n\nMotivo: ${reason}\n\nDeseja gerar a versão simples (cena do vídeo + textos) no lugar?`
+              );
+              if (!useSimple) {
+                  setThumbnailError(`Thumbnail não gerada pelo Gemini: ${reason}`);
+                  return;
+              }
           }
 
           // ── 1. BACKGROUND: prefer a real scene image from the video ──────
