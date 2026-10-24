@@ -54,6 +54,14 @@ import {
   buildFallbackThumbnailBrief,
   parseThumbnailBrief,
 } from '../src/services/thumbnailPrompt.ts';
+import {
+  THUMBNAIL_IMAGE_MODELS,
+  imageConfigVariants,
+  pickGeneratedImage,
+  describeNoImage,
+  describeImageError,
+  isTransientImageError,
+} from '../src/services/geminiImageModels.ts';
 
 // --- ENV ---
 const {
@@ -810,90 +818,74 @@ async function geminiGenerateJSON(prompt, maxTokens = 4096) {
 // MODELO, não por tentativa. Cada modelo é tentado com a chave atual e, em erro
 // de cota, a chave entra em cooldown e o mesmo modelo é retentado com a próxima
 // chave pronta. 400/403/404 = modelo indisponível → próximo modelo.
-async function geminiGenerateImage(prompt, { textInImage = false } = {}) {
-  const IMAGEN = { model: 'imagen-3.0-generate-001', kind: 'imagen' };
-  const FLASH_25 = { model: 'gemini-2.5-flash-image', kind: 'flash' };
-  const FLASH_20 = { model: 'gemini-2.0-flash-preview-image-generation', kind: 'flash' };
-  // Thumbnail com TEXTO escrito dentro da imagem: o gemini-2.5-flash-image desenha texto bem melhor
-  // que o Imagen 3, então ele vai primeiro. Cenas de vídeo (sem texto) mantêm a ordem original.
-  const IMAGE_MODELS = textInImage ? [FLASH_25, IMAGEN, FLASH_20] : [IMAGEN, FLASH_25, FLASH_20];
-
-  const callModel = async ({ model, kind }) => {
-    geminiRequestCount++;
-    if (kind === 'imagen') {
-      const res = await raceTimeout(
-        axios.post(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:predict?key=${GEMINI_API_KEY}`,
-          { instances: [{ prompt }], parameters: { sampleCount: 1, aspectRatio: '16:9' } },
-          { timeout: NET_TIMEOUT.IMAGE }
-        ),
-        NET_TIMEOUT.IMAGE + 5_000,
-        `Gemini (${model})`
-      );
-      return res.data.predictions?.[0]?.bytesBase64Encoded || null;
+// Uma requisição de imagem a UM modelo (com a chave atual). Tenta o imageConfig do mais completo ao
+// mais simples (400 = o modelo recusou o parâmetro) e repete UMA vez falhas passageiras (5xx/timeout).
+async function requestThumbnailImage(spec, prompt) {
+  let lastErr;
+  for (const imageConfig of imageConfigVariants(spec)) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        geminiRequestCount++;
+        const res = await raceTimeout(
+          axios.post(
+            `https://generativelanguage.googleapis.com/v1beta/models/${spec.id}:generateContent?key=${GEMINI_API_KEY}`,
+            {
+              contents: [{ parts: [{ text: prompt }] }],
+              generationConfig: { responseModalities: ['IMAGE', 'TEXT'], ...(imageConfig ? { imageConfig } : {}) },
+            },
+            { timeout: NET_TIMEOUT.IMAGE }
+          ),
+          NET_TIMEOUT.IMAGE + 5_000,
+          `Gemini (${spec.id})`
+        );
+        // Ignora imagens intermediárias ("thought") dos modelos Gemini 3 e usa a imagem FINAL.
+        const image = pickGeneratedImage(res.data);
+        if (image) return image;
+        throw new Error(describeNoImage(res.data, spec.id));
+      } catch (err) {
+        lastErr = err;
+        if (err?.response?.status === 400 && imageConfig !== undefined) break; // próxima variante, mais simples
+        if (isTransientImageError(err) && attempt === 0) {
+          await new Promise((r) => setTimeout(r, 2_000));
+          continue;
+        }
+        throw err;
+      }
     }
+  }
+  throw lastErr;
+}
 
-    // Thumbnail: o prompt-base já é completo (formato, texto, estilo) e o 16:9 é pedido de forma
-    // nativa (imageConfig). Cena de vídeo: exatamente como antes.
-    const postFlash = (withAspect) => raceTimeout(
-      axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
-        {
-          contents: [{ parts: [{ text: textInImage ? prompt : `Generate a 16:9 cinematic image: ${prompt}` }] }],
-          generationConfig: {
-            responseModalities: ['IMAGE', 'TEXT'],
-            ...(textInImage && withAspect ? { imageConfig: { aspectRatio: '16:9' } } : {}),
-          },
-        },
-        { timeout: NET_TIMEOUT.IMAGE }
-      ),
-      NET_TIMEOUT.IMAGE + 5_000,
-      `Gemini (${model})`
-    );
-    let res;
-    try {
-      res = await postFlash(true);
-    } catch (err) {
-      // Modelo que não aceita imageConfig (400): repete o MESMO modelo sem o parâmetro.
-      if (textInImage && err?.response?.status === 400) res = await postFlash(false);
-      else throw err;
-    }
-    const parts = res.data.candidates?.[0]?.content?.parts || [];
-    return parts.find((p) => p.inlineData?.data)?.inlineData?.data || null;
-  };
-
-  for (const entry of IMAGE_MODELS) {
+// Gera a imagem da THUMBNAIL (o texto é desenhado dentro dela). Percorre os modelos ATUAIS de
+// src/services/geminiImageModels.ts — os antigos (imagen-3, gemini-2.0-flash-preview-image-generation)
+// foram desligados pelo Google. Falhou tudo → lança erro com a CAUSA real (ex.: chave sem faturamento).
+async function geminiGenerateImage(prompt) {
+  let lastError = null;
+  for (const spec of THUMBNAIL_IMAGE_MODELS) {
     // Uma volta por chave disponível para este modelo.
     for (let keyTry = 0; keyTry < Math.max(1, GEMINI_API_KEYS.length); keyTry++) {
       if (!isKeyReady(GEMINI_API_KEY, 'image') && !rotateGeminiKey('image')) break;
       try {
-        const b64 = await callModel(entry);
-        if (b64) {
-          log('🖼️', `Imagem gerada via ${entry.model}`);
-          return b64;
-        }
-        break; // respondeu sem imagem — trocar de modelo, não de chave
+        const image = await requestThumbnailImage(spec, prompt);
+        log('🖼️', `Imagem gerada via ${spec.id}`);
+        return image.data;
       } catch (err) {
-        const code = err?.response?.status;
+        lastError = err;
         if (isQuotaError(err)) {
           await cooldownCurrentKey(err, 'image');
-          if (rotateGeminiKey('image')) continue; // mesma modelo, próxima chave
-          break; // todas em cooldown — tenta o próximo modelo (pode ser mais barato)
+          if (rotateGeminiKey('image')) continue; // mesmo modelo, próxima chave
+          break; // todas em cooldown — tenta o próximo modelo
         }
-        if (code !== 400 && code !== 403 && code !== 404) {
-          log('⚠️', `${entry.model} falhou: ${err.message}`);
-        }
+        log('⚠️', `${spec.id} falhou: ${describeImageError(err)}`);
         break; // modelo indisponível → próximo modelo
       }
     }
   }
 
   if (shortestCooldownMs('image')) {
-    throw new GeminiQuotaExhaustedError(shortestCooldownMs('image'), 'cota de imagem esgotada');
+    throw new GeminiQuotaExhaustedError(shortestCooldownMs('image'), describeImageError(lastError));
   }
-
-  log('⚠️', 'Todos os modelos de imagem falharam — usando fallback');
-  return null;
+  throw new Error(`nenhum modelo de imagem gerou a thumbnail: ${describeImageError(lastError)}`);
 }
 
 
@@ -1424,10 +1416,21 @@ async function stepThumbnail(title, script, projectData) {
   const imagePrompt = buildThumbnailImagePrompt(thumbCtx, brief);
   let thumbnailBase64 = null;
   try {
-    const raw = await withStepTimeout(geminiGenerateImage(imagePrompt, { textInImage: true }), 100000, 'thumb_image');
+    const raw = await withStepTimeout(geminiGenerateImage(imagePrompt), 100000, 'thumb_image');
     thumbnailBase64 = raw ? await normalizeThumbnailImage(raw) : null;
   } catch (err) {
-    log('⚠️', `Imagem de thumbnail falhou (${err.message}) — seguindo sem ela`);
+    // Falha VISÍVEL: vai para o log do Actions e para o log do projeto no app (nada de plano B com
+    // outro estilo — a thumbnail é sempre a do prompt-base ou nenhuma).
+    log('⚠️', `THUMBNAIL NÃO GERADA — ${String(err.message).replace(/\.+$/, '')}. O YouTube usará um quadro do vídeo.`);
+    if (projectData.id) {
+      await safeInsertAutopilotLog({
+        project_id: projectData.id,
+        status: 'error',
+        step: 'thumbnail',
+        message: `Thumbnail não gerada: ${err.message}`,
+        runner: 'github-actions',
+      });
+    }
   }
 
   const clickbaitText = `${brief.hookWord} ${brief.directHint}`.trim();
