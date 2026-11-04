@@ -21,6 +21,7 @@
 
 import { Modality, HarmCategory, HarmBlockThreshold } from '@google/genai';
 import { executeGeminiRequest, isQuotaError } from './geminiCore';
+import { getTextModel } from './geminiModelResolver';
 import { ScriptData } from '../types';
 import {
     THUMBNAIL_IMAGE_MODELS,
@@ -96,7 +97,7 @@ NINGUÉM ACREDITA
 2`;
 
         const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: await getTextModel(),
             contents: prompt,
             config: { temperature: 1.1 },
         });
@@ -204,7 +205,7 @@ ANTI-PATTERNS (do NOT include):
 Output ONLY the image generation prompt as a single paragraph. No explanation, no quotes.`;
 
         const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: await getTextModel(),
             contents: prompt,
             config: { temperature: 1.0 },
         });
@@ -501,7 +502,7 @@ export const generateGeminiThumbnail = async (opts: GeminiThumbnailOptions): Pro
             const text = await withTimeout(
                 executeGeminiRequest(async (ai) => {
                     const response = await ai.models.generateContent({
-                        model: 'gemini-2.5-flash',
+                        model: await getTextModel(),
                         contents: buildThumbnailBriefPrompt(ctx),
                         config: { temperature: 0.9, responseMimeType: 'application/json' },
                     });
