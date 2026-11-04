@@ -7,6 +7,7 @@
 import { GoogleGenAI, Type, Modality, HarmCategory, HarmBlockThreshold, ThinkingLevel } from "@google/genai";
 import { ScriptData, GenerateScriptParams, VideoMetadata, ScriptSegment } from "../types";
 import { decryptData } from "./securityService";
+import { getTextModel, getTtsModel, isModelUnavailableError, extractModelNameFromError, markModelUnavailable, setKeyProvider } from "./geminiModelResolver";
 import { buildIdeasPrompt } from "./ideaEngine";
 
 // =============================================
@@ -85,6 +86,9 @@ const loadAllKeys = async (): Promise<string[]> => {
     }
     return valid;
 };
+
+// Provedor de chaves para o resolvedor dinâmico de modelos (ListModels).
+setKeyProvider(loadAllKeys);
 
 // =============================================
 // KEY ROTATION ENGINE — Simple, reliable, no over-engineering
@@ -380,6 +384,24 @@ export class GeminiQuotaExhaustedError extends Error {
 }
 
 /**
+ * Retry para modelo desligado: quando o Google remove um modelo (404 "no
+ * longer available"/"not found"), descarta-o do cache e re-resolve o próximo
+ * disponível, repetindo a operação até 2 vezes. Não trata a chave como ruim —
+ * a chave está correta; é o NOME do modelo que venceu.
+ */
+const runOpWithModelFallback = async <T>(ai: GoogleGenAI, op: (ai: GoogleGenAI) => Promise<T>, depth = 0): Promise<T> => {
+    try {
+        return await op(ai);
+    } catch (err: any) {
+        if (!isModelUnavailableError(err) || depth >= 2) throw err;
+        const failed = extractModelNameFromError(err);
+        if (failed) markModelUnavailable(failed);
+        console.warn(`[DarkStream AI] 🔁 Modelo ${failed || 'atual'} indisponível (desligado pelo Google). Re-resolvendo modelo e tentando de novo...`);
+        return runOpWithModelFallback(ai, op, depth + 1);
+    }
+};
+
+/**
  * Core rotation logic (sempre termina):
  * 1. Tenta cada chave pronta, em round-robin
  * 2. Erro de cota → cooldown na chave e passa para a próxima
@@ -426,7 +448,7 @@ const runWithRotation = async <T>(op: (ai: GoogleGenAI) => Promise<T>, round = 1
 
         try {
             const ai = new GoogleGenAI({ apiKey: key });
-            const result = await op(ai);
+            const result = await runOpWithModelFallback(ai, op);
             roundRobinIndex = (roundRobinIndex + i + 1) % allKeys.length;
             console.log(`[DarkStream AI] ✅ Sucesso com chave ${masked}`);
             return result;
@@ -523,7 +545,7 @@ export const generateVideoIdeas = async (channelTheme: string, description: stri
         });
         
         const response = await ai.models.generateContent({ 
-            model: "gemini-2.5-flash", 
+            model: await getTextModel(), 
             contents: prompt, 
             config: { 
                 responseMimeType: "application/json", 
@@ -719,7 +741,7 @@ Each segment: sectionTitle, visualDescriptions[], narratorText, estimatedDuratio
           const streamResult = await Promise.race([
               (async () => {
                   const responseStream = await ai.models.generateContentStream({
-                      model: "gemini-2.5-flash",
+                      model: await getTextModel(),
                       contents: prompt,
                       config: scriptConfig,
                   });
@@ -742,7 +764,7 @@ Each segment: sectionTitle, visualDescriptions[], narratorText, estimatedDuratio
               console.warn('[DarkStream AI] Stream travou. Usando fallback...');
               if (params.onProgress) params.onProgress('__fallback__');
               const fallbackResponse = await ai.models.generateContent({
-                  model: "gemini-2.5-flash",
+                  model: await getTextModel(),
                   contents: prompt,
                   config: scriptConfig,
               });
@@ -794,7 +816,7 @@ ${JSON.stringify({ segments: script.segments })}
 Return complete JSON with same structure but longer narratorText in each segment.`;
 
               const expandRes = await ai.models.generateContent({
-                  model: "gemini-2.5-flash",
+                  model: await getTextModel(),
                   contents: expandPrompt,
                   config: { maxOutputTokens: 65536, responseMimeType: "application/json" },
               });
@@ -829,7 +851,7 @@ export const generateMissingNarratorTexts = async (topic: string, segments: Scri
         const prompt = `Topic: "${topic}"\nTone: ${tone}\nLanguage: ${language}\n\nSEGMENTS:\n${segmentsContext}\n\nWrite narrator text for each segment. Return JSON array of strings.`;
 
         const response = await ai.models.generateContent({
-            model: "gemini-2.5-flash",
+            model: await getTextModel(),
             contents: prompt,
             config: {
                 systemInstruction: "You are a professional scriptwriter. Return ONLY a JSON array of strings.",
@@ -854,7 +876,7 @@ export const generateSingleNarratorText = async (topic: string, sectionTitle: st
         const prompt = `Topic: "${topic}"\nSection: "${sectionTitle}"\nVisuals: ${visualDescriptions.join(', ')}\nTone: ${tone}\nLanguage: ${language}\n\nWrite the narrator script for this section.`;
 
         const response = await ai.models.generateContent({
-            model: "gemini-2.5-flash",
+            model: await getTextModel(),
             contents: prompt,
             config: {
                 systemInstruction: "You are a professional scriptwriter. Write only the spoken narrator text.",
@@ -917,7 +939,7 @@ RULES:
 - The title must generate curiosity and urgency`;
         
         const response = await withTimeout(ai.models.generateContent({
-          model: "gemini-2.5-flash", 
+          model: await getTextModel(), 
           contents: prompt, 
           config: { 
             responseMimeType: "application/json", 
@@ -972,7 +994,7 @@ RULES:
       
       const prompt = `Generate optimized YouTube metadata for: "${topic}". Context: ${scriptSummary.substring(0, 1000)} ${timestampsContext} Tone: ${tone} Language: ${language}`;
       const response = await withTimeout(ai.models.generateContent({
-          model: "gemini-2.5-flash", 
+          model: await getTextModel(), 
           contents: prompt, 
           config: { 
               responseMimeType: "application/json", 
@@ -1109,7 +1131,7 @@ ${text}`;
 
         const response = await withTimeout(
             ai.models.generateContent({
-                model: "gemini-2.5-flash-preview-tts",
+                model: await getTtsModel(),
                 contents: [{ parts: [{ text: ttsPrompt }] }],
                 config: {
                     responseModalities: [Modality.AUDIO],

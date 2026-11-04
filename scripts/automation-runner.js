@@ -62,6 +62,15 @@ import {
   describeImageError,
   isTransientImageError,
 } from '../src/services/geminiImageModels.ts';
+// Resolvedor dinâmico de modelos: o Google desliga modelos (ex.: gemini-2.5-flash
+// "no longer available to new users" em 11/2026) — nunca mais fixar nome no código.
+import {
+  getTextModel,
+  setKeyProvider,
+  isModelUnavailableError,
+  extractModelNameFromError,
+  markModelUnavailable,
+} from '../src/services/geminiModelResolver.ts';
 
 // --- ENV ---
 const {
@@ -388,6 +397,8 @@ async function consumeKeyDrops(privateKey) {
 // Falls back to ENV if no per-user key is configured.
 let GEMINI_API_KEY = ENV_GEMINI_API_KEY || VITE_GEMINI_API_KEY || '';
 let GEMINI_API_KEYS = GEMINI_API_KEY ? [GEMINI_API_KEY] : [];
+// O provedor lê GEMINI_API_KEYS na hora da chamada — acompanha loadUserKeys().
+setKeyProvider(async () => [...GEMINI_API_KEYS]);
 let GEMINI_KEY_INDEX = 0;
 let PEXELS_API_KEY = ENV_PEXELS_API_KEY || VITE_PEXELS_API_KEY || '';
 
@@ -736,19 +747,33 @@ let geminiRequestCount = 0;
 
 async function geminiGenerate(prompt, maxTokens = 4096) {
   geminiRequestCount++;
-  const res = await raceTimeout(
-    axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { maxOutputTokens: maxTokens, temperature: 0.9 },
-      },
-      { timeout: NET_TIMEOUT.TEXT }
-    ),
-    NET_TIMEOUT.TEXT + 5_000,
-    'Gemini (texto)'
-  );
-  return res.data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  // Modelo resolvido DINAMICAMENTE (ListModels) — sobrevive a desligamentos
+  // de modelos pelo Google. Um 404 de modelo re-resolve e tenta de novo uma vez.
+  const attempt = async () => {
+    const model = await getTextModel();
+    const res = await raceTimeout(
+      axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { maxOutputTokens: maxTokens, temperature: 0.9 },
+        },
+        { timeout: NET_TIMEOUT.TEXT }
+      ),
+      NET_TIMEOUT.TEXT + 5_000,
+      'Gemini (texto)'
+    );
+    return res.data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  };
+  try {
+    return await attempt();
+  } catch (err) {
+    if (!isModelUnavailableError(err)) throw err;
+    const failed = extractModelNameFromError(err);
+    if (failed) markModelUnavailable(failed);
+    log('🔁', `Modelo ${failed || 'atual'} indisponível (desligado pelo Google) — re-resolvendo e tentando de novo.`);
+    return attempt();
+  }
 }
 
 

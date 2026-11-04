@@ -4,6 +4,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { executeGeminiRequest, delay } from './geminiCore';
 import { getPexelsKey } from './pexelsService';
+import { getTextModel } from './geminiModelResolver';
 
 // --- PEXELS / STOCK VIDEO ---
 export interface StockVideo {
@@ -32,7 +33,7 @@ RULES:
 Return a JSON array of strings. Example: ["dark corridor shadows", "foggy forest aerial", "city lights rain", "old book candlelight"]`;
 
         const response = await ai.models.generateContent({
-            model: "gemini-2.5-flash",
+            model: await getTextModel(),
             contents: prompt,
             config: { temperature: 0.8, responseMimeType: "application/json" }
         });
@@ -50,7 +51,7 @@ Scene: "${visualDescription}"
 Topic context: "${videoTopic || ''}"
 
 RULES: Must be generic enough to return results. Focus on mood/setting/atmosphere. No proper nouns. Output ONLY the query words, nothing else.`;
-        const response = await ai.models.generateContent({ model: "gemini-2.5-flash", contents: prompt, config: { temperature: 0.3 } });
+        const response = await ai.models.generateContent({ model: await getTextModel(), contents: prompt, config: { temperature: 0.3 } });
         return (response.text || "").trim().replace(/["']/g, '');
     }).catch(() => visualDescription.split(' ').slice(0, 3).join(' '));
 };
