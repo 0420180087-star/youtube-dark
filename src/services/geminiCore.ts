@@ -7,6 +7,7 @@
 import { GoogleGenAI, Type, Modality, HarmCategory, HarmBlockThreshold, ThinkingLevel } from "@google/genai";
 import { ScriptData, GenerateScriptParams, VideoMetadata, ScriptSegment } from "../types";
 import { decryptData } from "./securityService";
+import { getTextModel, getTtsModel, isModelUnavailableError, extractModelNameFromError, markModelUnavailable, setKeyProvider } from "./geminiModelResolver";
 import { buildIdeasPrompt } from "./ideaEngine";
 
 // =============================================
@@ -85,6 +86,9 @@ const loadAllKeys = async (): Promise<string[]> => {
     }
     return valid;
 };
+
+// Provedor de chaves para o resolvedor dinâmico de modelos (ListModels).
+setKeyProvider(loadAllKeys);
 
 // =============================================
 // KEY ROTATION ENGINE — Simple, reliable, no over-engineering
@@ -380,6 +384,24 @@ export class GeminiQuotaExhaustedError extends Error {
 }
 
 /**
+ * Retry para modelo desligado: quando o Google remove um modelo (404 "no
+ * longer available"/"not found"), descarta-o do cache e re-resolve o próximo
+ * disponível, repetindo a operação até 2 vezes. Não trata a chave como ruim —
+ * a chave está correta; é o NOME do modelo que venceu.
+ */
+const runOpWithModelFallback = async <T>(ai: GoogleGenAI, op: (ai: GoogleGenAI) => Promise<T>, depth = 0): Promise<T> => {
+    try {
+        return await op(ai);
+    } catch (err: any) {
+        if (!isModelUnavailableError(err) || depth >= 2) throw err;
+        const failed = extractModelNameFromError(err);
+        if (failed) markModelUnavailable(failed);
+        console.warn(`[DarkStream AI] 🔁 Modelo ${failed || 'atual'} indisponível (desligado pelo Google). Re-resolvendo modelo e tentando de novo...`);
+        return runOpWithModelFallback(ai, op, depth + 1);
+    }
+};
+
+/**
  * Core rotation logic (sempre termina):
  * 1. Tenta cada chave pronta, em round-robin
  * 2. Erro de cota → cooldown na chave e passa para a próxima
@@ -426,7 +448,7 @@ const runWithRotation = async <T>(op: (ai: GoogleGenAI) => Promise<T>, round = 1
 
         try {
             const ai = new GoogleGenAI({ apiKey: key });
-            const result = await op(ai);
+            const result = await runOpWithModelFallback(ai, op);
             roundRobinIndex = (roundRobinIndex + i + 1) % allKeys.length;
             console.log(`[DarkStream AI] ✅ Sucesso com chave ${masked}`);
             return result;
