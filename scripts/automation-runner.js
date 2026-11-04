@@ -62,6 +62,15 @@ import {
   describeImageError,
   isTransientImageError,
 } from '../src/services/geminiImageModels.ts';
+// Resolvedor dinâmico de modelos: o Google desliga modelos (ex.: gemini-2.5-flash
+// "no longer available to new users" em 11/2026) — nunca mais fixar nome no código.
+import {
+  getTextModel,
+  setKeyProvider,
+  isModelUnavailableError,
+  extractModelNameFromError,
+  markModelUnavailable,
+} from '../src/services/geminiModelResolver.ts';
 
 // --- ENV ---
 const {
@@ -388,6 +397,8 @@ async function consumeKeyDrops(privateKey) {
 // Falls back to ENV if no per-user key is configured.
 let GEMINI_API_KEY = ENV_GEMINI_API_KEY || VITE_GEMINI_API_KEY || '';
 let GEMINI_API_KEYS = GEMINI_API_KEY ? [GEMINI_API_KEY] : [];
+// O provedor lê GEMINI_API_KEYS na hora da chamada — acompanha loadUserKeys().
+setKeyProvider(async () => [...GEMINI_API_KEYS]);
 let GEMINI_KEY_INDEX = 0;
 let PEXELS_API_KEY = ENV_PEXELS_API_KEY || VITE_PEXELS_API_KEY || '';
 
