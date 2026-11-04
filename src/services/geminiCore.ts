@@ -545,7 +545,7 @@ export const generateVideoIdeas = async (channelTheme: string, description: stri
         });
         
         const response = await ai.models.generateContent({ 
-            model: "gemini-2.5-flash", 
+            model: await getTextModel(), 
             contents: prompt, 
             config: { 
                 responseMimeType: "application/json", 
@@ -741,7 +741,7 @@ Each segment: sectionTitle, visualDescriptions[], narratorText, estimatedDuratio
           const streamResult = await Promise.race([
               (async () => {
                   const responseStream = await ai.models.generateContentStream({
-                      model: "gemini-2.5-flash",
+                      model: await getTextModel(),
                       contents: prompt,
                       config: scriptConfig,
                   });
@@ -764,7 +764,7 @@ Each segment: sectionTitle, visualDescriptions[], narratorText, estimatedDuratio
               console.warn('[DarkStream AI] Stream travou. Usando fallback...');
               if (params.onProgress) params.onProgress('__fallback__');
               const fallbackResponse = await ai.models.generateContent({
-                  model: "gemini-2.5-flash",
+                  model: await getTextModel(),
                   contents: prompt,
                   config: scriptConfig,
               });
@@ -816,7 +816,7 @@ ${JSON.stringify({ segments: script.segments })}
 Return complete JSON with same structure but longer narratorText in each segment.`;
 
               const expandRes = await ai.models.generateContent({
-                  model: "gemini-2.5-flash",
+                  model: await getTextModel(),
                   contents: expandPrompt,
                   config: { maxOutputTokens: 65536, responseMimeType: "application/json" },
               });
@@ -851,7 +851,7 @@ export const generateMissingNarratorTexts = async (topic: string, segments: Scri
         const prompt = `Topic: "${topic}"\nTone: ${tone}\nLanguage: ${language}\n\nSEGMENTS:\n${segmentsContext}\n\nWrite narrator text for each segment. Return JSON array of strings.`;
 
         const response = await ai.models.generateContent({
-            model: "gemini-2.5-flash",
+            model: await getTextModel(),
             contents: prompt,
             config: {
                 systemInstruction: "You are a professional scriptwriter. Return ONLY a JSON array of strings.",
@@ -876,7 +876,7 @@ export const generateSingleNarratorText = async (topic: string, sectionTitle: st
         const prompt = `Topic: "${topic}"\nSection: "${sectionTitle}"\nVisuals: ${visualDescriptions.join(', ')}\nTone: ${tone}\nLanguage: ${language}\n\nWrite the narrator script for this section.`;
 
         const response = await ai.models.generateContent({
-            model: "gemini-2.5-flash",
+            model: await getTextModel(),
             contents: prompt,
             config: {
                 systemInstruction: "You are a professional scriptwriter. Write only the spoken narrator text.",
@@ -939,7 +939,7 @@ RULES:
 - The title must generate curiosity and urgency`;
         
         const response = await withTimeout(ai.models.generateContent({
-          model: "gemini-2.5-flash", 
+          model: await getTextModel(), 
           contents: prompt, 
           config: { 
             responseMimeType: "application/json", 
@@ -994,7 +994,7 @@ RULES:
       
       const prompt = `Generate optimized YouTube metadata for: "${topic}". Context: ${scriptSummary.substring(0, 1000)} ${timestampsContext} Tone: ${tone} Language: ${language}`;
       const response = await withTimeout(ai.models.generateContent({
-          model: "gemini-2.5-flash", 
+          model: await getTextModel(), 
           contents: prompt, 
           config: { 
               responseMimeType: "application/json", 
@@ -1131,7 +1131,7 @@ ${text}`;
 
         const response = await withTimeout(
             ai.models.generateContent({
-                model: "gemini-2.5-flash-preview-tts",
+                model: await getTtsModel(),
                 contents: [{ parts: [{ text: ttsPrompt }] }],
                 config: {
                     responseModalities: [Modality.AUDIO],
