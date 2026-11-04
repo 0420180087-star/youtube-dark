@@ -747,19 +747,33 @@ let geminiRequestCount = 0;
 
 async function geminiGenerate(prompt, maxTokens = 4096) {
   geminiRequestCount++;
-  const res = await raceTimeout(
-    axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { maxOutputTokens: maxTokens, temperature: 0.9 },
-      },
-      { timeout: NET_TIMEOUT.TEXT }
-    ),
-    NET_TIMEOUT.TEXT + 5_000,
-    'Gemini (texto)'
-  );
-  return res.data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  // Modelo resolvido DINAMICAMENTE (ListModels) — sobrevive a desligamentos
+  // de modelos pelo Google. Um 404 de modelo re-resolve e tenta de novo uma vez.
+  const attempt = async () => {
+    const model = await getTextModel();
+    const res = await raceTimeout(
+      axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { maxOutputTokens: maxTokens, temperature: 0.9 },
+        },
+        { timeout: NET_TIMEOUT.TEXT }
+      ),
+      NET_TIMEOUT.TEXT + 5_000,
+      'Gemini (texto)'
+    );
+    return res.data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  };
+  try {
+    return await attempt();
+  } catch (err) {
+    if (!isModelUnavailableError(err)) throw err;
+    const failed = extractModelNameFromError(err);
+    if (failed) markModelUnavailable(failed);
+    log('🔁', `Modelo ${failed || 'atual'} indisponível (desligado pelo Google) — re-resolvendo e tentando de novo.`);
+    return attempt();
+  }
 }
 
 
