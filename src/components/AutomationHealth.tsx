@@ -13,7 +13,9 @@ import { CheckCircle2, XCircle, AlertTriangle, Loader2, Stethoscope, RefreshCw }
 import { supabase } from '../lib/supabaseClient';
 import { useAuth } from '../context/AuthContext';
 import { useProjects } from '../context/ProjectContext';
-import { getUserSettings, getProjectAuthStatuses } from '../services/userDataService';
+import { getUserSettings, getProjectAuthStatuses, renewGoogleToken } from '../services/userDataService';
+import { loadEncryptedString } from '../services/securityService';
+import { LOGIN_TOKEN_STORAGE_KEY, isAccessTokenValid } from '../services/youtubeAuthService';
 
 type State = 'ok' | 'warn' | 'fail' | 'checking';
 
@@ -83,6 +85,26 @@ export const AutomationHealth: React.FC = () => {
         : `Faltando: ${missing.join(', ')}. Execute supabase/bootstrap.sql no SQL Editor.`,
     });
 
+    // 1b. Sessão de login — o token do Google do APP (não confundir com o do
+    // canal). Se venceu, as leituras/gravações de chaves falham com 401 mesmo
+    // com o usuário logado. Tenta renovar em silêncio antes de reclamar.
+    if (user?.email) {
+      let loginToken: string | null = null;
+      try { loginToken = await loadEncryptedString(LOGIN_TOKEN_STORAGE_KEY); } catch { /* sem token */ }
+      let valid = loginToken ? await isAccessTokenValid(loginToken) : false;
+      if (!valid) {
+        const fresh = await renewGoogleToken(false, user.email.trim().toLowerCase());
+        if (fresh) { loginToken = fresh; valid = true; }
+      }
+      result.push({
+        label: 'Sessão de login',
+        state: valid ? 'ok' : 'warn',
+        detail: valid
+          ? 'Sessão de login do app válida — a nuvem aceita ler e gravar suas chaves.'
+          : 'Sessão de login do app expirada (o refresh token do canal NÃO foi afetado). Em Configurações, clique em "Entrar novamente e sincronizar".',
+      });
+    }
+
     // 2. Chaves de API — via Edge Function (user_settings não é legível pelo navegador)
     if (user?.email) {
       try {
@@ -106,10 +128,14 @@ export const AutomationHealth: React.FC = () => {
             : `${geminiCount} chave(s) Gemini para ${cloudEmail || appEmail}${hasPexels ? ' + Pexels' : ' — Pexels ausente, os visuais cairão para geração por IA'}.`,
         });
       } catch (e: any) {
+        const msg = String(e?.message || e);
+        const sessionExpired = /401|Token do Google|Sessão de login/i.test(msg);
         result.push({
           label: 'Chaves de API',
           state: 'fail',
-          detail: `Não foi possível ler as configurações: ${e?.message || e}. Faça deploy da Edge Function user-data e rode supabase/bootstrap.sql.`,
+          detail: sessionExpired
+            ? `Sessão de login do app expirada — as chaves não puderam ser lidas. Clique em "Entrar novamente e sincronizar" em Configurações. (O refresh token do canal continua salvo.)`
+            : `Não foi possível ler as configurações: ${msg}. Faça deploy da Edge Function user-data e rode supabase/bootstrap.sql.`,
         });
       }
     }
@@ -169,10 +195,14 @@ export const AutomationHealth: React.FC = () => {
             : `${disconnected.length} projeto(s) sem canal válido (${disconnected.map(p => p.title).join(', ')}). Os vídeos serão gerados e ficarão agendados até a reconexão.`,
         });
       } catch (e: any) {
+        const msg = String(e?.message || e);
+        const sessionExpired = /401|Token do Google|Sessão de login/i.test(msg);
         result.push({
           label: 'Canais do YouTube',
           state: 'warn',
-          detail: `Falha ao verificar: ${e?.message || e}`,
+          detail: sessionExpired
+            ? `Não foi possível verificar os canais: a sessão de login do app expirou. O refresh token do canal continua salvo na nuvem — renove a sessão em Configurações ("Entrar novamente e sincronizar").`
+            : `Falha ao verificar: ${msg}`,
         });
       }
     }
