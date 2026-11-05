@@ -701,6 +701,90 @@ async function normalizeThumbnailImage(base64) {
   }
 }
 
+// ─── Thumbnail a partir de um CORTE DO VÍDEO ────────────────────────────────
+// A geração de imagem do Gemini estoura cota com frequência (RPD minúsculo) e
+// já travou o pipeline várias vezes. A thumbnail agora é montada sobre um frame
+// real do vídeo renderizado, com o texto de clickbait desenhado por cima via
+// ffmpeg. A geração de imagem pelo Gemini vira APENAS fallback.
+
+function probeVideoDurationSeconds(file) {
+  return new Promise((resolve) => {
+    const p = spawn('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    p.stdout.on('data', (d) => { out += d.toString(); });
+    p.on('close', () => {
+      const v = parseFloat(out.trim().split(/\s+/)[0]);
+      resolve(Number.isFinite(v) && v > 0 ? v : 0);
+    });
+    p.on('error', () => resolve(0));
+  });
+}
+
+/** Escreve o texto num arquivo — drawtext com `textfile=` evita escapar aspas/colons. */
+function writeDrawtextFile(tmpDir, name, text) {
+  const file = path.join(tmpDir, name);
+  fs.writeFileSync(file, String(text || '').replace(/[\r\n]+/g, ' ').trim());
+  return file;
+}
+
+/**
+ * Desenha o clickbait sobre o frame: texto principal (branco, contorno preto),
+ * linha de apoio (amarela) e a barra de progresso falsa de 70% na base.
+ */
+async function drawThumbnailOverlay(framePng, outJpg, mainText, accentText) {
+  const font = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
+  const hasFont = fs.existsSync(font);
+  const fontArg = hasFont ? `fontfile=${font},` : '';
+  const mainFile = writeDrawtextFile(path.dirname(framePng), 'txt_main.txt', mainText);
+  const accentFile = writeDrawtextFile(path.dirname(framePng), 'txt_accent.txt', accentText);
+  const mainSize = String(mainText).length > 18 ? 68 : 92;
+  const filters = [
+    // faixa escura atrás dos textos, para legibilidade em qualquer cena
+    `drawbox=x=0:y=ih*0.06:w=iw:h=${Math.round(720 * 0.34)}:color=black@0.45:t=fill`,
+    `${fontArg}textfile=${mainFile}:fontsize=${mainSize}:fontcolor=white:borderw=8:bordercolor=black:x=(w-text_w)/2:y=ih*0.10`,
+    `${fontArg}textfile=${accentFile}:fontsize=52:fontcolor=0xFFD400:borderw=6:bordercolor=black:x=(w-text_w)/2:y=ih*0.10+${mainSize + 28}`,
+    `drawbox=x=0:y=ih-24:w=iw*0.70:h=24:color=0xFFD400@1:t=fill`,
+  ];
+  await runFfmpeg(['-y', '-i', framePng, '-vf', filters.join(','), '-frames:v', '1', '-q:v', '2', outJpg], 'thumbnail overlay');
+}
+
+/**
+ * Thumbnail final = frame do vídeo (~35% da duração, trecho de cena forte) +
+ * clickbait do briefing (Gemini TEXTO — cota de imagem não é necessária).
+ * Devolve base64 JPEG 1280x720 < 2 MB (normalização reaproveitada).
+ */
+async function buildThumbnailFromFrame(videoPath, videoTitle, projectData, script, tmpDir) {
+  const thumbCtx = {
+    channelTheme: projectData.channelTheme,
+    title: videoTitle,
+    language: projectData.language,
+    script,
+    fallbackSummary: (script?.segments || []).slice(0, 3).map((s) => s.narratorText).join(' ').slice(0, 500),
+  };
+  let brief;
+  try {
+    const raw = await withStepTimeout(geminiWithRetry(() => geminiGenerateJSON(buildThumbnailBriefPrompt(thumbCtx), 1024)), 25000, 'thumb_brief');
+    brief = parseThumbnailBrief(raw, thumbCtx);
+  } catch (err) {
+    log('⚠️', `Briefing da thumbnail falhou (${err.message}) — usando briefing local`);
+    brief = buildFallbackThumbnailBrief(thumbCtx);
+  }
+
+  const mainText = String(brief.hookWord || videoTitle.split(' ').slice(0, 4).join(' ')).toUpperCase().slice(0, 40);
+  const accentText = String(brief.directHint || '').toUpperCase().slice(0, 40);
+  if (!accentText) log('⚠️', 'Thumbnail sem linha de apoio — usando só o texto principal');
+
+  const dur = await probeVideoDurationSeconds(videoPath);
+  const at = dur > 3 ? Math.min(dur * 0.35, dur - 1) : 1;
+  const framePng = path.join(tmpDir, 'thumb_frame.png');
+  const outJpg = path.join(tmpDir, 'thumbnail.jpg');
+  await runFfmpeg(['-y', '-ss', String(at), '-i', videoPath, '-frames:v', '1', framePng], 'extrair frame da thumbnail');
+  await drawThumbnailOverlay(framePng, outJpg, mainText, accentText);
+  const base64 = await normalizeThumbnailImage(fs.readFileSync(outJpg).toString('base64'));
+  log('🖼️', `Thumbnail criada de um corte do vídeo em ${at.toFixed(1)}s: "${mainText}"`);
+  return { thumbnailBase64: base64, clickbaitText: `${mainText}${accentText ? ' ' + accentText : ''}`.trim(), brief };
+}
+
 async function normalizeAudioChunkToPcm(audioBuffer, mimeType, tmpDir, index) {
   const inputPath = path.join(tmpDir, `tts_${index}`);
   const outputPath = path.join(tmpDir, `tts_${index}.pcm`);
