@@ -6,7 +6,7 @@
  * do frontend passa por aqui, autenticado com o access_token do Google.
  */
 import { loadEncryptedString, loadEncryptedJSON } from './securityService';
-import { LOGIN_TOKEN_STORAGE_KEY } from './youtubeAuthService';
+import { LOGIN_TOKEN_STORAGE_KEY, isAccessTokenValid } from './youtubeAuthService';
 
 export interface ProjectAuthStatus {
   project_id: string;
@@ -96,24 +96,45 @@ async function postUserData(action: string, payload: Record<string, unknown>, to
   return { res, body };
 }
 
+// Cache curto da validação do token (evita tokeninfo a cada chamada).
+let lastTokenCheck: { token: string; at: number } | null = null;
+const TOKEN_CHECK_TTL_MS = 60_000;
+const isTokenFresh = async (token: string | null): Promise<boolean> => {
+  if (!token) return false;
+  if (lastTokenCheck && lastTokenCheck.token === token && Date.now() - lastTokenCheck.at < TOKEN_CHECK_TTL_MS) return true;
+  return isAccessTokenValid(token);
+};
+
 async function callUserData<T>(action: string, payload: Record<string, unknown> = {}): Promise<T> {
   if (!FUNCTIONS_URL) throw new Error('VITE_SUPABASE_URL não configurado');
   const appEmail = await getAppEmail();
   // expected_email: a função recusa gravar/ler se o token for de outra conta.
   payload = { ...payload, expected_email: appEmail || undefined };
   let token = await getGoogleToken();
+  // Antes de gastar a chamada: token vencido → renova em silêncio AGORA
+  // (antes só renovava depois de levar um 401, dobrando o erro).
+  if (token && !(await isTokenFresh(token))) token = await renewGoogleToken(false, appEmail || undefined);
   if (!token) token = await renewGoogleToken(false, appEmail || undefined);
-  if (!token) throw new Error('Sessão do Google ausente — faça login novamente');
+  if (!token) throw new Error('Sessão de login do app expirada — abra Configurações e clique em "Entrar novamente e sincronizar"');
+  lastTokenCheck = { token, at: Date.now() };
 
   let { res, body } = await postUserData(action, payload, token);
 
   // 401 = token expirado/revogado. Renova uma vez e repete.
   if (res.status === 401) {
     const fresh = await renewGoogleToken(false, appEmail || undefined);
-    if (fresh) ({ res, body } = await postUserData(action, payload, fresh));
+    if (fresh) {
+      token = fresh;
+      lastTokenCheck = { token, at: Date.now() };
+      ({ res, body } = await postUserData(action, payload, fresh));
+    }
   }
 
-  if (!res.ok) throw new Error(`${body?.error || 'user-data falhou'} (HTTP ${res.status})`);
+  if (!res.ok) {
+    const detail = `${body?.error || 'user-data falhou'} (HTTP ${res.status})`;
+    if (res.status === 401) throw new Error(`Sessão de login do app expirada — clique em "Entrar novamente e sincronizar" em Configurações. (${detail})`);
+    throw new Error(detail);
+  }
   return body as T;
 }
 

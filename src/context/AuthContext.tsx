@@ -121,6 +121,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             console.log('[Auth] Cached token expirado — descartado.');
           }
         }
+
+        // ── Renovação do token do LOGIN (identidade do app) ──────────────────
+        //
+        // Antes só o token do CANAL era renovado no boot; o do login vencia em
+        // ~1h e as leituras/gravações de chaves (user-data) falhavam com 401
+        // mesmo com o usuário visivelmente logado.
+        try {
+          const loginToken = await loadEncryptedString(LOGIN_TOKEN_STORAGE_KEY);
+          if (!loginToken || !(await isAccessTokenValid(loginToken))) {
+            const { renewGoogleToken } = await import('../services/userDataService');
+            const freshLogin = await renewGoogleToken(false, profile?.email);
+            if (freshLogin) console.log('[Auth] ✅ Token do LOGIN renovado silenciosamente na inicialização');
+          }
+        } catch (e) {
+          console.warn('[Auth] Renovação silenciosa do login indisponível agora:', e);
+        }
       } catch (e) {
         console.error('Auth init failed:', e);
       }
