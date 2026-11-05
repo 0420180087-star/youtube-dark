@@ -24,8 +24,10 @@ const BRIEF = {
 };
 const imageResponse = (data = 'AAAA', extra: Record<string, unknown> = {}) =>
   ({ candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data }, ...extra }] } }] });
-const isBriefCall = (req: any) => req.model === 'gemini-2.5-flash';
-const imageCalls = () => h.calls.filter((c) => c.model !== 'gemini-2.5-flash');
+// O nome do modelo de texto agora é dinâmico (ListModels). O briefing é a única
+// chamada com `contents` string; as de imagem mandam { parts: [...] }.
+const isBriefCall = (req: any) => typeof req.contents === 'string';
+const imageCalls = () => h.calls.filter((c) => typeof c.contents !== 'string');
 const httpError = (status: number, message: string) => Object.assign(new Error(message), { status });
 
 const OPTS = {
