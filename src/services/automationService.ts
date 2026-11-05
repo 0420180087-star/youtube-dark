@@ -11,6 +11,7 @@ import {
   generateVoiceover,
   generateDarkAmbience,
   generateGeminiThumbnail,
+  generateComposedThumbnail,
   thumbnailErrorReason,
   decodeAudioData,
   mergeAudioBuffers,
@@ -389,25 +390,36 @@ export async function stepGenerateThumbnail(
   callbacks.onStepStart('thumbnail', 'Gerando thumbnail com clickbait...');
   const scriptSummary = script.segments.slice(0, 3).map((s: any) => s.narratorText).join(' ').slice(0, 500);
 
-  // A thumbnail NUNCA deve travar ou derrubar o pipeline: teto de tempo e erro tratado.
-  // É SEMPRE a thumbnail do prompt-base faceless/clickbait criada INTEIRA pelo Gemini — a MESMA lógica
-  // do GitHub Actions (100% automático) e do editor manual. Não há plano B com outro estilo: se o
-  // Gemini não gerar a imagem, o motivo real (ex.: chave sem faturamento para imagem) aparece no log.
+  // A thumbnail vem de um CORTE DO VÍDEO: usa a imagem real de uma das cenas
+  // já usadas no vídeo e compõe o clickbait por cima em canvas — sem geração
+  // de imagem do Gemini (cota de imagem minúscula não trava mais o passo).
+  // Somente sem cenas disponíveis recorre à imagem do Gemini.
+  const sceneImageUrls = (video.visualScenes || []).map((s) => s.imageUrl).filter(Boolean);
   let thumbnailUrl: string | undefined;
   try {
     thumbnailUrl = await Promise.race([
-      generateGeminiThumbnail({
-        title: video.title,
-        channelTheme: project.channelTheme,
-        language: project.language,
-        script,
-        scriptSummary,
-      }),
+      sceneImageUrls.length > 0
+        ? generateComposedThumbnail({
+            title: video.title,
+            tone: project.defaultTone,
+            language: project.language,
+            scriptSummary,
+            script,
+            channelTheme: project.channelTheme,
+            sceneImageUrls,
+          })
+        : generateGeminiThumbnail({
+            title: video.title,
+            channelTheme: project.channelTheme,
+            language: project.language,
+            script,
+            scriptSummary,
+          }),
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error('thumbnail_step_timeout')), 120_000)),
     ]);
   } catch (err: unknown) {
     const reason = thumbnailErrorReason(err);
-    console.error('[Pipeline] Thumbnail NÃO gerada pelo Gemini:', reason);
+    console.error('[Pipeline] Thumbnail NÃO gerada:', reason);
     callbacks.onProgress('thumbnail', `⚠️ Thumbnail não gerada: ${reason}`);
     thumbnailUrl = undefined;
   }
