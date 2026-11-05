@@ -2186,19 +2186,8 @@ async function processProject(projectRow) {
     const scenes = await stepVisuals(script, data, isResume ? resumeVideo?.visualScenes : undefined, voiceResult.segmentSeconds);
     await updateRunnerVideo(projectId, data, videoId, { visualScenes: scenes, status: 'VIDEO_GENERATED' }, 'Visuals saved');
 
-    // Step 5: Thumbnail (optional — does not break pipeline)
-    currentStep = 'thumbnail';
-    await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Gerando thumbnail', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
-    let thumbnailBase64 = null;
-    try {
-      const thumbResult = await stepThumbnail(idea.topic, script, data);
-      thumbnailBase64 = thumbResult?.thumbnailBase64 || null;
-      if (thumbnailBase64) await updateRunnerVideo(projectId, data, videoId, { thumbnailUrl: `data:image/jpeg;base64,${thumbnailBase64}` }, 'Thumbnail saved');
-      if (thumbnailBase64) log('🖼️', 'Thumbnail image generated');
-      else log('⚠️', 'Thumbnail not generated, continuing without it');
-    } catch {
-      log('⚠️', 'Thumbnail failed, continuing without it');
-    }
+    // Step 5 (thumbnail) agora vem DEPOIS do render — a thumbnail é feita de um
+    // corte do vídeo renderizado. Ver bloco pós-render.
 
     // Step 6: Metadata — reused on resume
     currentStep = 'metadata';
@@ -2222,7 +2211,36 @@ async function processProject(projectRow) {
     // Step 7: Render Video (now receives audio!)
     currentStep = 'render';
     await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Renderizando vídeo no runner headless', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
-    const renderResult = await stepRenderVideo(scenes, script, audioBase64, thumbnailBase64, data, audioMimeType, narrationSeconds);
+    const renderResult = await stepRenderVideo(scenes, script, audioBase64, null, data, audioMimeType, narrationSeconds);
+
+    // Step 7.5: Thumbnail a partir de um CORTE do vídeo renderizado — sem
+    // geração de imagem do Gemini (cota de imagem minúscula não trava mais).
+    // Fallback: método antigo (imagem do Gemini) só se o corte falhar.
+    currentStep = 'thumbnail';
+    await safeInsertAutopilotLog({ project_id: projectId, status: 'running', message: 'Gerando thumbnail a partir do vídeo', step: currentStep, video_title: videoTitle, runner: 'github-actions' });
+    let thumbnailBase64 = null;
+    try {
+      const frameThumb = await withStepTimeout(
+        buildThumbnailFromFrame(renderResult.videoPath, videoTitle, data, script, renderResult.tmpDir),
+        90_000,
+        'thumbnail_from_frame',
+      );
+      thumbnailBase64 = frameThumb.thumbnailBase64 || null;
+      log('🖼️', `Thumbnail de corte do vídeo pronta: "${frameThumb.clickbaitText}"`);
+    } catch (err) {
+      log('⚠️', `Thumbnail de corte do vídeo falhou (${err.message}) — tentando o método antigo (imagem do Gemini)`);
+      try {
+        const thumbResult = await stepThumbnail(idea.topic, script, data);
+        thumbnailBase64 = thumbResult?.thumbnailBase64 || null;
+      } catch {
+        log('⚠️', 'Thumbnail não gerada — o YouTube usará um quadro do vídeo');
+      }
+    }
+    if (thumbnailBase64) {
+      await updateRunnerVideo(projectId, data, videoId, { thumbnailUrl: `data:image/jpeg;base64,${thumbnailBase64}` }, 'Thumbnail saved');
+    } else {
+      log('⚠️', 'Continuando sem thumbnail');
+    }
 
     if (!data.scheduleSettings) data.scheduleSettings = {};
     data.scheduleSettings.nextScheduledRun = calculateNextRunIso(data.scheduleSettings);
