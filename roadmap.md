@@ -1,5 +1,11 @@
 # Roadmap — automação (plano 2026-09-09)
 
+## Melhorias de criação de vídeos (plano aprovado 2026-11-08)
+- [ ] Fase 1: roteiro conversacional e cadência/pronúncia IA consistentes nos três fluxos
+- [ ] Fase 2: B-roll temático, ritmo de cortes e tratamento cinematográfico coerentes
+- [ ] Fase 3: legendas temporizadas com destaque, títulos e diagramas conceituais nos dois renderizadores
+- [ ] Fase 4: testes e validação da criação manual/assistida, automação no navegador e GitHub Actions
+
 - [x] F1 Settings: Salvar só confirma com leitura de volta
 - [ ] F1 AutomationHealth: e-mail + contagem de chaves
 - [x] F2 Runner: stepIdea sem duplicata (similaridade, fallback variado, STANDBY curto)

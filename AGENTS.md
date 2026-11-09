@@ -1,2 +1,3 @@
 - Gemini model names are never hardcoded: text/TTS models come from `src/services/geminiModelResolver.ts` (ListModels + cache, 404 re-resolves) — Google retires models without notice.
 - Thumbnails are built from a frame of the rendered video (runner: ffmpeg overlay; browser: scene image + canvas); Gemini image generation is only a fallback — image quota is tiny and blocked the pipeline.
+- Shared cross-mode script, pronunciation, caption and visual-timing rules belong in `src/services/videoCraft.ts`, imported by browser flows and the TSX GitHub runner, so outputs do not drift between render paths.

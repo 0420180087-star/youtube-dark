@@ -29,6 +29,21 @@ export interface ScriptSegment {
   estimatedDuration: number;
 }
 
+export interface ConceptCard {
+  id: string;
+  segmentIndex: number;
+  title: string;
+  items: string[];
+  relationship?: string;
+}
+
+export interface CaptionCue {
+  text: string;
+  start: number;
+  end: number;
+  segmentIndex: number;
+}
+
 export interface ScriptData {
   title: string;
   description: string;
@@ -40,6 +55,7 @@ export interface ScriptData {
   estimatedDurationMinutes?: number;
   totalWords?: number;
   durationWarning?: string;
+  conceptCards?: ConceptCard[];
 }
 
 export type VisualEffect = 
@@ -125,6 +141,8 @@ export interface Video {
   audioUrl?: string;
   backgroundMusicUrl?: string;
   segmentTimestamps?: number[];
+  /** Measured spoken duration per narration segment, excluding the breath gap. */
+  segmentAudioDurations?: number[];
   visualScenes?: VisualScene[];
   
   thumbnailUrl?: string;

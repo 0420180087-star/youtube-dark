@@ -45,12 +45,14 @@ export const buildSlotVisualPrompt = (
   const variation = SLOT_VARIATIONS[(segmentIndex + slotIndex) % SLOT_VARIATIONS.length];
   const narratorContext = cleanText(segment.narratorText).slice(0, 220);
   const section = cleanText(segment.sectionTitle) || `Section ${segmentIndex + 1}`;
+  const historical = /\b(17th|18th|19th|16th|century|centuries|ancient|medieval|renaissance|baroque|philosoph|descartes|século|antigo|antiga|medieval|renascimento|barroco|filósofo|filosofia|manuscrito|reinado|império)\b/i.test(`${basePrompt} ${narratorContext} ${section} ${channelTheme || ''}`);
 
   return [
     cleanText(basePrompt) || section,
     `section: ${section}`,
     channelTheme ? `topic: ${cleanText(channelTheme)}` : '',
     narratorContext ? `story context: ${narratorContext}` : '',
+    historical ? 'historically grounded imagery: period-appropriate portrait, archival engraving, handwritten manuscript, old map, or historically accurate architecture; avoid modern luxury interiors and unrelated contemporary stock footage' : '',
     `visual variation ${slotIndex + 1} of ${totalSlots}: ${variation}`,
     'must be visually distinct from previous shots',
   ].filter(Boolean).join('. ');
