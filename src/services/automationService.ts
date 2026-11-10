@@ -24,6 +24,7 @@ import { renderVideoHeadless } from './renderService';
 import { uploadVideoToYouTube } from './youtubeService';
 import { buildSlotVisualPrompt, collectPexelsIds, getSegmentVisualPrompts } from './visualSceneService';
 import { resolveVisualSlots, VisualSlotSpec } from './visualsPipeline';
+import { buildSegmentStarts } from './videoCraft';
 
 export interface PipelineCallbacks {
   onStepStart: (step: AutoPilotStep, message: string) => void;
@@ -211,7 +212,7 @@ export async function stepGenerateVoice(
             await new Promise(r => setTimeout(r, 700 * t + Math.random() * 400));
           }
           ab = await decodeAudioData(
-            await generateVoiceover(seg.narratorText, voice, tone),
+            await generateVoiceover(seg.narratorText, voice, tone, undefined, project.language || 'Portuguese (BR)'),
             ctx
           );
           break;
@@ -232,23 +233,24 @@ export async function stepGenerateVoice(
       totalDur += ab.duration;
 
       if (i < script.segments.length - 1) {
-        timestamps.push(totalDur);
         const silence = createSilence(ctx, SEGMENT_PAUSE);
         audioBuffers.push(silence);
         totalDur += SEGMENT_PAUSE;
       }
     }
 
-
     const merged = mergeAudioBuffers(audioBuffers, ctx);
     const speed = clampNarrationSpeed(project.narrationSpeed);
     let finalAudio = merged;
-    let finalTimestamps = timestamps;
+    const spokenDurations = script.segments.map((_, index) => audioBuffers[index * 2]?.duration || audioBuffers[index]?.duration || 0);
+    let finalSpokenDurations = spokenDurations;
+    let finalTimestamps = buildSegmentStarts(spokenDurations, SEGMENT_PAUSE);
     let finalTotal = totalDur;
     if (speed > 1.005) {
       try {
         finalAudio = changeAudioSpeed(merged, ctx, speed);
-        finalTimestamps = timestamps.map(t => t / speed);
+        finalTimestamps = buildSegmentStarts(spokenDurations.map((duration) => duration / speed), SEGMENT_PAUSE / speed);
+        finalSpokenDurations = spokenDurations.map((duration) => duration / speed);
         finalTotal = totalDur / speed;
         callbacks.onProgress('voice', `Narração acelerada em ${speed.toFixed(2)}x`);
       } catch (err: any) {
@@ -257,9 +259,9 @@ export async function stepGenerateVoice(
     }
     const audioUrl = audioBufferToBase64(finalAudio);
 
-    callbacks.updateVideo(project.id, video.id, { audioUrl, segmentTimestamps: finalTimestamps, status: ProjectStatus.AUDIO_GENERATED });
+    callbacks.updateVideo(project.id, video.id, { audioUrl, segmentTimestamps: finalTimestamps, segmentAudioDurations: finalSpokenDurations, status: ProjectStatus.AUDIO_GENERATED });
     callbacks.onStepComplete('voice');
-    return { audioUrl, timestamps: finalTimestamps, totalDuration: finalTotal };
+    return { audioUrl, timestamps: finalTimestamps, segmentAudioDurations: finalSpokenDurations, totalDuration: finalTotal };
   } finally {
     // Always release AudioContext — prevents accumulation of Web Audio nodes
     // across pipeline runs, including on error paths.

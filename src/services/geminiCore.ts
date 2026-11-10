@@ -9,6 +9,7 @@ import { ScriptData, GenerateScriptParams, VideoMetadata, ScriptSegment } from "
 import { decryptData } from "./securityService";
 import { getTextModel, getTtsModel, isModelUnavailableError, extractModelNameFromError, markModelUnavailable, setKeyProvider } from "./geminiModelResolver";
 import { buildIdeasPrompt } from "./ideaEngine";
+import { getConversationalScriptGuidance, getNarrationDeliveryNotes, normalizeConceptCards } from "./videoCraft";
 
 // =============================================
 // HELPERS
@@ -678,6 +679,7 @@ export const generateVideoScript = async (params: GenerateScriptParams): Promise
 Channel Theme: "${params.channelTheme}". Target Tone: "${params.tone}".
 ${languagePrompt}
 ${toneInstruction}
+${getConversationalScriptGuidance(params.language || 'the requested language')}
 
 TARGET: ${params.targetDuration}
 Total words needed: ${spec.minWords}–${spec.maxWords} words across ALL segments
@@ -692,8 +694,9 @@ RULES for narratorText (MOST IMPORTANT):
 - Full storytelling sentences like a documentary voiceover
 - estimatedDuration per segment = (word count / 150) * 60 seconds
 
-OUTPUT: Valid JSON only with fields: title, description, brainstorming[], narrativeOutline[], segments[]
-Each segment: sectionTitle, visualDescriptions[], narratorText, estimatedDuration`;
+OUTPUT: Valid JSON only with fields: title, description, brainstorming[], narrativeOutline[], segments[], conceptCards[]
+Each segment: sectionTitle, visualDescriptions[], narratorText, estimatedDuration
+conceptCards: zero to three concise on-screen diagrams. Each has segmentIndex, title, items (2-3 terms), and relationship. Include only where a real relationship is explained in the script; do not add facts absent from it.`;
 
       let prompt = `Topic: "${params.topic}".\n`;
       if (params.additionalContext) { prompt += `Context: ${params.additionalContext}\n`; }
@@ -729,8 +732,20 @@ Each segment: sectionTitle, visualDescriptions[], narratorText, estimatedDuratio
                           }
                       }
                   }
+                  ,conceptCards: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        segmentIndex: { type: Type.INTEGER },
+                        title: { type: Type.STRING },
+                        items: { type: Type.ARRAY, items: { type: Type.STRING } },
+                        relationship: { type: Type.STRING },
+                      },
+                    },
+                  }
               },
-              propertyOrdering: ["brainstorming", "narrativeOutline", "title", "description", "segments"]
+              propertyOrdering: ["brainstorming", "narrativeOutline", "title", "description", "segments", "conceptCards"]
           };
       }
 
@@ -786,6 +801,8 @@ Each segment: sectionTitle, visualDescriptions[], narratorText, estimatedDuratio
               throw new Error("Generated script was incomplete. Please try again.");
           }
       }
+
+      script.conceptCards = normalizeConceptCards(script.conceptCards, script.segments?.length || 24);
 
       // Recalculate estimatedDuration from real word count — never trust the model's guess
       if (script.segments?.length > 0) {
@@ -873,13 +890,13 @@ export const generateMissingNarratorTexts = async (topic: string, segments: Scri
 
 export const generateSingleNarratorText = async (topic: string, sectionTitle: string, visualDescriptions: string[], tone: string, language: string = 'English'): Promise<string> => {
     return executeGeminiRequest(async (ai) => {
-        const prompt = `Topic: "${topic}"\nSection: "${sectionTitle}"\nVisuals: ${visualDescriptions.join(', ')}\nTone: ${tone}\nLanguage: ${language}\n\nWrite the narrator script for this section.`;
+        const prompt = `Topic: "${topic}"\nSection: "${sectionTitle}"\nVisuals: ${visualDescriptions.join(', ')}\nTone: ${tone}\nLanguage: ${language}\n\n${getConversationalScriptGuidance(language)}\nWrite only the spoken narrator text for this section, with an engaging opening beat and a natural transition from the surrounding ideas.`;
 
         const response = await ai.models.generateContent({
             model: await getTextModel(),
             contents: prompt,
             config: {
-                systemInstruction: "You are a professional scriptwriter. Write only the spoken narrator text.",
+                systemInstruction: `You are a professional YouTube storyteller. Write only spoken narrator text. ${getConversationalScriptGuidance(language)}`,
             }
         });
 
@@ -1188,6 +1205,7 @@ export const generateVoiceover = async (
     voiceName: string = 'Fenrir',
     tone: string = 'Cinematic',
     sessionId?: string,
+    language: string = 'Portuguese (BR)',
 ): Promise<ArrayBuffer> => {
     if (!text || !text.trim()) return new ArrayBuffer(0);
 
@@ -1207,7 +1225,7 @@ export const generateVoiceover = async (
     let lastErr: any = null;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         try {
-            return await ttsOnce(cleanText, finalVoice, styleInstruction, sessionId);
+            return await ttsOnce(cleanText, finalVoice, `${styleInstruction}\n${getNarrationDeliveryNotes(cleanText, language)}`, sessionId);
         } catch (err: any) {
             lastErr = err;
             const reason = err?.ttsReason;
@@ -1226,8 +1244,8 @@ export const generateVoiceover = async (
         const parts = splitTextAtSentence(cleanText);
         if (parts) {
             console.warn(`[TTS] Split recursivo (${cleanText.length} chars → ${parts[0].length} + ${parts[1].length})`);
-            const a = await generateVoiceover(parts[0], finalVoice, tone, sessionId);
-            const b = await generateVoiceover(parts[1], finalVoice, tone, sessionId);
+            const a = await generateVoiceover(parts[0], finalVoice, tone, sessionId, language);
+            const b = await generateVoiceover(parts[1], finalVoice, tone, sessionId, language);
             return concatArrayBuffers([a, b]);
         }
     }

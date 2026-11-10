@@ -463,7 +463,7 @@ export const ProjectEditor: React.FC = () => {
               totDur = segs.reduce((a, b) => a + b.estimatedDuration, 0); 
           }
           
-          const starts = video!.segmentTimestamps || segs.map((_, i) => i * (totDur / segs.length)); 
+          const starts = video!.segmentTimestamps || buildSegmentStarts(segs.map(segment => segment.estimatedDuration)); 
           const maxMediaDur = Math.max(2, project?.maxMediaDurationSeconds ?? 6);
 
           // ── Build the full slot plan up front (unchanged timing math) ──────
@@ -1302,6 +1302,9 @@ export const ProjectEditor: React.FC = () => {
 
   if (!project || !video) return <div className="p-8 text-center text-slate-500">Project or Video not found</div>;
   const activeScene = video.visualScenes?.[currentSceneIndex];
+  const captionCues = video.script?.segments?.length && video.segmentTimestamps?.length && video.segmentAudioDurations?.length
+    ? buildVideoCaptionCues(video.script.segments, video.segmentTimestamps, video.segmentAudioDurations)
+    : [];
   const isProcessing = isGeneratingScript || isGeneratingAudio || isGeneratingVisuals || isRenderingVideo || isUploading;
   const processingLabel = isGeneratingScript ? 'Thinking...' : isGeneratingAudio ? `Synthesizing...` : isGeneratingVisuals ? `Dreaming...` : isRenderingVideo ? `${renderStatus} (${renderProgress}%)` : isUploading ? `Uploading ${uploadProgress}%` : 'Processing';
 
@@ -1456,6 +1459,7 @@ export const ProjectEditor: React.FC = () => {
                     musicVolume={musicVolume}
                     isGeneratingMusic={isGeneratingMusic}
                     currentSegmentIndex={currentSegmentIndex}
+                    captionCues={captionCues}
                     lastValidImage={lastValidImage}
                     studioCanvasRef={studioCanvasRef}
                     onPlay={playAudio}
